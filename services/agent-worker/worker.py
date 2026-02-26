@@ -4,8 +4,11 @@ import sys
 import logging
 import subprocess
 import json
+import time
 from pathlib import Path
 from langfuse import Langfuse
+import jwt
+import requests
 
 # Add parent directory to path for shared imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -26,6 +29,67 @@ if os.getenv('LANGFUSE_PUBLIC_KEY') and os.getenv('LANGFUSE_SECRET_KEY'):
     logger.info("Langfuse observability enabled")
 else:
     logger.info("Langfuse not configured - skipping observability")
+
+
+# Cache for GitHub App token
+_github_token_cache = {'token': None, 'expires_at': 0}
+
+
+def get_github_app_token():
+    """Generate a GitHub App installation access token (cached for 10 minutes)"""
+    # Check cache first
+    if _github_token_cache['token'] and time.time() < _github_token_cache['expires_at']:
+        return _github_token_cache['token']
+    
+    app_id = os.getenv('GITHUB_APP_ID')
+    private_key = os.getenv('GITHUB_PRIVATE_KEY')
+    installation_id = os.getenv('GITHUB_INSTALLATION_ID')
+    
+    if not all([app_id, private_key, installation_id]):
+        logger.info("GitHub App credentials not found, falling back to PAT")
+        return os.getenv('GITHUB_PAT')
+    
+    try:
+        # Generate JWT
+        now = int(time.time())
+        payload = {
+            'iat': now,
+            'exp': now + 600,  # 10 minutes
+            'iss': app_id
+        }
+        
+        jwt_token = jwt.encode(payload, private_key, algorithm='RS256')
+        
+        # Get installation access token
+        headers = {
+            'Authorization': f'Bearer {jwt_token}',
+            'Accept': 'application/vnd.github.v3+json'
+        }
+        
+        response = requests.post(
+            f'https://api.github.com/app/installations/{installation_id}/access_tokens',
+            headers=headers,
+            timeout=10
+        )
+        
+        if response.status_code != 201:
+            logger.error(f"Failed to get installation token: {response.status_code} {response.text}")
+            logger.info("Falling back to PAT")
+            return os.getenv('GITHUB_PAT')
+        
+        token = response.json()['token']
+        
+        # Cache token for 9 minutes (expires in 10, but refresh early)
+        _github_token_cache['token'] = token
+        _github_token_cache['expires_at'] = time.time() + 540
+        
+        logger.info("Successfully generated GitHub App installation token")
+        return token
+        
+    except Exception as e:
+        logger.error(f"Error generating GitHub App token: {e}")
+        logger.info("Falling back to PAT")
+        return os.getenv('GITHUB_PAT')
 
 
 def setup_claude_code_settings():
@@ -192,9 +256,9 @@ def login_claude_code():
 
 def setup_github_mcp():
     """Configure Claude Code to use GitHub's official MCP server (one-time setup)"""
-    github_pat = os.getenv('GITHUB_PAT')
-    if not github_pat:
-        raise ValueError("GITHUB_PAT environment variable not set")
+    github_token = get_github_app_token()
+    if not github_token:
+        raise ValueError("No GitHub authentication available (neither App nor PAT)")
     
     try:
         # Remove existing config if present
@@ -205,7 +269,7 @@ def setup_github_mcp():
         )
         
         # Add GitHub MCP server using remote HTTP endpoint
-        logger.info("Configuring GitHub MCP server...")
+        logger.info("Configuring GitHub MCP server with GitHub App token...")
         
         # Use the command-line approach with scope
         result = subprocess.run(
@@ -215,7 +279,7 @@ def setup_github_mcp():
                 '--transport', 'http',
                 'github',
                 'https://api.githubcopilot.com/mcp',
-                '-H', f'Authorization: Bearer {github_pat}'
+                '-H', f'Authorization: Bearer {github_token}'
             ],
             capture_output=True,
             text=True,
@@ -228,7 +292,7 @@ def setup_github_mcp():
         
         logger.info("GitHub MCP server configured successfully")
         
-        # Now manually edit the config to add autoApprove
+        # Now manually edit the config to add autoApprove and disable parallel calls
         import json
         from pathlib import Path
         
@@ -240,11 +304,15 @@ def setup_github_mcp():
             # Add autoApprove to github server
             if 'github' in config.get('mcpServers', {}):
                 config['mcpServers']['github']['autoApprove'] = ['*']
+                # Add settings to prevent parallel tool calls for review operations
+                config['mcpServers']['github']['settings'] = {
+                    'sequentialReviewComments': True
+                }
                 
                 with open(config_file, 'w') as f:
                     json.dump(config, f, indent=2)
                 
-                logger.info("Added auto-approve to GitHub MCP server config")
+                logger.info("Added auto-approve and sequential review settings to GitHub MCP server config")
         
     except subprocess.TimeoutExpired:
         logger.error("Timeout while configuring GitHub MCP server")
@@ -258,27 +326,49 @@ def run_claude_code(repo: str, issue_number: int, command: str, auto_review: boo
     """Run Claude Code CLI to process the GitHub issue"""
     
     if auto_review:
-        # Specific prompt for automatic PR reviews
+        # Specific prompt for automatic PR reviews - matches Gemini Code Assist pattern
         prompt = f"""You are reviewing PR #{issue_number} in {repo}.
 
-Provide a thorough code review:
+Provide a thorough code review following Gemini Code Assist's two-step approach:
 
-1. Post a general review comment summarizing your findings
-2. Add inline review comments on specific lines of code that need attention
+STEP 1: Post a summary comment
+- Use add_issue_comment to post a "Code Review" summary in the conversation tab
+- Include overall assessment and key findings
+- This is a regular issue comment
 
-For inline comments, use the GitHub MCP tools to:
-- Quote the relevant code
-- Explain the issue or suggestion
-- Provide specific recommendations
+STEP 2: Add inline review comments (ONLY if there are specific code issues)
+Use the THREE-STEP review workflow:
+
+a) Create pending review:
+   - Tool: pull_request_review_write
+   - method: "create"
+   - Do NOT include "event" parameter (this keeps it pending)
+   - Do NOT include "comments" array
+   - body: Brief note like "Detailed review findings"
+
+b) Add each inline comment:
+   - Tool: add_comment_to_pending_review
+   - Call this tool ONCE for each inline comment you want to add
+   - Parameters:
+     * path: file path (e.g., "backend/helloworld.ts")
+     * line: the line number in the NEW version of the file
+     * side: "RIGHT" (for new code)
+     * body: your comment with severity (e.g., "**High Priority**: Add JSDoc comment")
+   - Make these calls SEQUENTIALLY, not in parallel
+
+c) Submit the review:
+   - Tool: pull_request_review_write
+   - method: "submit_pending"
+   - event: "COMMENT" (or "REQUEST_CHANGES" if critical)
+   - body: Final summary
 
 Focus on:
 - Code quality and best practices
 - Potential bugs or issues
 - Security concerns
 - Performance considerations
-- Suggestions for improvement
 
-Use both general comments and line-specific review comments for a comprehensive review."""
+If code looks good, just post the summary comment (Step 1) without inline review."""
     elif auto_triage:
         # Specific prompt for automatic issue triage
         prompt = f"""You are triaging issue #{issue_number} in {repo}.
@@ -362,7 +452,7 @@ def _execute_claude_cli(prompt: str, repo: str) -> str:
     """Execute Claude CLI command"""
     env = {
         **os.environ,
-        'GITHUB_PAT': os.getenv('GITHUB_PAT'),
+        'GITHUB_PAT': get_github_app_token(),  # Use GitHub App token
     }
     
     # Add Anthropic API key (try both env var names)
@@ -381,6 +471,7 @@ def _execute_claude_cli(prompt: str, repo: str) -> str:
         logger.info(f"Found CLAUDE.md in {repo}, including in context")
         prompt = f"{claude_md_content}\n\n---\n\n{prompt}"
     
+    logger.info("Executing Claude CLI command...")
     result = subprocess.run(
         ['claude', '-p', prompt],
         capture_output=True,
@@ -394,6 +485,12 @@ def _execute_claude_cli(prompt: str, repo: str) -> str:
         logger.error(f"Claude Code failed with return code {result.returncode}")
         logger.error(f"stdout: {result.stdout}")
         logger.error(f"stderr: {result.stderr}")
+        
+        # Check for specific MCP tool errors
+        if 'mcp__github' in result.stderr or 'mcp__github' in result.stdout:
+            logger.error("GitHub MCP tool error detected - check token permissions and review workflow")
+            logger.error("Common issues: 1) Token expired 2) Missing PR review permissions 3) Parallel tool calls for review comments")
+        
         raise RuntimeError(error_msg)
     
     logger.info("Claude Code completed successfully")
@@ -405,14 +502,14 @@ def get_claude_md(repo: str) -> str:
     try:
         import requests
         
-        github_pat = os.getenv('GITHUB_PAT')
-        if not github_pat:
+        github_token = get_github_app_token()
+        if not github_token:
             return ""
         
         # Try to fetch CLAUDE.md from repo
         url = f"https://api.github.com/repos/{repo}/contents/CLAUDE.md"
         headers = {
-            "Authorization": f"Bearer {github_pat}",
+            "Authorization": f"Bearer {github_token}",
             "Accept": "application/vnd.github.v3.raw"
         }
         
