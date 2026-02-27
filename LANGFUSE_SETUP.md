@@ -35,11 +35,11 @@ This starts:
 - ClickHouse (trace/observation storage)
 - MinIO (S3-compatible blob storage)
 - Langfuse worker (async processing)
-- Langfuse web UI (http://localhost:3000)
+- Langfuse web UI (http://localhost:7500)
 
 ### Login to Langfuse
 
-1. Open http://localhost:3000
+1. Open http://localhost:7500
 2. Login with:
    - Email: `admin@example.com`
    - Password: `admin123`
@@ -72,7 +72,7 @@ The hook is configured automatically in `~/.claude/settings.json` when the worke
 
 ## Viewing Traces
 
-1. Go to http://localhost:3000
+1. Go to http://localhost:7500
 2. Navigate to "Traces"
 3. Look for:
    - `github_agent_request` - High-level request traces
@@ -137,8 +137,8 @@ For production deployment:
 - Check PostgreSQL: `docker-compose logs langfuse-db`
 - Check ClickHouse: `docker-compose logs langfuse-clickhouse`
 
-**Port 3000 already in use**
-- Change the port mapping in docker-compose.yml: `"3001:3000"`
+**Port 7500 already in use**
+- Change the port mapping in docker-compose.yml: `"7501:3000"`
 
 ## Disabling Langfuse
 

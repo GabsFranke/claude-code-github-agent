@@ -63,7 +63,7 @@ Go to your repository Settings → Webhooks → Add webhook:
 
 5. **Access Langfuse (optional):**
 
-View agent traces and debug tool calls at http://localhost:3000
+View agent traces and debug tool calls at http://localhost:7500
 - Email: `admin@example.com`
 - Password: `admin123`
 

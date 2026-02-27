@@ -471,7 +471,8 @@ def _execute_claude_cli(prompt: str, repo: str) -> str:
         logger.info(f"Found CLAUDE.md in {repo}, including in context")
         prompt = f"{claude_md_content}\n\n---\n\n{prompt}"
     
-    logger.info("Executing Claude CLI command...")
+    logger.info("Executing Claude CLI command (this may take several minutes for large PRs)...")
+    
     result = subprocess.run(
         ['claude', '-p', prompt],
         capture_output=True,
@@ -483,13 +484,12 @@ def _execute_claude_cli(prompt: str, repo: str) -> str:
     if result.returncode != 0:
         error_msg = f"Claude Code execution failed: {result.stderr or result.stdout}"
         logger.error(f"Claude Code failed with return code {result.returncode}")
-        logger.error(f"stdout: {result.stdout}")
-        logger.error(f"stderr: {result.stderr}")
+        logger.error(f"stdout: {result.stdout[:500]}")
+        logger.error(f"stderr: {result.stderr[:500]}")
         
         # Check for specific MCP tool errors
         if 'mcp__github' in result.stderr or 'mcp__github' in result.stdout:
             logger.error("GitHub MCP tool error detected - check token permissions and review workflow")
-            logger.error("Common issues: 1) Token expired 2) Missing PR review permissions 3) Parallel tool calls for review comments")
         
         raise RuntimeError(error_msg)
     
@@ -551,7 +551,7 @@ def process_request(repo: str, issue_number: int, command: str, auto_review: boo
                 # Run Claude Code
                 response = run_claude_code(repo, issue_number, command, auto_review, auto_triage)
                 
-                logger.info(f"Claude Code response: {response[:200]}...")
+                logger.info(f"Claude Code response: {response[:200]}..." if len(response) > 200 else f"Claude Code response: {response}")
                 logger.info("Request processed successfully")
                 
                 # Update trace with success

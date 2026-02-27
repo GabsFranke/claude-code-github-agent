@@ -74,7 +74,7 @@ services:
     image: langfuse/langfuse-worker:3
     environment:
       DATABASE_URL: postgresql://langfuse:langfuse@langfuse-db:5432/langfuse
-      NEXTAUTH_URL: http://localhost:3000
+      NEXTAUTH_URL: http://localhost:7500
       SALT: changeme-generate-a-salt-here
       ENCRYPTION_KEY: 66dcdfca97e12b2225f09fefdafc54b7563bdaca9efc95d490b3aae290b40d8f
       TELEMETRY_ENABLED: "false"
@@ -112,10 +112,10 @@ services:
   langfuse:
     image: langfuse/langfuse:3
     ports:
-      - "3000:3000"
+      - "7500:3000"
     environment:
       DATABASE_URL: postgresql://langfuse:langfuse@langfuse-db:5432/langfuse
-      NEXTAUTH_URL: http://localhost:3000
+      NEXTAUTH_URL: http://localhost:7500
       NEXTAUTH_SECRET: changeme-generate-a-secret-here
       SALT: changeme-generate-a-salt-here
       ENCRYPTION_KEY: 66dcdfca97e12b2225f09fefdafc54b7563bdaca9efc95d490b3aae290b40d8f

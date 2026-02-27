@@ -58,7 +58,7 @@ You should see:
 - `redis` - Running and healthy (shared by agent queue and Langfuse)
 - `langfuse-db` - PostgreSQL database for Langfuse
 - `langfuse-clickhouse` - ClickHouse for storing traces/observations
-- `langfuse` - Observability UI on http://localhost:3000
+- `langfuse` - Observability UI on http://localhost:7500
 - `webhook` - Running on port 8080
 - `worker` - Running and waiting for messages
 
@@ -68,7 +68,7 @@ Langfuse provides visibility into your agent's prompts, tool calls, and response
 
 With the new setup, Langfuse auto-creates everything on first start:
 
-1. Open http://localhost:3000 in your browser
+1. Open http://localhost:7500 in your browser
 2. Login with:
    - Email: `admin@example.com`
    - Password: `admin123`
