@@ -55,11 +55,33 @@ docker-compose ps
 ```
 
 You should see:
-- `redis` - Running and healthy
+- `redis` - Running and healthy (shared by agent queue and Langfuse)
+- `langfuse-db` - PostgreSQL database for Langfuse
+- `langfuse-clickhouse` - ClickHouse for storing traces/observations
+- `langfuse` - Observability UI on http://localhost:7500
 - `webhook` - Running on port 8080
 - `worker` - Running and waiting for messages
 
-### 4. Expose Webhook with ngrok
+### Step 4: Setup Langfuse (Optional but Recommended)
+
+Langfuse provides visibility into your agent's prompts, tool calls, and responses.
+
+With the new setup, Langfuse auto-creates everything on first start:
+
+1. Open http://localhost:7500 in your browser
+2. Login with:
+   - Email: `admin@example.com`
+   - Password: `admin123`
+3. The project and API keys are already configured in `.env`:
+   ```bash
+   LANGFUSE_PUBLIC_KEY=lf_pk_github_agent_public
+   LANGFUSE_SECRET_KEY=lf_sk_github_agent_secret
+   ```
+4. Restart worker to enable tracing: `docker-compose restart worker`
+
+See [LANGFUSE_SETUP.md](LANGFUSE_SETUP.md) for detailed instructions.
+
+### 5. Expose Webhook with ngrok
 
 ```bash
 # In a new terminal

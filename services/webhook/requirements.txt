@@ -1,8 +1,8 @@
-fastapi>=0.109.0
-uvicorn>=0.27.0
-pydantic>=2.5.0
-python-dotenv>=1.0.0
-PyGithub>=2.1.1
-google-adk>=0.1.0
-mcp>=1.0.0
-redis>=5.0.0
+fastapi>=0.133.1
+uvicorn>=0.41.0
+pydantic>=2.12.5
+python-dotenv>=1.2.1
+PyGithub>=2.8.1
+google-adk>=1.25.1
+mcp>=1.26.0
+redis>=7.2.1

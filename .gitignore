@@ -63,8 +63,3 @@ private-key.pem
 
 # ngrok
 ngrok.yml
-
-# Unused/old code
-services/github-mcp-server/
-infrastructure/
-tests/

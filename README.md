@@ -9,6 +9,7 @@ AI-powered GitHub agent that automatically reviews pull requests and responds to
 - 🔧 **Code Analysis** - Answers questions about your codebase
 - 🚀 **Autonomous Actions** - Can create branches, make changes, and open PRs
 - 📝 **Per-repo Customization** - Support for CLAUDE.md configuration files
+- 📊 **Full Observability** - Self-hosted Langfuse integration for tracing tool calls and reasoning
 
 ## Quick Start
 
@@ -60,6 +61,14 @@ Go to your repository Settings → Webhooks → Add webhook:
 - Secret: (same as GITHUB_WEBHOOK_SECRET in .env)
 - Events: Select "Issue comments" and "Pull requests"
 
+5. **Access Langfuse (optional):**
+
+View agent traces and debug tool calls at http://localhost:7500
+- Email: `admin@example.com`
+- Password: `admin123`
+
+See [LANGFUSE_SETUP.md](LANGFUSE_SETUP.md) for details.
+
 ## Usage
 
 ### Automatic PR Reviews
@@ -109,17 +118,23 @@ GitHub Event → Webhook → Redis Queue → Worker → Claude Code CLI
 - **Worker** - Spawns Claude Code CLI instances to process requests
 - **Message Queue** - Redis (self-hosted) or Google Pub/Sub (cloud)
 - **Claude Code CLI** - Autonomous coding agent with GitHub MCP access
+- **Langfuse** - Self-hosted observability platform for tracing and debugging
 
 ## Configuration
 
 ### Environment Variables
 
+**Required:**
 - `ANTHROPIC_AUTH_TOKEN`: Your Anthropic API key
-- `ANTHROPIC_BASE_URL`: (Optional) Override API endpoint for alternative providers
-- `ANTHROPIC_DEFAULT_SONNET_MODEL`: (Optional) Override model name
 - `GITHUB_PAT`: GitHub Personal Access Token with `repo` scope
 - `GITHUB_WEBHOOK_SECRET`: Secret for webhook signature verification
+
+**Optional:**
+- `ANTHROPIC_BASE_URL`: Override API endpoint for alternative providers
+- `ANTHROPIC_DEFAULT_SONNET_MODEL`: Override model name
 - `QUEUE_TYPE`: `redis` (self-hosted) or `pubsub` (cloud)
+- `LANGFUSE_PUBLIC_KEY`: Langfuse API key (pre-configured for self-hosted)
+- `LANGFUSE_SECRET_KEY`: Langfuse secret key (pre-configured for self-hosted)
 
 ### Using Alternative AI Providers
 
@@ -179,6 +194,7 @@ Deploy to Google Cloud Run with Pub/Sub. See [ARCHITECTURE.md](ARCHITECTURE.md) 
 
 - **[START.md](START.md)** - Detailed setup guide
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** - Technical architecture
+- **[LANGFUSE_SETUP.md](LANGFUSE_SETUP.md)** - Observability and tracing setup
 
 ## License
 

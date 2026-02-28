@@ -83,7 +83,13 @@ async def webhook(request: Request):
         # Parse payload
         data = await request.json()
         
-        logger.info(f"Received {event_type} event")
+        action = data.get("action", "N/A")
+        logger.info(f"Received {event_type} event (action: {action})")
+        
+        # Explicitly ignore push events (these happen on every commit)
+        if event_type == "push":
+            logger.debug(f"Ignoring push event to {data.get('ref', 'unknown ref')}")
+            return {"status": "ignored", "message": "Push events are not handled"}
         
         # Handle issues event (when issue is opened)
         if event_type == "issues" and data.get("action") == "opened":
@@ -141,28 +147,38 @@ async def webhook(request: Request):
                 await queue.publish(request_data)
                 
                 return {"status": "accepted", "message": "Agent is processing your request"}
+            else:
+                logger.debug(f"Comment on issue #{data['issue']['number']} does not contain /agent command")
         
-        # Handle pull_request events (automatic review)
-        if event_type == "pull_request" and data.get("action") in ["opened", "synchronize"]:
-            pr_number = data["pull_request"]["number"]
-            pr_title = data["pull_request"]["title"]
-            pr_author = data["pull_request"]["user"]["login"]
+        # Handle pull_request events (automatic review only when opened)
+        if event_type == "pull_request":
+            action = data.get("action")
             
-            # Auto-review command
-            request_data = {
-                "repository": data["repository"]["full_name"],
-                "issue_number": pr_number,  # PRs are issues too
-                "command": f"Review this pull request: {pr_title}",
-                "user": pr_author,
-                "auto_review": True
-            }
-            
-            logger.info(f"Auto-reviewing PR #{pr_number} in {request_data['repository']}")
-            
-            # Publish to queue
-            await queue.publish(request_data)
-            
-            return {"status": "accepted", "message": "Agent will review this PR"}
+            # Only auto-review when PR is first opened, ignore updates/syncs
+            if action == "opened":
+                pr_number = data["pull_request"]["number"]
+                pr_title = data["pull_request"]["title"]
+                pr_author = data["pull_request"]["user"]["login"]
+                
+                # Auto-review command
+                request_data = {
+                    "repository": data["repository"]["full_name"],
+                    "issue_number": pr_number,  # PRs are issues too
+                    "command": f"Review this pull request: {pr_title}",
+                    "user": pr_author,
+                    "auto_review": True
+                }
+                
+                logger.info(f"Auto-reviewing PR #{pr_number} in {request_data['repository']}")
+                
+                # Publish to queue
+                await queue.publish(request_data)
+                
+                return {"status": "accepted", "message": "Agent will review this PR"}
+            else:
+                # Log ignored actions for debugging
+                logger.info(f"Ignoring pull_request action '{action}' for PR #{data['pull_request']['number']}")
+                return {"status": "ignored", "message": f"PR action '{action}' not handled"}
         
         return {"status": "ignored", "message": "Event not handled"}
     

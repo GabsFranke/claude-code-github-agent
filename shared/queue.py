@@ -31,8 +31,9 @@ class MessageQueue(ABC):
 class RedisQueue(MessageQueue):
     """Redis-based message queue (for self-hosted)."""
     
-    def __init__(self, redis_url: str = None, queue_name: str = "agent-requests"):
+    def __init__(self, redis_url: str = None, queue_name: str = "agent-requests", password: str = None):
         self.redis_url = redis_url or os.getenv("REDIS_URL", "redis://localhost:6379")
+        self.password = password or os.getenv("REDIS_PASSWORD")
         self.queue_name = queue_name
         self.redis = None
         self._running = False
@@ -41,7 +42,11 @@ class RedisQueue(MessageQueue):
         """Connect to Redis."""
         if self.redis is None:
             import redis.asyncio as redis
-            self.redis = await redis.from_url(self.redis_url, decode_responses=True)
+            self.redis = await redis.from_url(
+                self.redis_url, 
+                decode_responses=True,
+                password=self.password
+            )
     
     async def publish(self, message: Dict[str, Any]) -> None:
         """Publish a message to Redis list."""
@@ -146,4 +151,5 @@ def get_queue() -> MessageQueue:
         return PubSubQueue()
     else:
         logger.info("Using Redis message queue")
-        return RedisQueue()
+        redis_password = os.getenv("REDIS_PASSWORD")
+        return RedisQueue(password=redis_password)
