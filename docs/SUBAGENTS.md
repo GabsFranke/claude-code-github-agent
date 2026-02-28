@@ -134,6 +134,12 @@ When using Langfuse, subagent executions are tracked as nested spans within the 
 - How long each took
 - What results they returned
 
+The system is configured with two Langfuse hooks:
+- **Stop hook**: Logs main agent completion
+- **SubagentStop hook**: Logs each subagent completion
+
+This means every subagent execution (architecture-reviewer, security-reviewer, bug-hunter, code-quality-reviewer) will be logged to Langfuse automatically when it completes.
+
 ## Best Practices
 
 1. **Use subagents for focused tasks**: Don't delegate everything

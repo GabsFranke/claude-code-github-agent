@@ -168,9 +168,20 @@ def setup_claude_code_settings():
                         }
                     ]
                 }
+            ],
+            "SubagentStop": [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "python3 /app/hooks/langfuse_hook.py",
+                            "timeout": 30
+                        }
+                    ]
+                }
             ]
         }
-        logger.info("Configured Langfuse Stop hook for Claude Code")
+        logger.info("Configured Langfuse Stop and SubagentStop hooks for Claude Code")
     
     # Check if we have custom env vars to apply
     custom_env = {}
@@ -345,39 +356,33 @@ def run_claude_code(repo: str, issue_number: int, command: str, auto_review: boo
     """Run Claude Code CLI to process the GitHub issue"""
     
     if auto_review:
-        # Coordinator prompt that delegates to specialized subagents
+        # Prompt that encourages Claude to use specialized subagents
         prompt = f"""You are coordinating a comprehensive code review for PR #{issue_number} in {repo}.
+
+You have access to specialized review subagents that will help you analyze this PR thoroughly:
+- architecture-reviewer: For design patterns, SOLID principles, and system architecture
+- security-reviewer: For vulnerabilities, auth issues, and data exposure
+- bug-hunter: For potential bugs, edge cases, and error handling
+- code-quality-reviewer: For style, readability, and maintainability
 
 Your workflow:
 
 STEP 1: Delegate to specialized subagents
-Run these subagents in parallel to analyze the PR from different perspectives:
-
-a) Architecture review:
-   claude subagent architecture-reviewer "Review the architectural decisions and design patterns in this PR"
-
-b) Security review:
-   claude subagent security-reviewer "Identify security vulnerabilities and risks in this PR"
-
-c) Bug hunting:
-   claude subagent bug-hunter "Find potential bugs, edge cases, and error handling issues in this PR"
-
-d) Code quality review:
-   claude subagent code-quality-reviewer "Review code quality, style, and maintainability in this PR"
+Use the specialized subagents to analyze the PR from different perspectives. Each subagent will return JSON with their findings. You should delegate to all four subagents to get comprehensive coverage.
 
 STEP 2: Synthesize results
-Collect and analyze the JSON outputs from all subagents. Prioritize findings by severity.
+Collect and analyze the JSON outputs from all subagents. Prioritize findings by severity (critical > high > medium > low). Group findings by category.
 
 STEP 3: Post summary comment
-Use add_issue_comment to post a comprehensive "Code Review" summary:
-- Overall assessment
-- Key findings by category (Security, Bugs, Architecture, Code Quality)
-- Count of issues by severity
+Use add_issue_comment to post a comprehensive "Code Review" summary in the conversation tab:
+- Overall assessment of the PR
+- Key findings organized by category (Security, Bugs, Architecture, Code Quality)
+- Count of issues by severity level
 - Positive notes about good practices
-- This is a regular issue comment in the conversation tab
+- This should be a regular issue comment
 
 STEP 4: Add inline review comments (if there are specific issues)
-Use the THREE-STEP review workflow:
+If the subagents found specific issues, use the THREE-STEP review workflow:
 
 a) Create pending review:
    - Tool: pull_request_review_write
@@ -406,7 +411,7 @@ c) Submit the review:
 
 If the PR looks good with no significant issues, just post the summary comment (Step 3) without inline review.
 
-Remember: Subagents return JSON with findings. Parse and synthesize their outputs."""
+Start by delegating to the specialized subagents to gather their analysis."""
     elif auto_triage:
         # Specific prompt for automatic issue triage
         prompt = f"""You are triaging issue #{issue_number} in {repo}.

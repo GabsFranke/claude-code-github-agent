@@ -178,6 +178,8 @@ For information about subagents, see [SUBAGENTS.md](docs/SUBAGENTS.md).
 
 For PR review flow details, see [docs/PR_REVIEW_FLOW.md](docs/PR_REVIEW_FLOW.md).
 
+For debugging subagents, see [docs/DEBUGGING_SUBAGENTS.md](docs/DEBUGGING_SUBAGENTS.md).
+
 ```
 GitHub Event → Webhook → Redis Queue → Worker → Claude Code CLI
                                                       ↓
