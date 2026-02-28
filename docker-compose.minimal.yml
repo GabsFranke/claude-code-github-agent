@@ -1,0 +1,50 @@
+services:
+  redis:
+    image: redis:7-alpine
+    command: --requirepass myredissecret
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "--no-auth-warning", "-a", "myredissecret", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  webhook:
+    build:
+      context: .
+      dockerfile: services/webhook/Dockerfile
+    ports:
+      - "10000:8080"
+    environment:
+      - GITHUB_PAT=${GITHUB_PAT}
+      - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET}
+      - QUEUE_TYPE=redis
+      - REDIS_URL=redis://redis:6379
+      - REDIS_PASSWORD=myredissecret
+      - PORT=8080
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: .
+      dockerfile: services/agent-worker/Dockerfile
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - ANTHROPIC_AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN}
+      - ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL}
+      - ANTHROPIC_DEFAULT_HAIKU_MODEL=${ANTHROPIC_DEFAULT_HAIKU_MODEL}
+      - ANTHROPIC_DEFAULT_SONNET_MODEL=${ANTHROPIC_DEFAULT_SONNET_MODEL}
+      - ANTHROPIC_DEFAULT_OPUS_MODEL=${ANTHROPIC_DEFAULT_OPUS_MODEL}
+      - GITHUB_PAT=${GITHUB_PAT}
+      - GITHUB_APP_ID=${GITHUB_APP_ID}
+      - GITHUB_INSTALLATION_ID=${GITHUB_INSTALLATION_ID}
+      - GITHUB_PRIVATE_KEY=${GITHUB_PRIVATE_KEY}
+      - QUEUE_TYPE=redis
+      - REDIS_URL=redis://redis:6379
+      - REDIS_PASSWORD=myredissecret
+    depends_on:
+      redis:
+        condition: service_healthy

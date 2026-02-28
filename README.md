@@ -2,6 +2,12 @@
 
 AI-powered GitHub agent that automatically reviews pull requests and responds to commands using Claude Code CLI and GitHub's official MCP server.
 
+> [!WARNING]
+> This agent has full write access to your repositories and can autonomously create branches, commit changes, and open PRs. The current implementation auto-approves all GitHub MCP tool calls (configured with `autoApprove: ['*']`) to allow Claude Code to operate without manual confirmation. Fine-grained permission controls are not yet implemented. Use with caution and test in a sandbox repository first.
+
+> [!IMPORTANT]
+> This project is currently self-hosted only. You'll need to run it on your own infrastructure with Docker or manually. Cloud deployment options may be added in the future.
+
 ## Features
 
 - 🤖 **Automatic PR Reviews** - Reviews code quality, security, and best practices when PRs are opened
@@ -16,29 +22,80 @@ AI-powered GitHub agent that automatically reviews pull requests and responds to
 ### Prerequisites
 
 - Docker & Docker Compose (recommended) OR Node.js 18+ & Python 3.11+
-- GitHub Personal Access Token with `repo` scope ([create one](https://github.com/settings/personal-access-tokens/new))
+- GitHub App with appropriate permissions ([create one](https://github.com/settings/apps/new))
 - Anthropic API Key ([get from console](https://console.anthropic.com/))
-- ngrok (for local testing) or cloud hosting
+- ngrok (for local webhook testing)
 
-### Setup
+### Setup (Self-Hosting)
 
-1. **Configure environment:**
+1. **Get your ngrok URL:**
+
+```bash
+# Start ngrok (container doesn't need to be running yet)
+ngrok http 10000
+```
+
+Copy the forwarding URL (e.g., `https://abc123.ngrok.io`)
+
+2. **Create a GitHub App:**
+
+Go to GitHub Settings → Developer settings → GitHub Apps → New GitHub App:
+- **GitHub App name**: Choose a unique name (e.g., "My Claude Agent")
+- **Homepage URL**: Your repository or any URL
+- **Webhook URL**: `https://your-ngrok-url.ngrok.io/webhook`
+- **Webhook secret**: Generate a random string (you'll use this as GITHUB_WEBHOOK_SECRET in .env)
+- **Permissions**:
+  - Repository permissions:
+    - Actions: Read-only (optional, for workflow insights)
+    - Contents: Read & write
+    - Issues: Read & write
+    - Pull requests: Read & write
+    - Metadata: Read-only
+- **Subscribe to events**: 
+  - Discussion comment
+  - Issue comment
+  - Issues
+  - Pull request
+  - Pull request review
+  - Pull request review comment
+  - Pull request review thread
+  - Push
+  - Workflow job
+- Click "Create GitHub App"
+- Note your **App ID** from the app settings page
+- Generate and download a **private key** (save the .pem file)
+- Install the app on your repository (Install App → select repositories)
+- Note your **Installation ID** from the URL after installation
+
+> Note: GitHub Apps are required for the agent to review its own PRs and interact as a bot user. Personal Access Tokens are not supported.
+
+3. **Configure environment:**
 
 ```bash
 # Copy example config
 cp .env.example .env
 
 # Edit .env with your credentials:
-# - ANTHROPIC_AUTH_TOKEN (from Anthropic Console)
-# - GITHUB_PAT (Personal Access Token with repo scope)
-# - GITHUB_WEBHOOK_SECRET (any random string)
+ANTHROPIC_AUTH_TOKEN=(from Anthropic Console)
+GITHUB_APP_ID=(from your GitHub App settings)
+GITHUB_INSTALLATION_ID=(from installation URL)
+GITHUB_PRIVATE_KEY=(contents of the .pem file)
+GITHUB_WEBHOOK_SECRET=(the secret you set when creating the app)
 ```
 
-2. **Run with Docker:**
+4. **Run with Docker:**
 
 ```bash
-# Start all services
+# Option 1: Minimal setup (without Langfuse observability)
+docker-compose -f docker-compose.minimal.yml up --build -d
+
+# Option 2: Full setup with Langfuse (recommended for debugging)
 docker-compose up --build -d
+
+# Optional: Scale workers for parallel processing
+docker-compose up --scale worker=2 -d
+# or with minimal setup:
+docker-compose -f docker-compose.minimal.yml up --scale worker=2 -d
 
 # View logs
 docker-compose logs -f
@@ -47,21 +104,7 @@ docker-compose logs -f
 docker-compose down
 ```
 
-3. **Expose webhook with ngrok:**
-
-```bash
-ngrok http 8080
-```
-
-4. **Configure GitHub webhook:**
-
-Go to your repository Settings → Webhooks → Add webhook:
-- Payload URL: `https://your-ngrok-url.ngrok.io/webhook`
-- Content type: `application/json`
-- Secret: (same as GITHUB_WEBHOOK_SECRET in .env)
-- Events: Select "Issue comments" and "Pull requests"
-
-5. **Access Langfuse (optional):**
+5. **Access Langfuse (optional, only if using full setup):**
 
 View agent traces and debug tool calls at http://localhost:7500
 - Email: `admin@example.com`
@@ -97,7 +140,6 @@ Add a `CLAUDE.md` file to your repository root with custom instructions:
 # Agent Instructions
 
 When working on this project:
-- Always run tests before creating PRs
 - Follow the existing code style
 - Update documentation if you change APIs
 ```
@@ -116,9 +158,9 @@ GitHub Event → Webhook → Redis Queue → Worker → Claude Code CLI
 **Components:**
 - **Webhook Service** - Receives GitHub events (FastAPI)
 - **Worker** - Spawns Claude Code CLI instances to process requests
-- **Message Queue** - Redis (self-hosted) or Google Pub/Sub (cloud)
+- **Message Queue** - Redis for job distribution
 - **Claude Code CLI** - Autonomous coding agent with GitHub MCP access
-- **Langfuse** - Self-hosted observability platform for tracing and debugging
+- **Langfuse** - Optional self-hosted observability platform for tracing and debugging
 
 ## Configuration
 
@@ -126,15 +168,16 @@ GitHub Event → Webhook → Redis Queue → Worker → Claude Code CLI
 
 **Required:**
 - `ANTHROPIC_AUTH_TOKEN`: Your Anthropic API key
-- `GITHUB_PAT`: GitHub Personal Access Token with `repo` scope
 - `GITHUB_WEBHOOK_SECRET`: Secret for webhook signature verification
+- `GITHUB_APP_ID`: Your GitHub App ID
+- `GITHUB_INSTALLATION_ID`: Installation ID from the app installation URL
+- `GITHUB_PRIVATE_KEY`: Contents of the private key .pem file
 
 **Optional:**
 - `ANTHROPIC_BASE_URL`: Override API endpoint for alternative providers
 - `ANTHROPIC_DEFAULT_SONNET_MODEL`: Override model name
-- `QUEUE_TYPE`: `redis` (self-hosted) or `pubsub` (cloud)
-- `LANGFUSE_PUBLIC_KEY`: Langfuse API key (pre-configured for self-hosted)
-- `LANGFUSE_SECRET_KEY`: Langfuse secret key (pre-configured for self-hosted)
+- `LANGFUSE_PUBLIC_KEY`: Langfuse API key (pre-configured for self-hosted setup)
+- `LANGFUSE_SECRET_KEY`: Langfuse secret key (pre-configured for self-hosted setup)
 
 ### Using Alternative AI Providers
 
@@ -161,11 +204,7 @@ simple-claude-code-github-agent/
 └── docs/                    # Documentation
 ```
 
-### Manual Setup (without Docker)
-
-See [START.md](START.md) for detailed instructions.
-
-### Testing
+### Troubleshooting
 
 ```bash
 # View logs
@@ -178,23 +217,6 @@ docker-compose logs -f webhook
 # Check status
 docker-compose ps
 ```
-
-## Deployment
-
-### Self-Hosted (Development)
-Uses Docker Compose with Redis:
-```bash
-docker-compose up -d
-```
-
-### Cloud (Production)
-Deploy to Google Cloud Run with Pub/Sub. See [ARCHITECTURE.md](ARCHITECTURE.md) for details.
-
-## Documentation
-
-- **[START.md](START.md)** - Detailed setup guide
-- **[ARCHITECTURE.md](ARCHITECTURE.md)** - Technical architecture
-- **[LANGFUSE_SETUP.md](LANGFUSE_SETUP.md)** - Observability and tracing setup
 
 ## License
 

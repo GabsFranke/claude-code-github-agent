@@ -70,7 +70,7 @@ Simple Claude Code GitHub Agent is a lightweight system that uses Claude Code CL
 
 ### 2. Message Queue
 
-**Technology:** Redis (self-hosted) or Google Pub/Sub (cloud)  
+**Technology:** Redis (self-hosted)  
 **Purpose:** Decouples webhook from worker for async processing
 
 **Benefits:**
@@ -118,7 +118,7 @@ Simple Claude Code GitHub Agent is a lightweight system that uses Claude Code CL
 
 **Technology:** HTTP-based MCP server by GitHub  
 **Endpoint:** `https://api.githubcopilot.com/mcp`  
-**Authentication:** GitHub Personal Access Token
+**Authentication:** GitHub App installation token (recommended) or Personal Access Token
 
 **Tools Provided:**
 - `read_file` - Read file contents
@@ -156,63 +156,54 @@ Simple Claude Code GitHub Agent is a lightweight system that uses Claude Code CL
 9. Claude Code posts explanation as comment
 10. Developer sees response on GitHub
 
-## Deployment Options
+## Deployment
 
-### Self-Hosted (Development)
+See [README.md](README.md) for setup instructions.
 
-**Infrastructure:**
-- Docker Compose
-- Redis container
-- Local ngrok tunnel
+**Current Status:** Self-hosted only with Docker Compose and Redis.
 
-**Pros:**
-- Easy to set up
-- Free (except API costs)
-- Full control
+**Architecture:**
+- Minimal setup: webhook + worker + Redis
+- Full setup: Adds Langfuse observability stack (PostgreSQL, ClickHouse, MinIO)
+- Scaling: `docker-compose up --scale worker=N`
 
-**Cons:**
-- Not production-ready
-- Requires always-on machine
-- Manual scaling
-
-### Cloud (Production)
-
-**Infrastructure:**
-- Google Cloud Run (webhook + worker)
-- Google Pub/Sub (message queue)
-- Cloud Load Balancer
-
-**Pros:**
-- Auto-scaling
-- High availability
-- Managed infrastructure
-
-**Cons:**
-- More complex setup
-- Cloud costs
 
 ## Security
 
 ### Authentication
 
-- **GitHub:** Personal Access Token with `repo` scope
+- **GitHub:** GitHub App (recommended) with installation token, or Personal Access Token with `repo` scope
 - **Anthropic:** API key for Claude Code
-- **Webhooks:** HMAC signature verification
+- **Webhooks:** HMAC signature verification using `GITHUB_WEBHOOK_SECRET`
 
 ### Permissions
 
+> [!WARNING]
+> Claude Code is configured with broad permissions to enable autonomous operation.
+
 Claude Code permissions configured in `~/.claude/settings.json`:
-- Allow: Read, Write, Edit, Bash, MCP tools
-- Deny: Empty (trust Claude Code's judgment)
-- Ask: Empty (auto-approve allowed tools)
+- **Allow:** Read, Write, Edit, Bash, MCP tools (including `mcp__github`)
+- **Deny:** Empty
+- **Ask:** Empty (auto-approve all allowed tools)
+
+GitHub MCP server configured in `~/.claude/mcp.json`:
+- **autoApprove:** `['*']` (all GitHub MCP tools auto-approved)
+- **sequentialReviewComments:** `true` (prevents parallel review comment issues)
+
+**Security Implications:**
+- Agent can create branches, commit code, and open PRs without confirmation
+- Agent can read any file in repositories where the GitHub App is installed
+- Agent can execute bash commands within the worker container
+- Fine-grained permission controls are not yet implemented
 
 ### Best Practices
 
-- Store secrets in environment variables
+- **Test in sandbox repositories first**
+- Store all secrets in environment variables
 - Use webhook signature verification
-- Limit GitHub PAT scope to required repos
-- Review Claude Code's actions in logs
-- Use CLAUDE.md to set repository-specific rules
+- Install GitHub App only on required repositories
+- Use CLAUDE.md to set repository-specific rules and constraints
+- Monitor logs and Langfuse traces for unexpected behavior
 
 ## Scalability
 
@@ -230,30 +221,31 @@ Claude Code permissions configured in `~/.claude/settings.json`:
 
 ### Limits
 
-- GitHub API rate limits: 5000 requests/hour (with PAT)
-- Anthropic API rate limits: Varies by plan
-- Claude Code: One request at a time per worker
+- GitHub API rate limits: 5000 requests/hour (with GitHub App or PAT)
+- Anthropic API rate limits: Varies by plan and model
+- Claude Code: One request at a time per worker instance
+- Worker scaling: Use `docker-compose up --scale worker=N` for parallel processing
 
-## Monitoring
+## Monitoring & Observability
+
+### Langfuse Integration (Optional)
+
+When using the full Docker Compose setup, Langfuse provides complete observability:
+- **Traces:** End-to-end execution flow
+- **Generations:** Claude Code CLI invocations
+- **Tool Calls:** GitHub MCP tool usage
+- **Debugging:** Error tracking and performance analysis
+
+See [LANGFUSE_SETUP.md](LANGFUSE_SETUP.md) for details.
 
 ### Logs
 
-- Webhook: Request/response logs
-- Worker: Claude Code output, errors
-- Queue: Message counts, processing times
-
-### Metrics
-
-- Requests processed
-- Success/failure rates
-- Average processing time
-- Queue depth
+Standard Docker Compose logging available for all services. See README for log commands.
 
 ## Future Enhancements
 
-- [ ] Support for GitHub App authentication (bot identity)
-- [ ] Multi-repository management dashboard
-- [ ] Custom review rules per repository
+- [ ] Fine-grained permission controls for MCP tools
+- [ ] Cloud deployment options (Google Cloud Run, AWS Lambda)
+- [ ] Custom review rules per repository (beyond CLAUDE.md)
 - [ ] Integration with CI/CD pipelines
-- [ ] Slack/Discord notifications
-- [ ] Analytics and insights
+- [ ] Rate limiting and cost controls
