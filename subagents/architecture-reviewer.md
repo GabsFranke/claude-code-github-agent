@@ -1,7 +1,7 @@
 ---
 name: architecture-reviewer
 description: Expert in reviewing architectural decisions, design patterns, and system design. Use proactively when reviewing pull requests or significant code changes to evaluate SOLID principles, coupling, and architectural consistency.
-tools: mcp__github
+tools: mcp__github__*
 model: inherit
 ---
 

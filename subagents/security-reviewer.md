@@ -1,7 +1,7 @@
 ---
 name: security-reviewer
 description: Security expert for identifying vulnerabilities, authentication issues, and data exposure risks. Use proactively when reviewing pull requests, especially those touching authentication, data handling, or API endpoints.
-tools: mcp__github
+tools: mcp__github__*
 model: inherit
 ---
 

@@ -1,7 +1,7 @@
 ---
 name: code-quality-reviewer
 description: Code quality specialist for reviewing style, readability, maintainability, and documentation. Use proactively when reviewing pull requests to ensure code meets quality standards and best practices.
-tools: mcp__github
+tools: mcp__github__*
 model: inherit
 ---
 

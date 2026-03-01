@@ -1,7 +1,7 @@
 ---
 name: bug-hunter
 description: Specialist in finding potential bugs, edge cases, and error handling issues. Use proactively when reviewing pull requests to identify null checks, race conditions, and logic errors before they reach production.
-tools: mcp__github
+tools: mcp__github__*
 model: inherit
 ---
 
