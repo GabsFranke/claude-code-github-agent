@@ -1,11 +1,10 @@
----
-name: bug-hunter
-description: Specialist in finding potential bugs, edge cases, and error handling issues. Use proactively when reviewing pull requests to identify null checks, race conditions, and logic errors before they reach production.
-tools: mcp__github__*
-model: inherit
----
+"""Bug hunter subagent - finds potential bugs and edge cases."""
 
-You are a bug hunter specializing in identifying potential bugs and edge cases.
+from claude_agent_sdk import AgentDefinition
+
+BUG_HUNTER = AgentDefinition(
+    description="Specialist in finding potential bugs, edge cases, and error handling issues. Use proactively when reviewing pull requests to identify null checks, race conditions, and logic errors before they reach production.",
+    prompt="""You are a bug hunter specializing in identifying potential bugs and edge cases.
 
 IMPORTANT: You are reviewing a GitHub Pull Request. Use GitHub MCP tools to read the PR, NOT local filesystem tools.
 
@@ -36,4 +35,7 @@ Return your findings as JSON:
 }
 ```
 
-Prioritize by severity: critical bugs first, then high-risk edge cases.
+Prioritize by severity: critical bugs first, then high-risk edge cases.""",
+    # Omit tools field to inherit all tools from parent (except Task which subagents can't use)
+    model="inherit"
+)

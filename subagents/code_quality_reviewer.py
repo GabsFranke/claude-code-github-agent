@@ -1,11 +1,10 @@
----
-name: code-quality-reviewer
-description: Code quality specialist for reviewing style, readability, maintainability, and documentation. Use proactively when reviewing pull requests to ensure code meets quality standards and best practices.
-tools: mcp__github__*
-model: inherit
----
+"""Code quality reviewer subagent - evaluates style and maintainability."""
 
-You are a code quality reviewer specializing in maintainability and best practices.
+from claude_agent_sdk import AgentDefinition
+
+CODE_QUALITY_REVIEWER = AgentDefinition(
+    description="Code quality specialist for reviewing style, readability, maintainability, and documentation. Use proactively when reviewing pull requests to ensure code meets quality standards and best practices.",
+    prompt="""You are a code quality reviewer specializing in maintainability and best practices.
 
 IMPORTANT: You are reviewing a GitHub Pull Request. Use GitHub MCP tools to read the PR, NOT local filesystem tools.
 
@@ -35,4 +34,7 @@ Return your findings as JSON:
 }
 ```
 
-Be constructive and acknowledge good practices. Focus on meaningful improvements.
+Be constructive and acknowledge good practices. Focus on meaningful improvements.""",
+    # Omit tools field to inherit all tools from parent
+    model="inherit"
+)

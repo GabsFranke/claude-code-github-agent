@@ -16,6 +16,7 @@ import anyio
 from claude_agent_sdk import (
     ClaudeSDKClient,
     ClaudeAgentOptions,
+    AgentDefinition,
     AssistantMessage,
     TextBlock,
     HookMatcher,
@@ -25,6 +26,7 @@ from claude_agent_sdk import (
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from shared.queue import get_queue
+from subagents import AGENTS  # Import custom agent definitions
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -436,26 +438,17 @@ async def _execute_claude_sdk(prompt: str, repo: str) -> str:
     # Use fresh token to handle long-running sessions
     github_token = get_fresh_github_token()
 
-    # Validate MCP server URL (security check)
-    mcp_url = "https://api.githubcopilot.com/mcp"
-    allowed_mcp_hosts = ["api.githubcopilot.com", "api.github.com"]
-
-    from urllib.parse import urlparse
-
-    parsed_url = urlparse(mcp_url)
-    if parsed_url.hostname not in allowed_mcp_hosts:
-        raise ValueError(f"MCP server URL not in allowlist: {parsed_url.hostname}")
-    if parsed_url.scheme != "https":
-        raise ValueError(f"MCP server must use HTTPS, got: {parsed_url.scheme}")
-
     # Setup MCP server configuration (HTTP transport)
     mcp_servers = {
         "github": {
             "type": "http",  # Explicitly specify HTTP transport
-            "url": mcp_url,
+            "url": "https://api.githubcopilot.com/mcp",
             "headers": {"Authorization": f"Bearer {github_token}"},
         }
     }
+    
+    # Use imported agent definitions (cleaner than parsing markdown files)
+    logger.info(f"Loaded {len(AGENTS)} custom agents: {list(AGENTS.keys())}")
 
     # Setup Langfuse hooks if configured
     hooks = {}
@@ -525,17 +518,17 @@ async def _execute_claude_sdk(prompt: str, repo: str) -> str:
             "Configured Langfuse Stop and SubagentStop hooks for Claude Agent SDK"
         )
 
-    # Configure agent options with MCP servers and filesystem agents
+    # Configure agent options with MCP servers and programmatically defined agents
     options = ClaudeAgentOptions(
         allowed_tools=[
             "Task",
             "mcp__github__*",
         ],  # Task for subagents, all GitHub MCP tools
         permission_mode="acceptEdits",  # Auto-accept file edits
-        mcp_servers=mcp_servers,
+        mcp_servers=mcp_servers,  # Pass MCP config
+        agents=AGENTS,  # Pass agents from subagents package
         hooks=hooks,
         max_turns=50,  # Allow multiple turns for complex tasks
-        setting_sources=["user"]
     )
 
     logger.info(
@@ -723,23 +716,9 @@ def main():
         logger.error(f"Failed to setup GitHub MCP: {e}")
         logger.info("Continuing anyway - will retry on first request")
 
-    # Verify custom agents are available
-    agents_dir = Path.home() / ".claude" / "agents"
-    if agents_dir.exists():
-        agent_files = list(agents_dir.glob("*.md"))
-        if agent_files:
-            agent_names = [f.stem for f in agent_files]
-            logger.info(f"Found {len(agent_files)} custom agents: {agent_names}")
-        else:
-            logger.error(f"No agent files found in {agents_dir}")
-            raise RuntimeError(
-                f"Subagent discovery failed: No .md files in {agents_dir}"
-            )
-    else:
-        logger.error(f"Agents directory not found: {agents_dir}")
-        raise RuntimeError(
-            f"Subagent discovery failed: Directory {agents_dir} does not exist"
-        )
+    # Verify custom agents are loaded from subagents package
+    from subagents import AGENTS
+    logger.info(f"Loaded {len(AGENTS)} custom agents: {list(AGENTS.keys())}")
 
     # Initialize queue
     queue = get_queue()

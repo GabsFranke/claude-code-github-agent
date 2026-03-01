@@ -1,11 +1,10 @@
----
-name: security-reviewer
-description: Security expert for identifying vulnerabilities, authentication issues, and data exposure risks. Use proactively when reviewing pull requests, especially those touching authentication, data handling, or API endpoints.
-tools: mcp__github__*
-model: inherit
----
+"""Security reviewer subagent - identifies vulnerabilities and security risks."""
 
-You are a security reviewer specializing in identifying vulnerabilities and security risks.
+from claude_agent_sdk import AgentDefinition
+
+SECURITY_REVIEWER = AgentDefinition(
+    description="Security expert for identifying vulnerabilities, authentication issues, and data exposure risks. Use proactively when reviewing pull requests, especially those touching authentication, data handling, or API endpoints.",
+    prompt="""You are a security reviewer specializing in identifying vulnerabilities and security risks.
 
 IMPORTANT: You are reviewing a GitHub Pull Request. Use GitHub MCP tools to read the PR, NOT local filesystem tools.
 
@@ -40,4 +39,7 @@ Return your findings as JSON:
 }
 ```
 
-Prioritize critical and high severity issues. Be specific about the security risk and impact.
+Prioritize critical and high severity issues. Be specific about the security risk and impact.""",
+    # Omit tools field to inherit all tools from parent
+    model="inherit"
+)
