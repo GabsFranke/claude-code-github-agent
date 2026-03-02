@@ -54,8 +54,8 @@ Simple Claude Code GitHub Agent is a lightweight system that uses Claude Agent S
 
 ### 1. Webhook Service
 
-**Technology:** FastAPI (Python)  
-**Port:** 8080  
+**Technology:** FastAPI (Python)
+**Port:** 8080
 **Purpose:** Receives GitHub webhook events
 
 **Responsibilities:**
@@ -70,7 +70,7 @@ Simple Claude Code GitHub Agent is a lightweight system that uses Claude Agent S
 
 ### 2. Message Queue
 
-**Technology:** Redis (self-hosted)  
+**Technology:** Redis (self-hosted)
 **Purpose:** Decouples webhook from worker for async processing
 
 **Benefits:**
@@ -84,7 +84,7 @@ Simple Claude Code GitHub Agent is a lightweight system that uses Claude Agent S
 
 ### 3. Worker Service
 
-**Technology:** Python + Claude Agent SDK  
+**Technology:** Python + Claude Agent SDK
 **Purpose:** Processes agent requests
 
 **Responsibilities:**
@@ -99,7 +99,7 @@ Simple Claude Code GitHub Agent is a lightweight system that uses Claude Agent S
 
 ### 4. Claude Agent SDK
 
-**Technology:** Python SDK by Anthropic  
+**Technology:** Python SDK by Anthropic
 **Purpose:** Autonomous coding agent
 
 **Capabilities:**
@@ -128,8 +128,8 @@ Simple Claude Code GitHub Agent is a lightweight system that uses Claude Agent S
 
 ### 5. GitHub MCP Server
 
-**Technology:** HTTP-based MCP server by GitHub  
-**Endpoint:** `https://api.githubcopilot.com/mcp`  
+**Technology:** HTTP-based MCP server by GitHub
+**Endpoint:** `https://api.githubcopilot.com/mcp`
 **Authentication:** GitHub App installation token (recommended) or Personal Access Token
 
 **Tools Provided:**

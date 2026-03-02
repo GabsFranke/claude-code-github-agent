@@ -1,11 +1,11 @@
 """Message queue abstraction that works with Redis or Google Pub/Sub."""
 
-import os
+import asyncio
 import json
 import logging
+import os
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional, Callable
-import asyncio
+from typing import Any, Callable, Dict
 
 logger = logging.getLogger(__name__)
 

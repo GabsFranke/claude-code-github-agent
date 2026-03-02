@@ -149,4 +149,3 @@ To run without observability:
 3. Restart: `docker-compose restart worker`
 
 The Langfuse services will continue running but won't receive any traces.
-

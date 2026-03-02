@@ -1,48 +1,48 @@
 """Claude Code worker that processes GitHub requests from message queue."""
 
+import asyncio
+import json
+import logging
 import os
 import sys
-import logging
-import json
-import time
 import threading
-import subprocess
-import asyncio
+import time
 from pathlib import Path
-from langfuse import Langfuse
+
 import jwt
 import requests
-import anyio
 from claude_agent_sdk import (
-    ClaudeSDKClient,
-    ClaudeAgentOptions,
-    AgentDefinition,
     AssistantMessage,
-    SystemMessage,
-    ResultMessage,
-    UserMessage,
-    TextBlock,
-    ToolUseBlock,
-    ToolResultBlock,
+    ClaudeAgentOptions,
+    ClaudeSDKClient,
     HookMatcher,
+    ResultMessage,
+    SystemMessage,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    UserMessage,
 )
+from langfuse import Langfuse
 
 # Add parent directory to path for shared imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from shared.queue import get_queue
-from subagents import AGENTS  # Import custom agent definitions
+from shared.queue import get_queue  # noqa: E402
+from subagents import AGENTS  # noqa: E402
 
 # Configure logging based on LOG_LEVEL environment variable
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
     level=getattr(logging, log_level, logging.INFO),
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
 # Also set log level for claude_agent_sdk to see SDK debug logs
-logging.getLogger("claude_agent_sdk").setLevel(getattr(logging, log_level, logging.INFO))
+logging.getLogger("claude_agent_sdk").setLevel(
+    getattr(logging, log_level, logging.INFO)
+)
 
 logger.info(f"Logging configured at {log_level} level")
 
@@ -182,7 +182,7 @@ def get_fresh_github_token():
             _github_token_cache["token"] = None  # Force refresh
             # Generate new token while holding lock
             return get_github_app_token()
-        
+
         # Return cached token while still holding lock
         return _github_token_cache["token"]
 
@@ -240,10 +240,12 @@ def setup_claude_code_settings():
         custom_env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = os.getenv(
             "ANTHROPIC_DEFAULT_OPUS_MODEL"
         )
-    
+
     # Add Vertex AI configuration if specified
     if os.getenv("ANTHROPIC_VERTEX_PROJECT_ID"):
-        custom_env["ANTHROPIC_VERTEX_PROJECT_ID"] = os.getenv("ANTHROPIC_VERTEX_PROJECT_ID")
+        custom_env["ANTHROPIC_VERTEX_PROJECT_ID"] = os.getenv(
+            "ANTHROPIC_VERTEX_PROJECT_ID"
+        )
         if os.getenv("ANTHROPIC_VERTEX_REGION"):
             custom_env["ANTHROPIC_VERTEX_REGION"] = os.getenv("ANTHROPIC_VERTEX_REGION")
 
@@ -272,9 +274,7 @@ def setup_claude_code_settings():
     try:
         with open(settings_file, "w") as f:
             json.dump(settings, f, indent=2)
-        logger.info(
-            f"Updated Claude Code settings with permissions and custom env vars"
-        )
+        logger.info("Updated Claude Code settings with permissions and custom env vars")
     except Exception as e:
         logger.error(f"Failed to write Claude Code settings: {e}")
         raise
@@ -433,33 +433,41 @@ async def _execute_claude_sdk(prompt: str, repo: str) -> str:
     # Add optional Anthropic overrides
     if os.getenv("ANTHROPIC_BASE_URL"):
         os.environ["ANTHROPIC_BASE_URL"] = os.getenv("ANTHROPIC_BASE_URL")
-    
+
     # Configure Vertex AI if specified (for GLM-5 or other Vertex models)
     if os.getenv("ANTHROPIC_VERTEX_PROJECT_ID"):
-        os.environ["ANTHROPIC_VERTEX_PROJECT_ID"] = os.getenv("ANTHROPIC_VERTEX_PROJECT_ID")
+        os.environ["ANTHROPIC_VERTEX_PROJECT_ID"] = os.getenv(
+            "ANTHROPIC_VERTEX_PROJECT_ID"
+        )
         if os.getenv("ANTHROPIC_VERTEX_REGION"):
             os.environ["ANTHROPIC_VERTEX_REGION"] = os.getenv("ANTHROPIC_VERTEX_REGION")
-        
+
         # Handle service account credentials from environment variable
         credentials_json = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
         if credentials_json:
             # Write credentials to temporary file for google-auth library
-            import tempfile
             import json as json_lib
-            
-            credentials_file = tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False)
+            import tempfile
+
+            credentials_file = tempfile.NamedTemporaryFile(
+                mode="w", suffix=".json", delete=False
+            )
             try:
                 # Parse and validate JSON
                 credentials_data = json_lib.loads(credentials_json)
                 json_lib.dump(credentials_data, credentials_file)
                 credentials_file.close()
-                
+
                 # Point google-auth to the temporary file
                 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = credentials_file.name
-                logger.info(f"Configured Vertex AI credentials from environment variable")
+                logger.info(
+                    "Configured Vertex AI credentials from environment variable"
+                )
             except json_lib.JSONDecodeError as e:
                 logger.error(f"Invalid GOOGLE_APPLICATION_CREDENTIALS_JSON: {e}")
-                raise ValueError("GOOGLE_APPLICATION_CREDENTIALS_JSON must be valid JSON")
+                raise ValueError(
+                    "GOOGLE_APPLICATION_CREDENTIALS_JSON must be valid JSON"
+                )
             except Exception as e:
                 logger.error(f"Error setting up Vertex AI credentials: {e}")
                 raise
@@ -475,7 +483,7 @@ async def _execute_claude_sdk(prompt: str, repo: str) -> str:
             "headers": {"Authorization": f"Bearer {github_token}"},
         }
     }
-    
+
     # Load both custom agents and PR Review Toolkit plugin
     logger.info(f"Loaded {len(AGENTS)} custom agents: {list(AGENTS.keys())}")
     logger.info("Loading plugins from /app/plugins directory")
@@ -539,7 +547,7 @@ async def _execute_claude_sdk(prompt: str, repo: str) -> str:
             except Exception as e:
                 logger.warning(f"Error running Langfuse hook: {e}")
                 # Ensure process cleanup on exception
-                if 'process' in locals() and process.returncode is None:
+                if "process" in locals() and process.returncode is None:
                     try:
                         process.kill()
                         await asyncio.wait_for(process.wait(), timeout=5.0)
@@ -568,7 +576,9 @@ async def _execute_claude_sdk(prompt: str, repo: str) -> str:
         permission_mode="acceptEdits",  # Auto-accept file edits
         mcp_servers=mcp_servers,  # Pass MCP config
         agents=AGENTS,  # Pass custom agents from subagents package
-        plugins=[{"type": "local", "path": "/app/plugins/pr-review-toolkit"}],  # Load PR review toolkit plugin
+        plugins=[
+            {"type": "local", "path": "/app/plugins/pr-review-toolkit"}
+        ],  # Load PR review toolkit plugin
         hooks=hooks,
         max_turns=50,  # Allow multiple turns for complex tasks
     )
@@ -589,71 +599,106 @@ async def _execute_claude_sdk(prompt: str, repo: str) -> str:
                 async for message in client.receive_messages():
                     # Log all message types for debugging
                     logger.debug(f"Received message type: {type(message).__name__}")
-                    
+
                     # Log init message to see loaded agents
                     if isinstance(message, SystemMessage):
                         if message.subtype == "init":
                             # Log all init data for debugging
                             if hasattr(message, "data"):
                                 init_data = message.data
-                                logger.info(f"Init message data keys: {list(init_data.keys()) if isinstance(init_data, dict) else 'N/A'}")
-                                
+                                logger.info(
+                                    f"Init message data keys: {list(init_data.keys()) if isinstance(init_data, dict) else 'N/A'}"
+                                )
+
                                 # Check plugins
                                 if "plugins" in init_data:
                                     plugins = init_data.get("plugins", [])
-                                    logger.info(f"Loaded {len(plugins)} plugins: {plugins}")
+                                    logger.info(
+                                        f"Loaded {len(plugins)} plugins: {plugins}"
+                                    )
                                 else:
                                     logger.warning("No plugins found in init message")
-                                
+
                                 # Check slash commands
                                 if "slash_commands" in init_data:
                                     commands = init_data.get("slash_commands", [])
                                     logger.info(f"Available slash commands: {commands}")
                                 else:
-                                    logger.warning("No slash_commands found in init message")
-                                
+                                    logger.warning(
+                                        "No slash_commands found in init message"
+                                    )
+
                                 # Check agents
                                 if "agents" in init_data:
                                     agents = init_data.get("agents", [])
                                     # Agents can be strings or dicts
-                                    agent_names = [a if isinstance(a, str) else a.get('name', 'unknown') for a in agents]
-                                    logger.info(f"Loaded {len(agents)} custom agents: {agent_names}")
+                                    agent_names = [
+                                        (
+                                            a
+                                            if isinstance(a, str)
+                                            else a.get("name", "unknown")
+                                        )
+                                        for a in agents
+                                    ]
+                                    logger.info(
+                                        f"Loaded {len(agents)} custom agents: {agent_names}"
+                                    )
                                 else:
-                                    logger.warning("No custom agents found in init message")
+                                    logger.warning(
+                                        "No custom agents found in init message"
+                                    )
                             else:
                                 logger.warning("Init message has no data attribute")
                         else:
-                            logger.debug(f"SystemMessage subtype: {message.subtype}, data: {message.data if hasattr(message, 'data') else 'N/A'}")
+                            logger.debug(
+                                f"SystemMessage subtype: {message.subtype}, data: {message.data if hasattr(message, 'data') else 'N/A'}"
+                            )
 
                     elif isinstance(message, AssistantMessage):
-                        logger.info(f"AssistantMessage with {len(message.content)} content blocks")
+                        logger.info(
+                            f"AssistantMessage with {len(message.content)} content blocks"
+                        )
                         for block in message.content:
                             if isinstance(block, TextBlock):
                                 response_parts.append(block.text)
-                                logger.info(f"Received text block: {block.text[:200]}...")
+                                logger.info(
+                                    f"Received text block: {block.text[:200]}..."
+                                )
                             elif isinstance(block, ToolUseBlock):
                                 logger.info(f"Tool use: {block.name} (id: {block.id})")
                             else:
-                                logger.debug(f"Content block type: {type(block).__name__}")
-                    
+                                logger.debug(
+                                    f"Content block type: {type(block).__name__}"
+                                )
+
                     elif isinstance(message, UserMessage):
-                        logger.debug(f"UserMessage with {len(message.content)} content blocks")
+                        logger.debug(
+                            f"UserMessage with {len(message.content)} content blocks"
+                        )
                         for block in message.content:
                             if isinstance(block, ToolResultBlock):
-                                logger.debug(f"Tool result for {block.tool_use_id}: {str(block.content)[:200]}...")
+                                logger.debug(
+                                    f"Tool result for {block.tool_use_id}: {str(block.content)[:200]}..."
+                                )
 
                     elif isinstance(message, ResultMessage):
-                        logger.info(f"Response complete - {message.num_turns} turns, {message.duration_ms}ms")
+                        logger.info(
+                            f"Response complete - {message.num_turns} turns, {message.duration_ms}ms"
+                        )
                         if message.total_cost_usd:
                             logger.info(f"Cost: ${message.total_cost_usd:.4f}")
-                        if hasattr(message, 'error') and message.error:
-                            logger.error(f"ResultMessage contains error: {message.error}")
-                        if hasattr(message, 'stop_reason'):
+                        if hasattr(message, "error") and message.error:
+                            logger.error(
+                                f"ResultMessage contains error: {message.error}"
+                            )
+                        if hasattr(message, "stop_reason"):
                             logger.info(f"Stop reason: {message.stop_reason}")
                         break
-                    
+
                     else:
-                        logger.debug(f"Unhandled message type: {type(message).__name__}")
+                        logger.debug(
+                            f"Unhandled message type: {type(message).__name__}"
+                        )
 
         response = "\n".join(response_parts)
 
@@ -808,6 +853,7 @@ def main():
 
     # Verify custom agents are loaded from subagents package
     from subagents import AGENTS
+
     logger.info(f"Loaded {len(AGENTS)} custom agents: {list(AGENTS.keys())}")
 
     # Initialize queue

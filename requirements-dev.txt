@@ -1,0 +1,38 @@
+# Development dependencies
+# Install with: pip install -r requirements-dev.txt
+
+# Testing
+pytest>=9.0.2
+pytest-asyncio>=1.3.0
+pytest-cov>=7.0.0
+pytest-mock>=3.15.1
+pytest-timeout>=2.4.0
+httpx>=0.28.1
+
+# Linting & Formatting
+black>=26.1.0
+isort>=8.0.1
+flake8>=7.3.0
+pylint>=4.0.5
+ruff>=0.15.4
+
+# Type Checking
+mypy>=1.19.1
+types-redis>=4.6.0.20241004
+types-requests>=2.32.4.20260107
+
+# Code Quality
+bandit>=1.9.4
+safety>=3.7.0
+radon>=6.0.1
+
+# Pre-commit hooks
+pre-commit>=4.5.1
+
+# Documentation
+mkdocs>=1.6.1
+mkdocs-material>=9.7.3
+
+# Debugging
+ipdb>=0.13.13
+ipython>=9.10.0

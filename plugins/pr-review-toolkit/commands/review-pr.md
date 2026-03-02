@@ -71,7 +71,7 @@ Run a comprehensive pull request review using multiple specialized agents via Gi
 7. **Post Review to GitHub**
 
    Use GitHub MCP tools to post results:
-   
+
    1. **Summary Comment** (use `add_issue_comment`):
    ```markdown
    # PR Review Summary

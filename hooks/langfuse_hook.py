@@ -4,11 +4,11 @@ Claude Code -> Langfuse hook
 
 """
 
+import hashlib
 import json
 import os
 import sys
 import time
-import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -66,7 +66,9 @@ class FileLock:
     def __init__(self, path: Path, timeout_s: float = None):
         self.path = path
         # Allow configurable timeout, default to 10s for parallel workers
-        self.timeout_s = timeout_s or float(os.getenv('LANGFUSE_LOCK_TIMEOUT_S', '10.0'))
+        self.timeout_s = timeout_s or float(
+            os.getenv("LANGFUSE_LOCK_TIMEOUT_S", "10.0")
+        )
         self._fh = None
 
     def __enter__(self):
@@ -83,7 +85,10 @@ class FileLock:
                 except BlockingIOError:
                     if time.time() > deadline:
                         # Log warning when lock timeout is hit
-                        print(f"Warning: Failed to acquire lock on {self.path} after {self.timeout_s}s", file=sys.stderr)
+                        print(
+                            f"Warning: Failed to acquire lock on {self.path} after {self.timeout_s}s",
+                            file=sys.stderr,
+                        )
                         break
                     time.sleep(0.05)
         except Exception:
@@ -150,7 +155,7 @@ def extract_session_and_transcript(
     """
     Tries a few plausible field names; exact keys can vary across hook types/versions.
     Prefer structured values from stdin over heuristics.
-    
+
     For SubagentStop events, use agent_transcript_path and agent_id.
     Returns: (session_id, transcript_path, agent_type, parent_session_id)
     """
@@ -164,15 +169,15 @@ def extract_session_and_transcript(
     hook_event = payload.get("hook_event_name")
     agent_type = None
     parent_session_id = None
-    
+
     if hook_event == "SubagentStop":
         transcript = payload.get("agent_transcript_path")
         agent_id = payload.get("agent_id")
         agent_type = payload.get("agent_type")
-        
+
         # Keep parent session ID for linking
         parent_session_id = session_id
-        
+
         # Create unique session ID for subagent
         if session_id and agent_id:
             session_id = f"{session_id}::{agent_id}"
@@ -385,9 +390,9 @@ def build_turns(messages: List[Dict[str, Any]]) -> List[Turn]:
     current_user: Optional[Dict[str, Any]] = None
 
     # assistant messages for current turn:
-    assistant_order: List[str] = (
-        []
-    )  # message ids in order of first appearance (or synthetic)
+    assistant_order: List[
+        str
+    ] = []  # message ids in order of first appearance (or synthetic)
     assistant_latest: Dict[str, Dict[str, Any]] = {}  # id -> latest msg
 
     tool_results_by_id: Dict[str, Any] = {}  # tool_use_id -> content
@@ -510,14 +515,14 @@ def emit_turn(
             c["output"] = None
 
     trace_name = f"{trace_prefix} - Turn {turn_num}"
-    
+
     # Build tags - add agent type if this is a subagent
     tags = ["claude-code"]
     if agent_type:
         tags.extend(["subagent", f"agent:{agent_type}"])
     else:
         tags.append("main-agent")
-    
+
     # Build metadata
     trace_metadata = {
         "source": "claude-code",
@@ -528,11 +533,11 @@ def emit_turn(
         "agent_type": agent_type or "main",
         "is_subagent": agent_type is not None,
     }
-    
+
     # Add parent session ID for subagents
     if parent_session_id:
         trace_metadata["parent_session_id"] = parent_session_id
-    
+
     with propagate_attributes(
         session_id=session_id,
         trace_name=trace_name,
@@ -608,16 +613,23 @@ def main() -> int:
     if not public_key or not secret_key:
         debug("Langfuse credentials not found, exiting")
         return 0
-    
+
     debug(f"Langfuse configured: host={host}")
 
     payload = read_hook_payload()
-    session_id, transcript_path, agent_type, parent_session_id = extract_session_and_transcript(payload)
-    
+    (
+        session_id,
+        transcript_path,
+        agent_type,
+        parent_session_id,
+    ) = extract_session_and_transcript(payload)
+
     # Enhanced debug logging
     hook_event = payload.get("hook_event_name", "unknown")
     if agent_type:
-        debug(f"Hook event: {hook_event}, Agent: {agent_type}, Session: {session_id}, Parent: {parent_session_id}")
+        debug(
+            f"Hook event: {hook_event}, Agent: {agent_type}, Session: {session_id}, Parent: {parent_session_id}"
+        )
     else:
         debug(f"Hook event: {hook_event}, Session: {session_id}")
 
@@ -629,7 +641,7 @@ def main() -> int:
     if not transcript_path.exists():
         debug(f"Transcript path does not exist: {transcript_path}")
         return 0
-    
+
     # Add agent type to trace name if this is a subagent
     trace_prefix = f"Agent: {agent_type}" if agent_type else "Claude Code"
     debug(f"Processing transcript: {transcript_path} (prefix={trace_prefix})")
@@ -664,7 +676,16 @@ def main() -> int:
                 turn_num = ss.turn_count + emitted
                 try:
                     # Use trace_prefix, agent_type, and parent_session_id for subagents
-                    emit_turn(langfuse, session_id, turn_num, t, transcript_path, trace_prefix, agent_type, parent_session_id)
+                    emit_turn(
+                        langfuse,
+                        session_id,
+                        turn_num,
+                        t,
+                        transcript_path,
+                        trace_prefix,
+                        agent_type,
+                        parent_session_id,
+                    )
                 except Exception as e:
                     debug(f"emit_turn failed: {e}")
                     # continue emitting other turns
@@ -680,7 +701,9 @@ def main() -> int:
 
         dur = time.time() - start
         agent_info = f" (agent={agent_type})" if agent_type else ""
-        info(f"Processed {emitted} turns in {dur:.2f}s (session={session_id}{agent_info})")
+        info(
+            f"Processed {emitted} turns in {dur:.2f}s (session={session_id}{agent_info})"
+        )
         return 0
 
     except Exception as e:

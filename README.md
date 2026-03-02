@@ -52,7 +52,7 @@ Go to GitHub Settings → Developer settings → GitHub Apps → New GitHub App:
     - Issues: Read & write
     - Pull requests: Read & write
     - Metadata: Read-only
-- **Subscribe to events**: 
+- **Subscribe to events**:
   - Discussion comment
   - Issue comment
   - Issues

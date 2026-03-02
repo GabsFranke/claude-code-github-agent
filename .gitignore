@@ -50,6 +50,10 @@ logs/
 .pytest_cache/
 .coverage
 htmlcov/
+.ruff_cache/
+.mypy_cache/
+coverage.xml
+.tox/
 
 # Terraform
 *.tfstate
