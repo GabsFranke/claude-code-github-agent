@@ -227,14 +227,35 @@ GitHub Event → Webhook → Redis Queue → Worker → Claude Agent SDK
 
 ### Using Alternative AI Providers
 
-You can use alternative Anthropic-compatible providers like [z.ai](https://z.ai):
+You can use alternative providers instead of Anthropic's API:
+
+**Option 1: Z.AI (GLM models via Anthropic-compatible API)**
 
 ```bash
 # .env
-ANTHROPIC_AUTH_TOKEN=your_zai_api_key
-ANTHROPIC_BASE_URL=https://api.z.ai/v1
-ANTHROPIC_DEFAULT_SONNET_MODEL=glm-4.7
+ANTHROPIC_API_KEY=your_zai_api_key
+ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic
+ANTHROPIC_DEFAULT_SONNET_MODEL=GLM-4.7
+ANTHROPIC_DEFAULT_HAIKU_MODEL=GLM-4.5-Air
+ANTHROPIC_DEFAULT_OPUS_MODEL=GLM-4.7
 ```
+
+**Option 2: Vertex AI (Claude models via Google Cloud)**
+
+```bash
+# 1. Authenticate with gcloud
+gcloud auth application-default login
+
+# 2. Configure .env
+ANTHROPIC_API_KEY=sk-ant-unused
+ANTHROPIC_VERTEX_PROJECT_ID=your-gcp-project-id
+ANTHROPIC_VERTEX_REGION=global
+
+# 3. Recreate worker with new env vars
+docker-compose up -d worker
+```
+
+The agent works identically with all providers - just toggle the environment variables and recreate the container.
 
 ## Development
 

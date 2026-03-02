@@ -220,6 +220,12 @@ def setup_claude_code_settings():
         custom_env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = os.getenv(
             "ANTHROPIC_DEFAULT_OPUS_MODEL"
         )
+    
+    # Add Vertex AI configuration if specified
+    if os.getenv("ANTHROPIC_VERTEX_PROJECT_ID"):
+        custom_env["ANTHROPIC_VERTEX_PROJECT_ID"] = os.getenv("ANTHROPIC_VERTEX_PROJECT_ID")
+        if os.getenv("ANTHROPIC_VERTEX_REGION"):
+            custom_env["ANTHROPIC_VERTEX_REGION"] = os.getenv("ANTHROPIC_VERTEX_REGION")
 
     # Add Langfuse env vars for the hook script
     langfuse_public_key = os.getenv("LANGFUSE_PUBLIC_KEY")
@@ -434,6 +440,36 @@ async def _execute_claude_sdk(prompt: str, repo: str) -> str:
     # Add optional Anthropic overrides
     if os.getenv("ANTHROPIC_BASE_URL"):
         os.environ["ANTHROPIC_BASE_URL"] = os.getenv("ANTHROPIC_BASE_URL")
+    
+    # Configure Vertex AI if specified (for GLM-5 or other Vertex models)
+    if os.getenv("ANTHROPIC_VERTEX_PROJECT_ID"):
+        os.environ["ANTHROPIC_VERTEX_PROJECT_ID"] = os.getenv("ANTHROPIC_VERTEX_PROJECT_ID")
+        if os.getenv("ANTHROPIC_VERTEX_REGION"):
+            os.environ["ANTHROPIC_VERTEX_REGION"] = os.getenv("ANTHROPIC_VERTEX_REGION")
+        
+        # Handle service account credentials from environment variable
+        credentials_json = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+        if credentials_json:
+            # Write credentials to temporary file for google-auth library
+            import tempfile
+            import json as json_lib
+            
+            credentials_file = tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False)
+            try:
+                # Parse and validate JSON
+                credentials_data = json_lib.loads(credentials_json)
+                json_lib.dump(credentials_data, credentials_file)
+                credentials_file.close()
+                
+                # Point google-auth to the temporary file
+                os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = credentials_file.name
+                logger.info(f"Configured Vertex AI credentials from environment variable")
+            except json_lib.JSONDecodeError as e:
+                logger.error(f"Invalid GOOGLE_APPLICATION_CREDENTIALS_JSON: {e}")
+                raise ValueError("GOOGLE_APPLICATION_CREDENTIALS_JSON must be valid JSON")
+            except Exception as e:
+                logger.error(f"Error setting up Vertex AI credentials: {e}")
+                raise
 
     # Use fresh token to handle long-running sessions
     github_token = get_fresh_github_token()
