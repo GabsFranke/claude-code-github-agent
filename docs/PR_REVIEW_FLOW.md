@@ -1,8 +1,8 @@
-# PR Review Flow with Subagents
+# PR Review Flow with Plugin System
 
 ## Overview
 
-When a pull request is opened, the system performs a comprehensive multi-agent review using specialized subagents.
+When a pull request is opened, the system performs a comprehensive multi-agent review using the PR Review Toolkit plugin, which provides specialized review agents for different aspects of code quality.
 
 ## Flow Diagram
 
@@ -28,39 +28,40 @@ When a pull request is opened, the system performs a comprehensive multi-agent r
                          │
                          ▼
 ┌─────────────────────────────────────────────────────────────┐
-│              Main Agent (Coordinator) Spawned                │
-│                   Claude Code CLI                            │
+│         Main Agent Invokes Plugin Command                    │
+│         /pr-review-toolkit:review-pr [repo] [pr#] all        │
+│         (PR Review Toolkit Plugin Loaded)                    │
 └────────────────────────┬────────────────────────────────────┘
                          │
                          ▼
 ┌─────────────────────────────────────────────────────────────┐
 │          Read PR and Analyze Changes (Step 1)                │
-│          - Get PR diff and details                           │
+│          - Get PR diff via GitHub MCP                        │
 │          - Assess scope and type of changes                  │
-│          - Decide which agents are needed                    │
+│          - Decide which plugin agents are needed             │
 └────────────────────────┬────────────────────────────────────┘
                          │
                          ▼
          ┌───────────────┴───────────────┐
-         │  Spawn Selected Subagents     │
-         │  (0-4 agents based on need)   │
+         │  Spawn Plugin Review Agents   │
+         │  (0-6 agents based on need)   │
          └───────────────┬───────────────┘
                          │
-         ┌───────────────┼───────────────┬───────────────┐
-         │               │               │               │
-         ▼               ▼               ▼               ▼
-┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐
-│Architecture │ │  Security   │ │ Bug Hunter  │ │Code Quality │
-│  Reviewer   │ │  Reviewer   │ │             │ │  Reviewer   │
-│  (if needed)│ │ (if needed) │ │ (if needed) │ │ (if needed) │
-└──────┬──────┘ └──────┬──────┘ └──────┬──────┘ └──────┬──────┘
-       │               │               │               │
-       │ Design        │ Vulnerabilities│ Bugs & Edge  │ Style &
-       │ Patterns      │ Auth Issues   │ Cases        │ Maintainability
-       │ SOLID         │ Data Exposure │ Error        │ Documentation
-       │ Coupling      │ Injection     │ Handling     │ Complexity
-       │               │               │               │
-       └───────────────┴───────────────┴───────────────┘
+         ┌───────────────┼───────────────┬───────────────┬───────────────┬───────────────┐
+         │               │               │               │               │               │
+         ▼               ▼               ▼               ▼               ▼               ▼
+┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐
+│   Comment   │ │  PR Test    │ │   Silent    │ │Type Design  │ │    Code     │ │    Code     │
+│  Analyzer   │ │  Analyzer   │ │  Failure    │ │  Analyzer   │ │  Reviewer   │ │ Simplifier  │
+│ (if needed) │ │ (if needed) │ │   Hunter    │ │ (if needed) │ │  (always)   │ │ (optional)  │
+└──────┬──────┘ └──────┬──────┘ └──────┬──────┘ └──────┬──────┘ └──────┬──────┘ └──────┬──────┘
+       │               │               │               │               │               │
+       │ Comment       │ Test          │ Error         │ Type          │ General       │ Code
+       │ Accuracy      │ Coverage      │ Handling      │ Encapsulation │ Quality       │ Simplification
+       │ Documentation │ Quality       │ Silent        │ Invariants    │ Bugs          │ Clarity
+       │ Maintainability│ Gaps         │ Failures      │ Design        │ Standards     │ Readability
+       │               │               │               │               │               │
+       └───────────────┴───────────────┴───────────────┴───────────────┴───────────────┘
                          │
                          ▼
 ┌─────────────────────────────────────────────────────────────┐
@@ -118,11 +119,11 @@ When a pull request is opened, the system performs a comprehensive multi-agent r
 └─────────────────────────────────────────────────────────────┘
 ```
 
-## Subagent Outputs
+## Plugin Review Agents
 
-Each subagent returns structured JSON:
+The PR Review Toolkit plugin provides six specialized review agents:
 
-### Architecture Reviewer
+### 1. Comment Analyzer
 ```json
 {
   "findings": [
@@ -130,89 +131,151 @@ Each subagent returns structured JSON:
       "file": "src/services/payment.ts",
       "line": 42,
       "severity": "medium",
-      "category": "architecture",
-      "issue": "Tight coupling between modules",
-      "explanation": "Direct dependency creates tight coupling",
-      "suggestion": "Consider using dependency injection",
-      "impact": "Makes testing harder"
+      "category": "comment-accuracy",
+      "issue": "Comment doesn't match implementation",
+      "explanation": "Comment says 'validates user' but code validates payment",
+      "suggestion": "Update comment to reflect actual behavior"
     }
   ],
-  "summary": "Overall architectural assessment",
-  "design_patterns_used": ["Factory", "Observer"],
-  "concerns": ["Increased coupling"],
-  "recommendations": ["Extract shared logic to service"]
+  "summary": "Comment quality assessment",
+  "comment_rot_detected": true,
+  "documentation_gaps": ["Missing API documentation"]
 }
 ```
 
-### Security Reviewer
+### 2. PR Test Analyzer
 ```json
 {
   "findings": [
     {
       "file": "src/api/users.ts",
       "line": 15,
-      "severity": "critical",
-      "category": "security",
-      "vulnerability_type": "SQL Injection",
-      "issue": "Unsanitized user input in query",
-      "explanation": "User input directly concatenated",
-      "suggestion": "Use parameterized queries",
-      "cwe": "CWE-89"
+      "severity": "high",
+      "category": "test-coverage",
+      "issue": "Critical path not tested",
+      "explanation": "Error handling path has no test coverage",
+      "suggestion": "Add test case for error scenario",
+      "test_type": "behavioral"
     }
   ],
-  "summary": "Security assessment",
-  "critical_count": 1,
-  "high_count": 0,
-  "overall_risk": "high"
+  "summary": "Test coverage assessment",
+  "critical_gaps": 2,
+  "coverage_quality": "medium"
 }
 ```
 
-### Bug Hunter
+### 3. Silent Failure Hunter
 ```json
 {
   "findings": [
     {
       "file": "src/utils/parser.ts",
       "line": 28,
-      "severity": "high",
-      "category": "bug-risk",
-      "issue": "Potential null pointer dereference",
-      "explanation": "Variable could be null when accessed",
-      "suggestion": "Add null check: if (!user) return;"
+      "severity": "critical",
+      "category": "silent-failure",
+      "issue": "Exception caught but not logged",
+      "explanation": "Catch block swallows error without logging",
+      "suggestion": "Add logger.error() in catch block"
     }
   ],
-  "summary": "Found 3 potential bugs",
-  "risk_assessment": "Medium risk overall"
+  "summary": "Error handling assessment",
+  "silent_failures_found": 3,
+  "risk_level": "high"
 }
 ```
 
-### Code Quality Reviewer
+### 4. Type Design Analyzer
+```json
+{
+  "findings": [
+    {
+      "file": "src/models/User.ts",
+      "line": 10,
+      "severity": "medium",
+      "category": "type-design",
+      "issue": "Type doesn't enforce invariants",
+      "explanation": "Email field allows invalid formats",
+      "suggestion": "Use branded type or validation in constructor",
+      "design_principle": "encapsulation"
+    }
+  ],
+  "summary": "Type design quality assessment",
+  "design_rating": 7,
+  "encapsulation_score": "good"
+}
+```
+
+### 5. Code Reviewer (General Quality)
 ```json
 {
   "findings": [
     {
       "file": "src/components/Form.tsx",
       "line": 55,
-      "severity": "low",
+      "severity": "medium",
       "category": "code-quality",
-      "issue": "Function is too complex (20 lines)",
-      "suggestion": "Break into smaller functions"
+      "issue": "Function violates single responsibility",
+      "explanation": "Function handles validation, formatting, and submission",
+      "suggestion": "Extract validation and formatting to separate functions"
     }
   ],
-  "summary": "Code quality is good overall",
+  "summary": "General code quality assessment",
+  "claude_md_compliance": true,
   "positive_notes": ["Good TypeScript types", "Clear naming"]
+}
+```
+
+### 6. Code Simplifier (Polish & Refine)
+```json
+{
+  "findings": [
+    {
+      "file": "src/utils/helpers.ts",
+      "line": 20,
+      "severity": "low",
+      "category": "simplification",
+      "issue": "Complex nested conditionals",
+      "explanation": "Logic can be simplified with early returns",
+      "suggestion": "Use guard clauses to reduce nesting",
+      "before": "if (x) { if (y) { return z; } }",
+      "after": "if (!x) return; if (!y) return; return z;"
+    }
+  ],
+  "summary": "Code simplification opportunities",
+  "complexity_reduced": true
 }
 ```
 
 ## Benefits
 
-1. **Intelligent Delegation**: Only uses agents that are relevant to the changes
-2. **Efficient Reviews**: Small PRs get quick reviews, complex PRs get thorough analysis
-3. **Focused Expertise**: Each subagent specializes in their domain
-4. **Structured Output**: JSON format enables easy parsing and prioritization
-5. **Consistent Quality**: Same thorough review process for similar changes
-6. **Actionable Feedback**: Specific suggestions with code examples
-7. **Cost Effective**: Doesn't waste tokens on unnecessary reviews
+1. **Plugin-Based Architecture**: Modular, reusable review agents via plugin system
+2. **Intelligent Delegation**: Only uses agents that are relevant to the changes
+3. **Comprehensive Coverage**: Six specialized agents cover all aspects of code quality
+4. **Efficient Reviews**: Small PRs get quick reviews, complex PRs get thorough analysis
+5. **Focused Expertise**: Each agent specializes in their domain
+6. **Structured Output**: JSON format enables easy parsing and prioritization
+7. **Consistent Quality**: Same thorough review process for similar changes
+8. **Actionable Feedback**: Specific suggestions with code examples
+9. **Cost Effective**: Doesn't waste tokens on unnecessary reviews
+10. **GitHub MCP Integration**: Direct access to PR data via GitHub's official MCP server
+
+## Plugin System
+
+The PR Review Toolkit is loaded as a plugin:
+
+```python
+# In worker.py
+options = ClaudeAgentOptions(
+    plugins=[{"type": "local", "path": "/app/plugins/pr-review-toolkit"}],
+    allowed_tools=["Task", "mcp__github__*"],
+    # ... other options
+)
+```
+
+The plugin provides:
+- **Command**: `/pr-review-toolkit:review-pr` - Main review orchestrator
+- **Agents**: 6 specialized review agents (comment-analyzer, pr-test-analyzer, etc.)
+- **GitHub MCP Tools**: Direct integration with GitHub API
 
 ## Customization
 
@@ -230,18 +293,69 @@ For code reviews:
 
 ## Performance
 
-- **Subagent spawn time**: ~2-5 seconds per subagent
-- **Parallel execution**: All 4 run simultaneously
+- **Plugin load time**: ~100ms (one-time per session)
+- **Agent spawn time**: ~2-5 seconds per agent
+- **Parallel execution**: All applicable agents run simultaneously
 - **Analysis time**: Depends on PR size (1-5 minutes typical)
 - **Total review time**: 2-8 minutes for most PRs
+
+## Available Review Aspects
+
+You can request specific review aspects:
+
+```bash
+# Full review (default)
+/pr-review-toolkit:review-pr owner/repo 123 all
+
+# Specific aspects
+/pr-review-toolkit:review-pr owner/repo 123 comments tests
+/pr-review-toolkit:review-pr owner/repo 123 errors types
+/pr-review-toolkit:review-pr owner/repo 123 simplify
+```
+
+Aspects:
+- `comments` - Comment accuracy and documentation
+- `tests` - Test coverage and quality
+- `errors` - Error handling and silent failures
+- `types` - Type design and invariants
+- `code` - General code quality (always runs)
+- `simplify` - Code simplification (polish phase)
+- `all` - Run all applicable reviews (default)
 
 ## Observability
 
 When Langfuse is enabled, you can see:
-- Each subagent execution as a nested span
-- Time spent in each subagent
-- Findings from each subagent
+- Plugin loading and initialization
+- Each review agent execution as a nested span
+- Time spent in each agent
+- Findings from each agent
 - Coordinator's synthesis logic
+- GitHub MCP tool calls
 - Final review output
 
 Access at: http://localhost:7500
+
+## Plugin Structure
+
+```
+plugins/pr-review-toolkit/
+├── .claude-plugin/
+│   └── plugin.json          # Plugin manifest
+├── commands/
+│   └── review-pr.md         # Main review command
+├── agents/
+│   ├── comment-analyzer.md
+│   ├── pr-test-analyzer.md
+│   ├── silent-failure-hunter.md
+│   ├── type-design-analyzer.md
+│   ├── code-reviewer.md
+│   └── code-simplifier.md
+├── LICENSE
+└── README.md
+```
+
+## See Also
+
+- [Plugin Documentation](../plugins/pr-review-toolkit/README.md) - Detailed plugin usage
+- [PLUGINS.md](PLUGINS.md) - General plugin system documentation
+- [SUBAGENTS.md](SUBAGENTS.md) - Legacy subagent system (deprecated)

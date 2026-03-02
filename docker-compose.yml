@@ -1,11 +1,12 @@
 services:
   redis:
     image: redis:7-alpine
-    command: --requirepass myredissecret
+    env_file: .env
+    command: sh -c 'redis-server --requirepass "$${REDIS_PASSWORD:-myredissecret}"'
     ports:
       - "6379:6379"
     healthcheck:
-      test: ["CMD", "redis-cli", "--no-auth-warning", "-a", "myredissecret", "ping"]
+      test: ["CMD", "sh", "-c", "redis-cli --no-auth-warning -a $${REDIS_PASSWORD:-myredissecret} ping"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -14,13 +15,14 @@ services:
     build:
       context: .
       dockerfile: services/webhook/Dockerfile
+    env_file: .env
     ports:
       - "10000:8080"
     environment:
       - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET}
       - QUEUE_TYPE=redis
       - REDIS_URL=redis://redis:6379
-      - REDIS_PASSWORD=myredissecret
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-myredissecret}
       - PORT=8080
     depends_on:
       redis:
@@ -30,9 +32,12 @@ services:
     build:
       context: .
       dockerfile: services/agent-worker/Dockerfile
+    env_file: .env
     volumes:
       # Mount your personal gcloud credentials for local Vertex AI access (Windows path)
       - ${APPDATA}/gcloud/application_default_credentials.json:/root/.config/gcloud/application_default_credentials.json:ro
+      # Mount all plugins directory
+      - ./plugins:/app/plugins:ro
     environment:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - ANTHROPIC_AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN}
@@ -48,10 +53,11 @@ services:
       - GITHUB_PRIVATE_KEY=${GITHUB_PRIVATE_KEY}
       - QUEUE_TYPE=redis
       - REDIS_URL=redis://redis:6379
-      - REDIS_PASSWORD=myredissecret
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-myredissecret}
       - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY}
       - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY}
       - LANGFUSE_HOST=http://langfuse:3000
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
     depends_on:
       redis:
         condition: service_healthy
@@ -61,16 +67,17 @@ services:
   # PostgreSQL for Langfuse
   langfuse-db:
     image: postgres:15-alpine
+    env_file: .env
     environment:
-      POSTGRES_DB: langfuse
-      POSTGRES_USER: langfuse
-      POSTGRES_PASSWORD: langfuse
+      POSTGRES_DB: ${LANGFUSE_DB_NAME:-langfuse}
+      POSTGRES_USER: ${LANGFUSE_DB_USER:-langfuse}
+      POSTGRES_PASSWORD: ${LANGFUSE_DB_PASSWORD:-langfuse}
     volumes:
       - langfuse-db-data:/var/lib/postgresql/data
     ports:
       - "127.0.0.1:5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U langfuse"]
+      test: ["CMD-SHELL", "pg_isready -U ${LANGFUSE_DB_USER:-langfuse}"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -79,10 +86,11 @@ services:
   langfuse-clickhouse:
     image: clickhouse/clickhouse-server:latest
     user: "101:101"
+    env_file: .env
     environment:
       CLICKHOUSE_DB: default
       CLICKHOUSE_USER: clickhouse
-      CLICKHOUSE_PASSWORD: clickhouse
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse}
     volumes:
       - langfuse-clickhouse-data:/var/lib/clickhouse
       - langfuse-clickhouse-logs:/var/log/clickhouse-server
@@ -100,9 +108,10 @@ services:
     image: minio/minio:latest
     entrypoint: sh
     command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
+    env_file: .env
     environment:
-      MINIO_ROOT_USER: minio
-      MINIO_ROOT_PASSWORD: miniosecret
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-miniosecret}
     volumes:
       - langfuse-minio-data:/data
     ports:
@@ -118,30 +127,31 @@ services:
   # Langfuse worker (processes events asynchronously)
   langfuse-worker:
     image: langfuse/langfuse-worker:3
+    env_file: .env
     environment:
-      DATABASE_URL: postgresql://langfuse:langfuse@langfuse-db:5432/langfuse
+      DATABASE_URL: postgresql://langfuse:${LANGFUSE_DB_PASSWORD:-langfuse}@langfuse-db:5432/langfuse
       NEXTAUTH_URL: http://localhost:7500
-      SALT: changeme-generate-a-salt-here
-      ENCRYPTION_KEY: 66dcdfca97e12b2225f09fefdafc54b7563bdaca9efc95d490b3aae290b40d8f
+      SALT: ${LANGFUSE_SALT:-changeme-generate-a-salt-here}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-66dcdfca97e12b2225f09fefdafc54b7563bdaca9efc95d490b3aae290b40d8f}
       TELEMETRY_ENABLED: "false"
       CLICKHOUSE_URL: http://langfuse-clickhouse:8123
       CLICKHOUSE_USER: clickhouse
-      CLICKHOUSE_PASSWORD: clickhouse
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse}
       CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
       CLICKHOUSE_CLUSTER_ENABLED: "false"
       REDIS_HOST: redis
       REDIS_PORT: 6379
-      REDIS_AUTH: myredissecret
+      REDIS_AUTH: ${REDIS_PASSWORD:-myredissecret}
       LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
       LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
-      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
-      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: miniosecret
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minio}
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-miniosecret}
       LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://langfuse-minio:9000
       LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
       LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
       LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
-      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minio
-      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: miniosecret
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minio}
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-miniosecret}
       LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://localhost:9090
       LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
     depends_on:
@@ -157,44 +167,46 @@ services:
   # Langfuse web UI
   langfuse:
     image: langfuse/langfuse:3
+    env_file: .env
     ports:
       - "7500:3000"
     environment:
-      DATABASE_URL: postgresql://langfuse:langfuse@langfuse-db:5432/langfuse
+      PORT: 3000
+      DATABASE_URL: postgresql://langfuse:${LANGFUSE_DB_PASSWORD:-langfuse}@langfuse-db:5432/langfuse
       NEXTAUTH_URL: http://localhost:7500
-      NEXTAUTH_SECRET: changeme-generate-a-secret-here
-      SALT: changeme-generate-a-salt-here
-      ENCRYPTION_KEY: 66dcdfca97e12b2225f09fefdafc54b7563bdaca9efc95d490b3aae290b40d8f
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-changeme-generate-a-secret-here}
+      SALT: ${LANGFUSE_SALT:-changeme-generate-a-salt-here}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-66dcdfca97e12b2225f09fefdafc54b7563bdaca9efc95d490b3aae290b40d8f}
       TELEMETRY_ENABLED: "false"
       CLICKHOUSE_URL: http://langfuse-clickhouse:8123
       CLICKHOUSE_USER: clickhouse
-      CLICKHOUSE_PASSWORD: clickhouse
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse}
       CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
       CLICKHOUSE_CLUSTER_ENABLED: "false"
       REDIS_HOST: redis
       REDIS_PORT: 6379
-      REDIS_AUTH: myredissecret
+      REDIS_AUTH: ${REDIS_PASSWORD:-myredissecret}
       LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
       LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
-      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
-      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: miniosecret
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minio}
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-miniosecret}
       LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://langfuse-minio:9000
       LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
       LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
       LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
-      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minio
-      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: miniosecret
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minio}
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-miniosecret}
       LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://langfuse-minio:9000
       LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
-      LANGFUSE_INIT_ORG_ID: github-agent
-      LANGFUSE_INIT_ORG_NAME: GitHub Agent
-      LANGFUSE_INIT_PROJECT_ID: github-agent-project
-      LANGFUSE_INIT_PROJECT_NAME: GitHub Agent Project
-      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: lf_pk_github_agent_public
-      LANGFUSE_INIT_PROJECT_SECRET_KEY: lf_sk_github_agent_secret
-      LANGFUSE_INIT_USER_EMAIL: admin@example.com
-      LANGFUSE_INIT_USER_NAME: Admin
-      LANGFUSE_INIT_USER_PASSWORD: admin123
+      LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID:-github-agent}
+      LANGFUSE_INIT_ORG_NAME: ${LANGFUSE_INIT_ORG_NAME:-GitHub Agent}
+      LANGFUSE_INIT_PROJECT_ID: ${LANGFUSE_INIT_PROJECT_ID:-github-agent-project}
+      LANGFUSE_INIT_PROJECT_NAME: ${LANGFUSE_INIT_PROJECT_NAME:-GitHub Agent Project}
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY:-lf_pk_github_agent_public}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY:-lf_sk_github_agent_secret}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL:-admin@example.com}
+      LANGFUSE_INIT_USER_NAME: ${LANGFUSE_INIT_USER_NAME:-Admin}
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:-admin123}
     depends_on:
       langfuse-db:
         condition: service_healthy

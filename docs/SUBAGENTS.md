@@ -1,189 +1,182 @@
 # Subagent Support
 
-This project includes specialized subagents that Claude Code can delegate tasks to for more focused and efficient work.
+Subagents are specialized Claude instances that the main agent can delegate focused tasks to. They run with their own system prompts and can inherit or restrict tool access as needed.
 
 ## What are Subagents?
 
-Subagents are specialized Claude Code instances with:
-- Focused system prompts for specific tasks
-- Restricted permissions appropriate to their role
+Subagents provide:
+- Focused system prompts optimized for specific tasks
+- Tool inheritance from the parent agent (or custom tool restrictions)
 - Isolated execution contexts
-- Results that flow back to the main agent
+- Results that flow back to the main agent for synthesis
 
-## Available Subagents
+Think of them as expert consultants the main agent can call upon for specialized analysis or work.
 
-| Subagent | Purpose | Permissions | Use Case |
-|----------|---------|-------------|----------|
-| **architecture-reviewer** | Review architectural decisions and design patterns | Read-only | Evaluating system design, SOLID principles, coupling |
-| **security-reviewer** | Identify security vulnerabilities and risks | Read-only | Finding SQL injection, XSS, auth issues, data exposure |
-| **bug-hunter** | Find potential bugs and edge cases | Read-only | Null checks, race conditions, error handling |
-| **code-quality-reviewer** | Review code quality and maintainability | Read-only | Style, readability, documentation, complexity |
-| **context-gatherer** | Explore codebase and identify relevant files | Read-only | Starting work on unfamiliar code, investigating issues |
-| **bug-investigator** | Trace bugs to root causes | Read-only | Debugging, error investigation, root cause analysis |
-| **test-writer** | Write comprehensive test cases | Read + Write | Adding test coverage, testing new features |
-
-## How Subagents Work in PR Reviews
-
-When a PR is opened, the main agent acts as an intelligent coordinator:
-
-1. **Analyzes the PR** - Reads the diff to understand scope and type of changes
-
-2. **Decides which agents to use** based on the changes:
-   - Documentation-only → Maybe just `code-quality-reviewer`
-   - New auth feature → `security-reviewer`, `bug-hunter`, `architecture-reviewer`
-   - Bug fix → `bug-hunter`, `code-quality-reviewer`
-   - Major refactoring → All four agents
-   - Typo fix → Possibly no agents, just approve
-
-3. **Delegates to selected agents** - Each analyzes from their perspective
-
-4. **Synthesizes results** - Combines findings and prioritizes by severity
-
-5. **Posts review** - Summary comment + inline comments for critical issues
-
-This intelligent delegation ensures:
-- ✅ Small PRs get quick, focused reviews
-- ✅ Complex PRs get thorough multi-agent analysis
-- ✅ No unnecessary overhead for trivial changes
-- ✅ Critical areas (security, bugs) always get proper scrutiny
-
-### Automatic Usage
-
-For PR reviews, the main agent intelligently delegates to specialized subagents based on the changes:
-
-**Small/Simple PRs:**
-- Documentation changes → `code-quality-reviewer` only
-- Typo fixes → May skip agents entirely
-- Config updates → `code-quality-reviewer` if needed
-
-**Medium PRs:**
-- Bug fixes → `bug-hunter` + `code-quality-reviewer`
-- Feature additions → `bug-hunter` + `code-quality-reviewer` + `architecture-reviewer`
-- Refactoring → `architecture-reviewer` + `code-quality-reviewer`
-
-**Complex/Critical PRs:**
-- Authentication/authorization → All agents (especially `security-reviewer`)
-- API changes → `security-reviewer` + `architecture-reviewer` + `bug-hunter`
-- Major refactoring → All four agents
-- Database changes → `security-reviewer` + `bug-hunter` + `architecture-reviewer`
-
-The coordinator explains which agents were used and why in the review summary.
-
-### Manual Invocation
-
-You can explicitly request subagents in your commands:
+## How Subagents Work
 
 ```
-/agent use context-gatherer to find all authentication-related files
-/agent have security-reviewer check this code for vulnerabilities
-/agent ask bug-investigator why the API crashes on large uploads
-/agent use test-writer to add tests for the payment module
-/agent have architecture-reviewer evaluate the new service design
-```
-
-### In CLAUDE.md
-
-You can configure subagent usage in your repository's CLAUDE.md:
-
-```markdown
-# Agent Instructions
-
-For code reviews:
-- Always run all four review subagents (architecture, security, bugs, code-quality)
-- Prioritize security findings above all else
-- Be extra strict on error handling in the payment module
-
-For bug investigations, delegate to bug-investigator first.
-```
-
-## Adding Custom Subagents
-
-1. Create a new JSON file in `subagents/`:
-
-```json
-{
-  "name": "security-auditor",
-  "description": "Specialized security audit agent",
-  "systemPrompt": "You are a security auditor...",
-  "permissions": {
-    "allow": ["Read", "Grep", "mcp__github"],
-    "deny": ["Write", "Edit", "Bash"],
-    "ask": []
-  }
-}
-```
-
-2. Rebuild the Docker container:
-
-```bash
-docker-compose build worker
-docker-compose up -d
-```
-
-3. The subagent is now available to the main agent
-
-## Benefits
-
-- **Focused expertise**: Each subagent is optimized for specific tasks
-- **Better context**: Subagents work with focused prompts and context
-- **Safety**: Restricted permissions reduce risk of unintended changes
-- **Efficiency**: Parallel execution of independent subtasks
-- **Clarity**: Clear separation of concerns in complex workflows
-
-## Architecture
-
-```
-Main Agent (Claude Code)
+Main Agent
     ↓ delegates task
-Subagent (Specialized Claude Code instance)
-    ↓ executes with focused context
-    ↓ returns result
+Subagent (specialized Claude instance)
+    ↓ executes with focused prompt
+    ↓ returns structured result
 Main Agent (synthesizes and continues)
 ```
 
-Subagents run in the same Docker container but with isolated contexts and their own system prompts.
+The main agent decides when to use subagents based on the task at hand. For example, when reviewing a PR that touches authentication code, it might delegate to a security-reviewer subagent for vulnerability analysis.
 
-## Observability
+## Creating a Subagent
 
-When using Langfuse, subagent executions are tracked as nested spans within the main agent's trace, allowing you to see:
-- Which subagents were invoked
-- What tasks they performed
-- How long each took
-- What results they returned
+Subagents are defined using the Claude Agent SDK's `AgentDefinition` class. Here's the anatomy:
 
-The system is configured with two Langfuse hooks:
-- **Stop hook**: Logs main agent completion
-- **SubagentStop hook**: Logs each subagent completion
+### 1. Create a Python file in `subagents/`
 
-This means every subagent execution (architecture-reviewer, security-reviewer, bug-hunter, code-quality-reviewer) will be logged to Langfuse automatically when it completes.
+```python
+# subagents/my_specialist.py
+"""My specialist subagent - does something specific."""
+
+from claude_agent_sdk import AgentDefinition
+
+MY_SPECIALIST = AgentDefinition(
+    description="Brief description of what this agent does and when to use it proactively.",
+    prompt="""You are a specialist in [domain].
+
+Your role is to [specific task].
+
+When analyzing code:
+1. [Step 1]
+2. [Step 2]
+3. [Step 3]
+
+Return your findings as JSON:
+```json
+{
+  "findings": [
+    {
+      "file": "path/to/file",
+      "line": 42,
+      "severity": "high",
+      "issue": "Brief description",
+      "explanation": "Detailed explanation",
+      "suggestion": "How to fix"
+    }
+  ],
+  "summary": "Overall assessment"
+}
+```
+
+Focus on [what matters most].""",
+    # Omit tools field to inherit all tools from parent
+    # Or specify tools=["tool1", "tool2"] to restrict
+    model="inherit"  # Use same model as parent
+)
+```
+
+### 2. Export it in `subagents/__init__.py`
+
+```python
+from .my_specialist import MY_SPECIALIST
+
+AGENTS = {
+    "my-specialist": MY_SPECIALIST,
+    # ... other agents
+}
+
+__all__ = ["AGENTS", "MY_SPECIALIST"]
+```
+
+### 3. Rebuild and restart the worker
+
+```bash
+docker-compose up --build -d worker
+```
+
+The subagent is now available to the main agent.
+
+## Key Components
+
+### Description
+The `description` field tells the main agent:
+- What the subagent specializes in
+- When to use it proactively
+- What kind of analysis it provides
+
+This is crucial because the main agent reads these descriptions to decide which subagents to delegate to.
+
+### Prompt
+The `prompt` is the system prompt for the subagent. It should:
+- Define the role clearly
+- Provide step-by-step instructions
+- Specify output format (JSON is recommended for structured results)
+- Focus on the specific domain
+
+### Tools
+By default, subagents inherit all tools from the parent agent except `Task` (subagents can't create tasks). You can:
+- Omit the `tools` field to inherit everything
+- Specify `tools=["tool1", "tool2"]` to restrict to specific tools
+- Use `tools=["mcp__github__*"]` for pattern matching
+
+### Model
+Set `model="inherit"` to use the same model as the parent agent.
+
+## Real Example: Bug Hunter
+
+Here's a complete example from this project:
+
+```python
+# subagents/bug_hunter.py
+from claude_agent_sdk import AgentDefinition
+
+BUG_HUNTER = AgentDefinition(
+    description="Specialist in finding potential bugs, edge cases, and error handling issues. Use proactively when reviewing pull requests to identify null checks, race conditions, and logic errors before they reach production.",
+    prompt="""You are a bug hunter specializing in identifying potential bugs and edge cases.
+
+IMPORTANT: You are reviewing a GitHub Pull Request. Use GitHub MCP tools to read the PR, NOT local filesystem tools.
+
+When reviewing a PR:
+1. Use mcp__github tools to read the PR diff and files
+2. Look for null/undefined handling issues
+3. Check for race conditions and concurrency problems
+4. Identify missing error handling
+5. Find edge cases and boundary conditions
+
+Return your findings as JSON:
+```json
+{
+  "findings": [
+    {
+      "file": "path/to/file.ts",
+      "line": 42,
+      "severity": "high",
+      "category": "bug-risk",
+      "issue": "Brief description",
+      "explanation": "Why this could cause a bug",
+      "suggestion": "How to fix it",
+      "code_snippet": "Relevant code"
+    }
+  ],
+  "summary": "Found X potential bugs, Y edge cases",
+  "risk_assessment": "Overall risk level"
+}
+```
+
+Prioritize by severity: critical bugs first, then high-risk edge cases.""",
+    model="inherit"
+)
+```
+
 
 ## Best Practices
 
-1. **Use subagents for focused tasks**: Don't delegate everything
-2. **Choose the right subagent**: Match the task to the subagent's expertise
-3. **Provide clear instructions**: Be specific about what you want the subagent to do
-4. **Review subagent results**: The main agent should validate and synthesize results
-5. **Monitor performance**: Use Langfuse to track subagent effectiveness
+1. **Clear descriptions**: The main agent uses these to decide when to delegate
+2. **Structured output**: JSON makes it easy for the main agent to parse results
+3. **Focused prompts**: Don't try to do everything in one subagent
+4. **Tool inheritance**: Let subagents inherit tools unless you need restrictions
+5. **Severity levels**: Use consistent severity levels across subagents (critical, high, medium, low)
 
-## Troubleshooting
-
-**Subagent not found:**
-- Ensure the JSON file is in `subagents/` directory
-- Rebuild the Docker container
-- Check the subagent name matches the filename (without .json)
-
-**Permission errors:**
-- Review the subagent's permissions in its JSON file
-- Ensure required tools are in the "allow" list
-- Check that the task doesn't require denied permissions
-
-**Poor results:**
-- Review and refine the subagent's system prompt
-- Provide more context in your delegation request
-- Consider if a different subagent would be more appropriate
 
 ## See Also
 
-- [Claude Code Subagents Documentation](https://code.claude.com/docs/en/sub-agents)
-- [subagents/README.md](subagents/README.md) - Detailed subagent documentation
+- [Claude Agent SDK Documentation](https://github.com/anthropics/anthropic-sdk-python)
+- [subagents/](../subagents/) - Source code for current subagents
 - [ARCHITECTURE.md](ARCHITECTURE.md) - System architecture overview

@@ -18,7 +18,12 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     AgentDefinition,
     AssistantMessage,
+    SystemMessage,
+    ResultMessage,
+    UserMessage,
     TextBlock,
+    ToolUseBlock,
+    ToolResultBlock,
     HookMatcher,
 )
 
@@ -28,8 +33,18 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from shared.queue import get_queue
 from subagents import AGENTS  # Import custom agent definitions
 
-logging.basicConfig(level=logging.INFO)
+# Configure logging based on LOG_LEVEL environment variable
+log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, log_level, logging.INFO),
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
+
+# Also set log level for claude_agent_sdk to see SDK debug logs
+logging.getLogger("claude_agent_sdk").setLevel(getattr(logging, log_level, logging.INFO))
+
+logger.info(f"Logging configured at {log_level} level")
 
 # Initialize Langfuse client
 langfuse = None
@@ -68,8 +83,9 @@ def validate_github_private_key(private_key: str) -> bool:
 
 def get_github_app_token():
     """Generate a GitHub App installation access token (cached for 10 minutes)"""
-    # Check cache first (with lock to prevent race conditions)
+    # Acquire lock BEFORE any cache access to prevent race conditions
     with _github_token_lock:
+        # Check cache first (already holding lock)
         if (
             _github_token_cache["token"]
             and time.time() < _github_token_cache["expires_at"]
@@ -132,9 +148,9 @@ def get_github_app_token():
                 token = response.json()["token"]
 
                 # Cache token for 9 minutes (expires in 10, but refresh early)
-                with _github_token_lock:
-                    _github_token_cache["token"] = token
-                    _github_token_cache["expires_at"] = time.time() + 540
+                # Note: Already holding _github_token_lock from outer scope
+                _github_token_cache["token"] = token
+                _github_token_cache["expires_at"] = time.time() + 540
 
                 logger.info("Successfully generated GitHub App installation token")
                 return token
@@ -155,6 +171,7 @@ def get_github_app_token():
 
 def get_fresh_github_token():
     """Get a valid GitHub token, refreshing if needed (for long-running sessions)"""
+    # Move expiration check inside lock to prevent TOCTOU race
     with _github_token_lock:
         # Refresh if token expires in less than 1 minute
         if (
@@ -163,8 +180,11 @@ def get_fresh_github_token():
         ):
             logger.info("Refreshing GitHub token (expired or expiring soon)")
             _github_token_cache["token"] = None  # Force refresh
-
-    return get_github_app_token()
+            # Generate new token while holding lock
+            return get_github_app_token()
+        
+        # Return cached token while still holding lock
+        return _github_token_cache["token"]
 
 
 def setup_claude_code_settings():
@@ -317,35 +337,8 @@ async def run_claude_code(
     """Run Claude Agent SDK to process the GitHub issue"""
 
     if auto_review:
-        # Flexible prompt that lets Claude decide which agents to use
-        prompt = f"""Review PR #{issue_number} in {repo} using specialized agents as needed.
-
-You have access to these specialized subagents via the Task tool:
-- architecture-reviewer: Design patterns, SOLID principles, API design
-- security-reviewer: Vulnerabilities, auth issues, data exposure
-- bug-hunter: Potential bugs, edge cases, error handling
-- code-quality-reviewer: Style, readability, maintainability
-
-Workflow:
-
-1. Read the PR (use GitHub MCP tools)
-2. Decide which agents to use based on changes:
-   - Docs only → code-quality-reviewer or none
-   - Auth/API changes → security-reviewer, bug-hunter, architecture-reviewer
-   - Bug fixes → bug-hunter, code-quality-reviewer
-   - Major refactor → all agents
-3. Delegate to chosen agents using Task tool: "agent-name, review PR #{issue_number} in {repo}"
-4. Post summary comment (add_issue_comment):
-   - Overall assessment
-   - Which agents used and why
-   - Findings by category with severity counts
-   - Recommendation (approve/request changes)
-5. Add inline comments if issues found:
-   a) Create pending review (pull_request_review_write, method="create", no event param)
-   b) Add comments SEQUENTIALLY (add_comment_to_pending_review, top 15-20 issues)
-   c) Submit review (pull_request_review_write, method="submit_pending", event="COMMENT"/"REQUEST_CHANGES"/"APPROVE")
-
-Start by reading the PR."""
+        # Use our customized PR Review Toolkit plugin command
+        prompt = f"/pr-review-toolkit:review-pr {repo} {issue_number} all"
     elif auto_triage:
         # Specific prompt for automatic issue triage
         prompt = f"""You are triaging issue #{issue_number} in {repo}.
@@ -483,8 +476,9 @@ async def _execute_claude_sdk(prompt: str, repo: str) -> str:
         }
     }
     
-    # Use imported agent definitions (cleaner than parsing markdown files)
+    # Load both custom agents and PR Review Toolkit plugin
     logger.info(f"Loaded {len(AGENTS)} custom agents: {list(AGENTS.keys())}")
+    logger.info("Loading plugins from /app/plugins directory")
 
     # Setup Langfuse hooks if configured
     hooks = {}
@@ -536,10 +530,21 @@ async def _execute_claude_sdk(prompt: str, repo: str) -> str:
                 except asyncio.TimeoutError:
                     logger.warning("Langfuse hook timed out after 30s")
                     process.kill()
-                    await process.wait()
+                    # Guaranteed wait to prevent zombie processes
+                    try:
+                        await asyncio.wait_for(process.wait(), timeout=5.0)
+                    except asyncio.TimeoutError:
+                        logger.error("Process failed to terminate after kill signal")
 
             except Exception as e:
                 logger.warning(f"Error running Langfuse hook: {e}")
+                # Ensure process cleanup on exception
+                if 'process' in locals() and process.returncode is None:
+                    try:
+                        process.kill()
+                        await asyncio.wait_for(process.wait(), timeout=5.0)
+                    except Exception as cleanup_error:
+                        logger.error(f"Failed to cleanup process: {cleanup_error}")
 
             return {}
 
@@ -554,7 +559,7 @@ async def _execute_claude_sdk(prompt: str, repo: str) -> str:
             "Configured Langfuse Stop and SubagentStop hooks for Claude Agent SDK"
         )
 
-    # Configure agent options with MCP servers and programmatically defined agents
+    # Configure agent options with MCP servers, custom agents, and plugins
     options = ClaudeAgentOptions(
         allowed_tools=[
             "Task",
@@ -562,7 +567,8 @@ async def _execute_claude_sdk(prompt: str, repo: str) -> str:
         ],  # Task for subagents, all GitHub MCP tools
         permission_mode="acceptEdits",  # Auto-accept file edits
         mcp_servers=mcp_servers,  # Pass MCP config
-        agents=AGENTS,  # Pass agents from subagents package
+        agents=AGENTS,  # Pass custom agents from subagents package
+        plugins=[{"type": "local", "path": "/app/plugins/pr-review-toolkit"}],  # Load PR review toolkit plugin
         hooks=hooks,
         max_turns=50,  # Allow multiple turns for complex tasks
     )
@@ -580,27 +586,74 @@ async def _execute_claude_sdk(prompt: str, repo: str) -> str:
             async with ClaudeSDKClient(options=options) as client:
                 await client.query(prompt)
 
-                async for message in client.receive_response():
+                async for message in client.receive_messages():
+                    # Log all message types for debugging
+                    logger.debug(f"Received message type: {type(message).__name__}")
+                    
                     # Log init message to see loaded agents
-                    if (
-                        hasattr(message, "type")
-                        and message.type == "system"
-                        and hasattr(message, "subtype")
-                        and message.subtype == "init"
-                    ):
-                        if hasattr(message, "data") and "agents" in message.data:
-                            agents = message.data.get("agents", [])
-                            logger.info(
-                                f"Loaded {len(agents)} custom agents: {[a.get('name') for a in agents]}"
-                            )
+                    if isinstance(message, SystemMessage):
+                        if message.subtype == "init":
+                            # Log all init data for debugging
+                            if hasattr(message, "data"):
+                                init_data = message.data
+                                logger.info(f"Init message data keys: {list(init_data.keys()) if isinstance(init_data, dict) else 'N/A'}")
+                                
+                                # Check plugins
+                                if "plugins" in init_data:
+                                    plugins = init_data.get("plugins", [])
+                                    logger.info(f"Loaded {len(plugins)} plugins: {plugins}")
+                                else:
+                                    logger.warning("No plugins found in init message")
+                                
+                                # Check slash commands
+                                if "slash_commands" in init_data:
+                                    commands = init_data.get("slash_commands", [])
+                                    logger.info(f"Available slash commands: {commands}")
+                                else:
+                                    logger.warning("No slash_commands found in init message")
+                                
+                                # Check agents
+                                if "agents" in init_data:
+                                    agents = init_data.get("agents", [])
+                                    # Agents can be strings or dicts
+                                    agent_names = [a if isinstance(a, str) else a.get('name', 'unknown') for a in agents]
+                                    logger.info(f"Loaded {len(agents)} custom agents: {agent_names}")
+                                else:
+                                    logger.warning("No custom agents found in init message")
+                            else:
+                                logger.warning("Init message has no data attribute")
                         else:
-                            logger.warning("No custom agents found in init message")
+                            logger.debug(f"SystemMessage subtype: {message.subtype}, data: {message.data if hasattr(message, 'data') else 'N/A'}")
 
-                    if isinstance(message, AssistantMessage):
+                    elif isinstance(message, AssistantMessage):
+                        logger.info(f"AssistantMessage with {len(message.content)} content blocks")
                         for block in message.content:
                             if isinstance(block, TextBlock):
                                 response_parts.append(block.text)
-                                logger.debug(f"Received text: {block.text[:100]}...")
+                                logger.info(f"Received text block: {block.text[:200]}...")
+                            elif isinstance(block, ToolUseBlock):
+                                logger.info(f"Tool use: {block.name} (id: {block.id})")
+                            else:
+                                logger.debug(f"Content block type: {type(block).__name__}")
+                    
+                    elif isinstance(message, UserMessage):
+                        logger.debug(f"UserMessage with {len(message.content)} content blocks")
+                        for block in message.content:
+                            if isinstance(block, ToolResultBlock):
+                                logger.debug(f"Tool result for {block.tool_use_id}: {str(block.content)[:200]}...")
+
+                    elif isinstance(message, ResultMessage):
+                        logger.info(f"Response complete - {message.num_turns} turns, {message.duration_ms}ms")
+                        if message.total_cost_usd:
+                            logger.info(f"Cost: ${message.total_cost_usd:.4f}")
+                        if hasattr(message, 'error') and message.error:
+                            logger.error(f"ResultMessage contains error: {message.error}")
+                        if hasattr(message, 'stop_reason'):
+                            logger.info(f"Stop reason: {message.stop_reason}")
+                        break
+                    
+                    else:
+                        logger.debug(f"Unhandled message type: {type(message).__name__}")
 
         response = "\n".join(response_parts)
 
@@ -709,7 +762,8 @@ async def process_request(
 
                 raise
             finally:
-                # Proper Langfuse shutdown (flush + shutdown)
+                # Only flush, don't shutdown module-level global
+                # Shutdown would destroy the client for subsequent requests
                 if langfuse:
                     langfuse.flush()
                     langfuse.shutdown()

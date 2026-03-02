@@ -688,8 +688,10 @@ def main() -> int:
         return 0
 
     finally:
+        # SECURITY FIX: Only flush, don't shutdown
+        # This script may be called multiple times, shutdown destroys the client
         try:
-            langfuse.shutdown()
+            langfuse.flush()
         except Exception:
             pass
 

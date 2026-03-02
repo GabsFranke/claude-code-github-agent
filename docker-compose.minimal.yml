@@ -30,6 +30,11 @@ services:
     build:
       context: .
       dockerfile: services/agent-worker/Dockerfile
+    volumes:
+      # Mount your personal gcloud credentials for local Vertex AI access (Windows path)
+      - ${APPDATA}/gcloud/application_default_credentials.json:/root/.config/gcloud/application_default_credentials.json:ro
+      # Mount all plugins directory
+      - ./plugins:/app/plugins:ro
     environment:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - ANTHROPIC_AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN}
@@ -37,12 +42,16 @@ services:
       - ANTHROPIC_DEFAULT_HAIKU_MODEL=${ANTHROPIC_DEFAULT_HAIKU_MODEL}
       - ANTHROPIC_DEFAULT_SONNET_MODEL=${ANTHROPIC_DEFAULT_SONNET_MODEL}
       - ANTHROPIC_DEFAULT_OPUS_MODEL=${ANTHROPIC_DEFAULT_OPUS_MODEL}
+      # Vertex AI configuration
+      - ANTHROPIC_VERTEX_PROJECT_ID=${ANTHROPIC_VERTEX_PROJECT_ID}
+      - ANTHROPIC_VERTEX_REGION=${ANTHROPIC_VERTEX_REGION}
       - GITHUB_APP_ID=${GITHUB_APP_ID}
       - GITHUB_INSTALLATION_ID=${GITHUB_INSTALLATION_ID}
       - GITHUB_PRIVATE_KEY=${GITHUB_PRIVATE_KEY}
       - QUEUE_TYPE=redis
       - REDIS_URL=redis://redis:6379
       - REDIS_PASSWORD=myredissecret
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
     depends_on:
       redis:
         condition: service_healthy
