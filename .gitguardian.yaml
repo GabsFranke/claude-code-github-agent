@@ -1,0 +1,15 @@
+# Paths to ignore for secret scanning
+paths-ignore:
+  - tests/**
+  - tests/fixtures/**
+  - "**/*test*.py"
+  - "**/*_test.py"
+
+# Specific patterns to ignore
+matches-ignore:
+  - name: Test RSA keys
+    match: "-----BEGIN RSA PRIVATE KEY-----"
+    paths:
+      - tests/**
+      - "**/test_*.py"
+      - "**/*_test.py"
