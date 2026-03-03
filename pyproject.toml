@@ -129,5 +129,22 @@ ignore = [
 "tests/*" = ["B011"]
 
 [build-system]
-requires = ["setuptools>=45", "wheel", "setuptools_scm[toml]>=6.2"]
+requires = ["setuptools>=45", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[project]
+name = "simple-claude-code-github-agent"
+version = "0.1.0"
+description = "AI-powered GitHub bot using Claude Agent SDK"
+requires-python = ">=3.11"
+dynamic = ["dependencies", "optional-dependencies"]
+
+[tool.setuptools]
+packages = ["shared", "services", "subagents", "hooks", "plugins"]
+
+[tool.setuptools.package-data]
+"*" = ["*.md", "*.txt", "*.yml", "*.yaml"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["services/webhook/requirements.txt", "services/agent_worker/requirements.txt"]}
+optional-dependencies.dev = {file = ["requirements-dev.txt"]}
