@@ -29,10 +29,14 @@ class RedisConfig(BaseConfig):
 class GitHubConfig(BaseConfig):
     """GitHub App configuration."""
 
-    github_app_id: str = Field(..., description="GitHub App ID")
-    github_installation_id: str = Field(..., description="GitHub Installation ID")
-    github_private_key: str = Field(..., description="GitHub App private key (PEM)")
-    github_webhook_secret: str = Field(..., description="GitHub webhook secret")
+    github_app_id: str = Field(default="", description="GitHub App ID")
+    github_installation_id: str = Field(
+        default="", description="GitHub Installation ID"
+    )
+    github_private_key: str = Field(
+        default="", description="GitHub App private key (PEM)"
+    )
+    github_webhook_secret: str = Field(default="", description="GitHub webhook secret")
 
     @field_validator("github_private_key")
     @classmethod

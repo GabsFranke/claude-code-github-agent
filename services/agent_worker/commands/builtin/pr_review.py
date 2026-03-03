@@ -1,6 +1,6 @@
 """PR review command."""
 
-from commands.base import Command, CommandContext, CommandResult
+from ..base import Command, CommandContext, CommandResult
 
 
 class PRReviewCommand(Command):

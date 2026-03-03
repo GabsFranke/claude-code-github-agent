@@ -1,5 +1,7 @@
 # Simple Claude Code GitHub Agent
 
+[![Tests](https://github.com/YOUR_USERNAME/simple-claude-code-github-agent/actions/workflows/test.yml/badge.svg)](https://github.com/YOUR_USERNAME/simple-claude-code-github-agent/actions/workflows/test.yml)
+
 AI-powered GitHub agent that automatically reviews pull requests and responds to commands using Claude Agent SDK and GitHub's official MCP server.
 
 > [!WARNING]
@@ -267,6 +269,20 @@ docker-compose up -d worker
 ```
 
 The agent works identically with all providers - just toggle the environment variables and recreate the container.
+
+## Testing
+
+```bash
+# Run all tests
+pytest
+
+# Run with coverage
+pytest --cov=shared --cov=services --cov-report=html
+```
+
+See [docs/TESTING.md](docs/TESTING.md) for the complete testing guide.
+
+Tests run automatically on every PR via GitHub Actions.
 
 ## Development
 

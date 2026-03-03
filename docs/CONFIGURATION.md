@@ -1,4 +1,4 @@
-# Configuration Guide
+ # Configuration Guide
 
 This project uses Pydantic Settings for type-safe configuration management with automatic validation.
 

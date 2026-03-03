@@ -119,7 +119,7 @@ class RedisQueue(MessageQueue):
         """Close Redis connection."""
         self._running = False
         if self.redis:
-            await self.redis.close()
+            await self.redis.aclose()
 
 
 class PubSubQueue(MessageQueue):

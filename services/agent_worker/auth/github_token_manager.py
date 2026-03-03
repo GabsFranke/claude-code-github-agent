@@ -1,7 +1,7 @@
 """Thread-safe GitHub App token manager."""
 
+import asyncio
 import logging
-import threading
 import time
 
 import httpx
@@ -29,7 +29,7 @@ class GitHubTokenManager:
         self._http_client = http_client
 
         # Thread-safe state
-        self._lock = threading.Lock()
+        self._lock = asyncio.Lock()
         self._token: str | None = None
         self._expires_at: float = 0
         self._cache_duration = 540  # 9 minutes
@@ -49,7 +49,7 @@ class GitHubTokenManager:
 
     async def get_token(self) -> str:
         """Get valid token, refreshing if needed (thread-safe)."""
-        with self._lock:
+        async with self._lock:
             if self._is_expired():
                 await self._refresh_token()
             if not self._token:

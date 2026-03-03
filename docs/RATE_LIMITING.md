@@ -20,20 +20,41 @@ Rate limiting uses a token bucket algorithm to control request rates:
 
 ### Implementation
 
+**Distributed (Redis-based)**:
+
+```python
+from shared.rate_limiter import (
+    MultiRateLimiter,
+    create_redis_rate_limiter_backend
+)
+
+# Initialize with Redis backend for multi-worker deployments
+redis_backend = await create_redis_rate_limiter_backend(
+    redis_url="redis://localhost:6379",
+    password="your_password"
+)
+rate_limiters = MultiRateLimiter(backend=redis_backend)
+
+# Add limiters (shared across all workers)
+rate_limiters.add_limiter("github", max_requests=5000, time_window=3600)
+rate_limiters.add_limiter("anthropic", max_requests=100, time_window=60)
+
+# Use before API calls
+await rate_limiters.acquire("github")  # Coordinated across all workers
+```
+
+**In-Memory (Single worker)**:
+
 ```python
 from shared import MultiRateLimiter
 
-# Initialize rate limiters
+# Initialize without backend (defaults to in-memory)
 rate_limiters = MultiRateLimiter()
 rate_limiters.add_limiter("github", max_requests=5000, time_window=3600)
 rate_limiters.add_limiter("anthropic", max_requests=100, time_window=60)
 
 # Use before API calls
-await rate_limiters.acquire("github")  # Waits if rate limit reached
-# Make GitHub API call
-
-await rate_limiters.acquire("anthropic", timeout=60.0)  # With timeout
-# Make Anthropic API call
+await rate_limiters.acquire("github")  # Local to this worker only
 ```
 
 ## Configuration
@@ -159,37 +180,98 @@ logger.info(f"GitHub API usage: {usage:.1f}%")
 
 ### Multiple Workers
 
-Each worker has its own rate limiter. If you run multiple workers:
+**NEW: Distributed Rate Limiting with Redis**
+
+The system now supports distributed rate limiting using Redis, which ensures rate limits are enforced across all workers:
 
 ```bash
 docker-compose up --scale worker=3
 ```
 
-Effective rate limit = `RATE_LIMIT / NUM_WORKERS`
+With Redis-based rate limiting:
+
+- ✅ Rate limits are shared across all workers
+- ✅ No need to divide limits by worker count
+- ✅ Accurate rate limiting in multi-worker deployments
+- ✅ Prevents API quota violations
 
 Example:
 
 - GitHub limit: 5000/hour
-- 3 workers: ~1667/hour per worker
-- Total: Still 5000/hour (shared across workers)
+- 3 workers: All share the same 5000/hour limit
+- Total: Exactly 5000/hour (enforced across all workers)
 
-**Solution**: Adjust per-worker limits:
+### Automatic Fallback
+
+The worker automatically detects Redis availability:
+
+```python
+# Tries Redis first (distributed)
+try:
+    redis_backend = await create_redis_rate_limiter_backend(
+        redis_url=config.redis_url,
+        password=config.redis_password
+    )
+    rate_limiters = MultiRateLimiter(backend=redis_backend)
+    logger.info("Using Redis-based distributed rate limiting")
+except (ImportError, ConnectionError) as e:
+    # Falls back to in-memory (single worker only)
+    logger.warning("Falling back to in-memory rate limiting")
+    rate_limiters = MultiRateLimiter()
+```
+
+### Configuration
+
+No additional configuration needed! The system uses the existing Redis connection:
 
 ```bash
-# For 3 workers
+# .env
+REDIS_URL=redis://localhost:6379
+REDIS_PASSWORD=your_password  # Optional
+
+# Rate limits (same for all workers)
+GITHUB_RATE_LIMIT=5000  # Total across all workers
+ANTHROPIC_RATE_LIMIT=100  # Total across all workers
+```
+
+### Legacy In-Memory Mode
+
+If Redis is unavailable, the system falls back to in-memory rate limiting:
+
+⚠️ **Warning**: In-memory mode is NOT safe for multiple workers!
+
+Each worker has its own rate limiter, so effective rate limit = `RATE_LIMIT × NUM_WORKERS`
+
+Example with in-memory fallback:
+
+- GitHub limit: 5000/hour
+- 3 workers: Each has 5000/hour limit
+- Total: 15000/hour (3× the intended limit!)
+
+**Solution for in-memory mode**: Manually adjust per-worker limits:
+
+```bash
+# For 3 workers with in-memory fallback
 GITHUB_RATE_LIMIT=1667  # 5000 / 3
 ANTHROPIC_RATE_LIMIT=33  # 100 / 3
 ```
 
-### Distributed Rate Limiting
+### How It Works
 
-For true distributed rate limiting across workers, you'd need:
+**Redis-Based (Distributed)**:
 
-1. Shared Redis counter
-2. Distributed lock
-3. Centralized rate limiter service
+1. Uses Redis sorted sets for atomic operations
+2. Sliding window algorithm with wall clock time
+3. Each request adds entry to Redis with timestamp
+4. Expired entries are automatically removed
+5. All workers coordinate through Redis
 
-This is not currently implemented but can be added if needed.
+**In-Memory (Single Worker)**:
+
+1. Uses local deque for request tracking
+2. Sliding window algorithm with monotonic time
+3. Each worker has independent state
+4. No coordination between workers
 
 ## Troubleshooting
 

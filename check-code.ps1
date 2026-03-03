@@ -7,7 +7,7 @@ Write-Host "  Code Quality Check"
 Write-Host "========================================"
 Write-Host ""
 
-$paths = "services/", "shared/", "subagents/"
+$paths = "services/", "shared/", "subagents/", "tests/"
 $hasErrors = $false
 
 # Black

@@ -1,6 +1,6 @@
 """Issue triage command."""
 
-from commands.base import Command, CommandContext, CommandResult
+from ..base import Command, CommandContext, CommandResult
 
 
 class IssueTriageCommand(Command):

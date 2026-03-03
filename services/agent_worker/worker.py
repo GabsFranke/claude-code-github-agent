@@ -12,21 +12,49 @@ from langfuse import Langfuse
 # Add parent directory to path for shared imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-# Import modularized components
-from auth import GitHubTokenManager
-from config import setup_claude_settings, setup_mcp_config
-from processors import RequestProcessor
-
 # Import shared utilities
 from shared import MultiRateLimiter, get_queue
 from shared.config import get_worker_config
 from shared.health import HealthChecker
 
-# Load configuration first
+# Import modularized components
+from .auth import GitHubTokenManager
+from .config import setup_claude_settings, setup_mcp_config
+from .processors import RequestProcessor
+
+# Load configuration first with detailed error reporting
 try:
     config = get_worker_config()
 except Exception as e:
-    print(f"FATAL: Configuration validation failed: {e}", file=sys.stderr)
+    # Setup basic logging for error reporting before config is loaded
+    logging.basicConfig(
+        level=logging.ERROR,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+    error_logger = logging.getLogger(__name__)
+
+    error_logger.error(
+        "FATAL: Configuration validation failed. Cannot start worker.",
+        exc_info=True,
+    )
+    error_logger.error(f"Error details: {type(e).__name__}: {e}")
+    error_logger.error(
+        "Please check your .env file and ensure all required environment variables are set correctly."
+    )
+    error_logger.error("See docs/CONFIGURATION.md for configuration requirements.")
+
+    # Also print to stderr for container logs
+    print(f"\n{'='*60}", file=sys.stderr)
+    print("FATAL ERROR: Configuration Validation Failed", file=sys.stderr)
+    print(f"{'='*60}", file=sys.stderr)
+    print(f"Error: {type(e).__name__}: {e}", file=sys.stderr)
+    print("\nPlease verify:", file=sys.stderr)
+    print("  1. .env file exists and is readable", file=sys.stderr)
+    print("  2. All required environment variables are set", file=sys.stderr)
+    print("  3. Values are in correct format (URLs, integers, etc.)", file=sys.stderr)
+    print("\nSee docs/CONFIGURATION.md for details.", file=sys.stderr)
+    print(f"{'='*60}\n", file=sys.stderr)
+
     sys.exit(1)
 
 # Configure logging
@@ -118,8 +146,23 @@ async def main():
     health_checker.start()
     logger.info(f"Health checker started: {config.health_check_file}")
 
-    # Initialize rate limiters
-    rate_limiters = MultiRateLimiter()
+    # Initialize rate limiters with Redis backend for distributed rate limiting
+    try:
+        from shared.rate_limiter import create_redis_rate_limiter_backend
+
+        logger.info("Initializing distributed rate limiting with Redis...")
+        redis_backend = await create_redis_rate_limiter_backend(
+            redis_url=config.queue.redis_url, password=config.queue.redis_password
+        )
+        rate_limiters = MultiRateLimiter(backend=redis_backend)
+        logger.info("Using Redis-based distributed rate limiting (multi-worker safe)")
+    except (ImportError, ConnectionError) as e:
+        logger.warning(
+            f"Failed to initialize Redis rate limiting: {e}. "
+            "Falling back to in-memory rate limiting (single worker only)"
+        )
+        rate_limiters = MultiRateLimiter()  # Falls back to in-memory backend
+
     rate_limiters.add_limiter(
         "github",
         max_requests=config.github_rate_limit,
@@ -224,6 +267,8 @@ async def main():
             await health_checker.stop()
         if processor:
             await processor.cleanup()
+        if rate_limiters:
+            await rate_limiters.cleanup()
         await http_client.aclose()
         if langfuse:
             langfuse.flush()

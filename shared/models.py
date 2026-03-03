@@ -1,10 +1,24 @@
 """Pydantic models for message queue and internal data structures."""
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class AgentRequest(BaseModel):
     """Message format for agent requests in the queue."""
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "repository": "owner/repo",
+                "issue_number": 123,
+                "command": "Review this PR",
+                "user": "developer",
+                "auto_review": True,
+                "auto_triage": False,
+                "event_id": "webhook-123456",
+            }
+        }
+    )
 
     repository: str = Field(..., description="Full repository name (owner/repo)")
     issue_number: int = Field(..., description="Issue or PR number")
@@ -18,32 +32,12 @@ class AgentRequest(BaseModel):
     )
     event_id: str | None = Field(None, description="Unique event ID for deduplication")
 
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "repository": "owner/repo",
-                "issue_number": 123,
-                "command": "Review this PR",
-                "user": "developer",
-                "auto_review": True,
-                "auto_triage": False,
-                "event_id": "webhook-123456",
-            }
-        }
-
 
 class AgentResponse(BaseModel):
     """Response from agent execution."""
 
-    success: bool = Field(..., description="Whether the request succeeded")
-    response: str | None = Field(None, description="Agent response text")
-    error: str | None = Field(None, description="Error message if failed")
-    duration_ms: int | None = Field(None, description="Execution duration in ms")
-    num_turns: int | None = Field(None, description="Number of agent turns")
-    cost_usd: float | None = Field(None, description="Estimated cost in USD")
-
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "success": True,
                 "response": "Review completed successfully",
@@ -53,3 +47,11 @@ class AgentResponse(BaseModel):
                 "cost_usd": 0.15,
             }
         }
+    )
+
+    success: bool = Field(..., description="Whether the request succeeded")
+    response: str | None = Field(None, description="Agent response text")
+    error: str | None = Field(None, description="Error message if failed")
+    duration_ms: int | None = Field(None, description="Execution duration in ms")
+    num_turns: int | None = Field(None, description="Number of agent turns")
+    cost_usd: float | None = Field(None, description="Estimated cost in USD")

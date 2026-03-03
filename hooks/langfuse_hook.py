@@ -63,13 +63,13 @@ def error(msg: str) -> None:
 
 # ----------------- State locking (best-effort) -----------------
 class FileLock:
-    def __init__(self, path: Path, timeout_s: float = None):
+    def __init__(self, path: Path, timeout_s: float | None = None):
         self.path = path
         # Allow configurable timeout, default to 10s for parallel workers
         self.timeout_s = timeout_s or float(
             os.getenv("LANGFUSE_LOCK_TIMEOUT_S", "10.0")
         )
-        self._fh = None
+        self._fh: Any = None
 
     def __enter__(self):
         STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -80,7 +80,7 @@ class FileLock:
             deadline = time.time() + self.timeout_s
             while True:
                 try:
-                    fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)  # type: ignore[attr-defined]
                     break
                 except BlockingIOError:
                     if time.time() > deadline:
@@ -100,7 +100,7 @@ class FileLock:
         try:
             import fcntl
 
-            fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+            fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)  # type: ignore[attr-defined]
         except Exception:
             pass
         try:
@@ -113,7 +113,8 @@ def load_state() -> Dict[str, Any]:
     try:
         if not STATE_FILE.exists():
             return {}
-        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        data: Dict[str, Any] = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        return data
     except Exception:
         return {}
 
@@ -144,7 +145,8 @@ def read_hook_payload() -> Dict[str, Any]:
         data = sys.stdin.read()
         if not data.strip():
             return {}
-        return json.loads(data)
+        result: Dict[str, Any] = json.loads(data)
+        return result
     except Exception:
         return {}
 
@@ -159,7 +161,7 @@ def extract_session_and_transcript(
     For SubagentStop events, use agent_transcript_path and agent_id.
     Returns: (session_id, transcript_path, agent_type, parent_session_id)
     """
-    session_id = (
+    session_id: Optional[str] = (
         payload.get("sessionId")
         or payload.get("session_id")
         or payload.get("session", {}).get("id")
@@ -167,8 +169,8 @@ def extract_session_and_transcript(
 
     # For SubagentStop, use agent_transcript_path and create unique session_id
     hook_event = payload.get("hook_event_name")
-    agent_type = None
-    parent_session_id = None
+    agent_type: Optional[str] = None
+    parent_session_id: Optional[str] = None
 
     if hook_event == "SubagentStop":
         transcript = payload.get("agent_transcript_path")
@@ -190,7 +192,7 @@ def extract_session_and_transcript(
 
     if transcript:
         try:
-            transcript_path = Path(transcript).expanduser().resolve()
+            transcript_path: Optional[Path] = Path(transcript).expanduser().resolve()
         except Exception:
             transcript_path = None
     else:
@@ -201,8 +203,6 @@ def extract_session_and_transcript(
 
 # ----------------- Transcript parsing helpers -----------------
 def get_content(msg: Dict[str, Any]) -> Any:
-    if not isinstance(msg, dict):
-        return None
     if "message" in msg and isinstance(msg.get("message"), dict):
         return msg["message"].get("content")
     return msg.get("content")
@@ -212,12 +212,12 @@ def get_role(msg: Dict[str, Any]) -> Optional[str]:
     # Claude Code transcript lines commonly have type=user/assistant OR message.role
     t = msg.get("type")
     if t in ("user", "assistant"):
-        return t
+        return str(t)
     m = msg.get("message")
     if isinstance(m, dict):
         r = m.get("role")
         if r in ("user", "assistant"):
-            return r
+            return str(r)
     return None
 
 
@@ -265,7 +265,9 @@ def extract_text(content: Any) -> str:
     return ""
 
 
-def truncate_text(s: str, max_chars: int = MAX_CHARS) -> Tuple[str, Dict[str, Any]]:
+def truncate_text(
+    s: str | None, max_chars: int = MAX_CHARS
+) -> Tuple[str, Dict[str, Any]]:
     if s is None:
         return "", {"truncated": False, "orig_len": 0}
     orig_len = len(s)
@@ -292,7 +294,7 @@ def get_message_id(msg: Dict[str, Any]) -> Optional[str]:
     if isinstance(m, dict):
         mid = m.get("id")
         if isinstance(mid, str) and mid:
-            return mid
+            return str(mid)
     return None
 
 
@@ -704,11 +706,9 @@ def main() -> int:
         info(
             f"Processed {emitted} turns in {dur:.2f}s (session={session_id}{agent_info})"
         )
-        return 0
 
     except Exception as e:
         debug(f"Unexpected failure: {e}")
-        return 0
 
     finally:
         # SECURITY FIX: Only flush, don't shutdown
@@ -717,6 +717,8 @@ def main() -> int:
             langfuse.flush()
         except Exception:
             pass
+
+    return 0
 
 
 if __name__ == "__main__":
