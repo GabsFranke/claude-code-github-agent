@@ -19,11 +19,11 @@ COPY subagents/ ./subagents/
 COPY hooks/langfuse_hook.py /app/hooks/langfuse_hook.py
 RUN chmod +x /app/hooks/langfuse_hook.py
 
-WORKDIR /app/services/agent_worker
+WORKDIR /app
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
   CMD test -f /tmp/worker_health && \
       [ $(( $(date +%s) - $(stat -c %Y /tmp/worker_health 2>/dev/null || echo 0) )) -lt 120 ] || exit 1
 
-CMD ["python3", "worker.py"]
+CMD ["python3", "-m", "services.agent_worker.worker"]

@@ -18,11 +18,15 @@ services:
     ports:
       - "10000:8080"
     environment:
+      - GITHUB_APP_ID=${GITHUB_APP_ID}
+      - GITHUB_INSTALLATION_ID=${GITHUB_INSTALLATION_ID}
+      - GITHUB_PRIVATE_KEY=${GITHUB_PRIVATE_KEY}
       - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET}
       - QUEUE_TYPE=redis
       - REDIS_URL=redis://redis:6379
-      - REDIS_PASSWORD=myredissecret
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
       - PORT=8080
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
     depends_on:
       redis:
         condition: service_healthy
