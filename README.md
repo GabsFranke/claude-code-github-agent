@@ -1,11 +1,10 @@
 # Simple Claude Code GitHub Agent
 
-[![Tests](https://github.com/YOUR_USERNAME/simple-claude-code-github-agent/actions/workflows/test.yml/badge.svg)](https://github.com/YOUR_USERNAME/simple-claude-code-github-agent/actions/workflows/test.yml)
 
 AI-powered GitHub agent that automatically reviews pull requests and responds to commands using Claude Agent SDK and GitHub's official MCP server.
 
 > [!WARNING]
-> This agent has full write access to your repositories and can autonomously create branches, commit changes, and open PRs. The current implementation auto-approves all GitHub MCP tool calls (configured with `autoApprove: ['*']`) to allow Claude Code to operate without manual confirmation. Fine-grained permission controls are not yet implemented. Use with caution and test in a sandbox repository first.
+> This agent has full write access to your repositories and can autonomously create branches, commit changes, and open PRs. The current implementation auto-approves all GitHub MCP tool calls (configured with `autoApprove: ['*']`) to allow Claude Code to operate without manual confirmation. Fine-grained permission controls are not yet implemented. Use with caution.
 
 > [!IMPORTANT]
 > This project is currently self-hosted only. You'll need to run it on your own infrastructure with Docker or manually. Cloud deployment options may be added in the future.
@@ -188,36 +187,36 @@ You can also request specific subagents manually:
 
 ## Architecture
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed system design.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed system design.
 
-For information about subagents, see [SUBAGENTS.md](docs/SUBAGENTS.md).
-
-For PR review flow details, see [docs/PR_REVIEW_FLOW.md](docs/PR_REVIEW_FLOW.md).
-
-For debugging subagents, see [docs/DEBUGGING_SUBAGENTS.md](docs/DEBUGGING_SUBAGENTS.md).
-
-**Note**: Langfuse hook logs are only available inside the container (not via `docker-compose logs`). View with:
-
-```bash
-docker-compose exec worker cat /root/.claude/state/langfuse_hook.log
-```
+**High-level flow**:
 
 ```
-GitHub Event → Webhook → Redis Queue → Worker → Claude Agent SDK
-                                                      ↓
-                                              GitHub MCP Server
-                                                   (Official)
-                                                      ↓
-                                                 GitHub API
+GitHub Event → Webhook → Redis Queue → Worker → Job Queue → Sandbox Pool → GitHub MCP → GitHub API
 ```
 
-**Components:**
+**Key components**:
 
 - **Webhook Service** - Receives GitHub events (FastAPI)
-- **Worker** - Uses Claude Agent SDK to process requests programmatically
-- **Message Queue** - Redis for job distribution
-- **Claude Agent SDK** - Python SDK for autonomous coding agent with GitHub MCP access
-- **Langfuse** - Optional self-hosted observability platform for tracing and debugging
+- **Worker** - Lightweight job coordinator
+- **Sandbox Pool** - Executes Claude SDK in isolated workspaces
+- **Result Poster** - Posts responses to GitHub
+- **Redis** - Message queue and job queue
+- **Claude Agent SDK** - Autonomous coding agent
+- **GitHub MCP** - Official GitHub integration
+
+**Scaling**: `docker-compose up --scale sandbox_worker=10 -d`
+
+## Documentation
+
+- [Getting Started](docs/GETTING_STARTED.md) - Installation and setup
+- [Architecture](docs/ARCHITECTURE.md) - System design and components
+- [Configuration](docs/CONFIGURATION.md) - Environment variables
+- [Development](docs/DEVELOPMENT.md) - Testing and contributing
+- [Langfuse Setup](docs/LANGFUSE_SETUP.md) - Observability
+- [PR Review Flow](docs/PR_REVIEW_FLOW.md) - Review workflow
+- [Plugins](docs/PLUGINS.md) - Plugin system
+- [Subagents](docs/SUBAGENTS.md) - Subagent system
 
 ## Configuration
 

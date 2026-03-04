@@ -9,42 +9,6 @@ import pytest
 class TestWorkerFunctions:
     """Test worker utility functions."""
 
-    def test_login_claude_code_sets_env_vars(self):
-        """Test login_claude_code sets environment variables."""
-        import os
-
-        from services.agent_worker import worker
-
-        # Mock the config
-        with patch.object(worker, "config") as mock_config:
-            mock_config.anthropic.get_api_key_or_raise.return_value = "test-key"
-            mock_config.anthropic.anthropic_base_url = "https://test.api"
-            mock_config.anthropic.anthropic_vertex_project_id = None
-            mock_config.anthropic.anthropic_vertex_region = None
-
-            worker.login_claude_code()
-
-            assert os.environ["ANTHROPIC_API_KEY"] == "test-key"
-            assert os.environ["ANTHROPIC_BASE_URL"] == "https://test.api"
-
-    def test_login_claude_code_with_vertex_ai(self):
-        """Test login_claude_code with Vertex AI config."""
-        import os
-
-        from services.agent_worker import worker
-
-        with patch.object(worker, "config") as mock_config:
-            mock_config.anthropic.get_api_key_or_raise.return_value = "test-key"
-            mock_config.anthropic.anthropic_base_url = None
-            mock_config.anthropic.anthropic_vertex_project_id = "test-project"
-            mock_config.anthropic.anthropic_vertex_region = "us-central1"
-
-            worker.login_claude_code()
-
-            assert os.environ["ANTHROPIC_API_KEY"] == "test-key"
-            assert os.environ["ANTHROPIC_VERTEX_PROJECT_ID"] == "test-project"
-            assert os.environ["ANTHROPIC_VERTEX_REGION"] == "us-central1"
-
     def test_handle_shutdown_sets_event(self):
         """Test handle_shutdown sets shutdown event."""
         import signal

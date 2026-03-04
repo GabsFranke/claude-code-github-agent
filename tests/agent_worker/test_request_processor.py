@@ -30,6 +30,7 @@ class TestRequestProcessor:
         """Test initialization with optional parameters."""
         token_manager = MagicMock()
         http_client = MagicMock()
+        job_queue = MagicMock()
         langfuse_client = MagicMock()
         shutdown_event = asyncio.Event()
         rate_limiters = MagicMock()
@@ -38,6 +39,7 @@ class TestRequestProcessor:
         processor = RequestProcessor(
             token_manager,
             http_client,
+            job_queue,
             langfuse_client,
             shutdown_event,
             rate_limiters,
@@ -54,13 +56,14 @@ class TestRequestProcessor:
         """Test cleanup method."""
         token_manager = MagicMock()
         http_client = MagicMock()
+        job_queue = AsyncMock()
+        job_queue.close = AsyncMock()
 
-        processor = RequestProcessor(token_manager, http_client)
-        processor.sdk_executor.cleanup = AsyncMock()
+        processor = RequestProcessor(token_manager, http_client, job_queue)
 
         await processor.cleanup()
 
-        processor.sdk_executor.cleanup.assert_called_once()
+        job_queue.close.assert_called_once()
 
 
 class TestRequestProcessorExecution:
@@ -70,13 +73,15 @@ class TestRequestProcessorExecution:
     async def test_execute_without_langfuse(self):
         """Test executing request without Langfuse."""
         token_manager = AsyncMock()
+        token_manager.get_token = AsyncMock(return_value="test-token")
         http_client = AsyncMock()
+        job_queue = AsyncMock()
+        job_queue.create_job = AsyncMock(return_value="job-123")
 
-        processor = RequestProcessor(token_manager, http_client)
+        processor = RequestProcessor(token_manager, http_client, job_queue)
 
         # Mock all the dependencies
         processor.context_loader.fetch_claude_md = AsyncMock(return_value="")
-        processor.sdk_executor.execute_sdk = AsyncMock(return_value="SDK response")
 
         with patch(
             "services.agent_worker.processors.request_processor.get_command_registry"
@@ -87,7 +92,7 @@ class TestRequestProcessorExecution:
             mock_cmd_registry.execute = AsyncMock(return_value=mock_result)
             mock_registry.return_value = mock_cmd_registry
 
-            response = await processor._execute(
+            job_id = await processor._execute(
                 repo="owner/repo",
                 issue_number=123,
                 command="test",
@@ -96,22 +101,25 @@ class TestRequestProcessorExecution:
                 auto_triage=False,
             )
 
-            assert response == "SDK response"
-            processor.sdk_executor.execute_sdk.assert_called_once()
+            assert job_id == "job-123"
+            job_queue.create_job.assert_called_once()
+            token_manager.get_token.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_execute_with_claude_md(self):
         """Test executing request with CLAUDE.md content."""
         token_manager = AsyncMock()
+        token_manager.get_token = AsyncMock(return_value="test-token")
         http_client = AsyncMock()
+        job_queue = AsyncMock()
+        job_queue.create_job = AsyncMock(return_value="job-456")
 
-        processor = RequestProcessor(token_manager, http_client)
+        processor = RequestProcessor(token_manager, http_client, job_queue)
 
         # Mock dependencies
         processor.context_loader.fetch_claude_md = AsyncMock(
             return_value="# Repository Guidelines"
         )
-        processor.sdk_executor.execute_sdk = AsyncMock(return_value="SDK response")
 
         with patch(
             "services.agent_worker.processors.request_processor.get_command_registry"
@@ -122,7 +130,7 @@ class TestRequestProcessorExecution:
             mock_cmd_registry.execute = AsyncMock(return_value=mock_result)
             mock_registry.return_value = mock_cmd_registry
 
-            response = await processor._execute(
+            job_id = await processor._execute(
                 repo="owner/repo",
                 issue_number=123,
                 command="test",
@@ -131,22 +139,27 @@ class TestRequestProcessorExecution:
                 auto_triage=False,
             )
 
-            assert response == "SDK response"
+            assert job_id == "job-456"
             # Verify CLAUDE.md was fetched
             processor.context_loader.fetch_claude_md.assert_called_once_with(
                 "owner/repo"
             )
+            # Verify job was created with CLAUDE.md prepended to prompt
+            call_args = job_queue.create_job.call_args[0][0]
+            assert "# Repository Guidelines" in call_args["prompt"]
 
     @pytest.mark.asyncio
     async def test_execute_with_auto_review(self):
         """Test executing request with auto_review flag."""
         token_manager = AsyncMock()
+        token_manager.get_token = AsyncMock(return_value="test-token")
         http_client = AsyncMock()
+        job_queue = AsyncMock()
+        job_queue.create_job = AsyncMock(return_value="job-789")
 
-        processor = RequestProcessor(token_manager, http_client)
+        processor = RequestProcessor(token_manager, http_client, job_queue)
 
         processor.context_loader.fetch_claude_md = AsyncMock(return_value="")
-        processor.sdk_executor.execute_sdk = AsyncMock(return_value="Review complete")
 
         with patch(
             "services.agent_worker.processors.request_processor.get_command_registry"
@@ -157,7 +170,7 @@ class TestRequestProcessorExecution:
             mock_cmd_registry.execute = AsyncMock(return_value=mock_result)
             mock_registry.return_value = mock_cmd_registry
 
-            response = await processor._execute(
+            job_id = await processor._execute(
                 repo="owner/repo",
                 issue_number=123,
                 command="review",
@@ -166,18 +179,23 @@ class TestRequestProcessorExecution:
                 auto_triage=False,
             )
 
-            assert response == "Review complete"
+            assert job_id == "job-789"
+            # Verify job was created with auto_review flag
+            call_args = job_queue.create_job.call_args[0][0]
+            assert call_args["auto_review"] is True
 
     @pytest.mark.asyncio
     async def test_execute_with_auto_triage(self):
         """Test executing request with auto_triage flag."""
         token_manager = AsyncMock()
+        token_manager.get_token = AsyncMock(return_value="test-token")
         http_client = AsyncMock()
+        job_queue = AsyncMock()
+        job_queue.create_job = AsyncMock(return_value="job-101")
 
-        processor = RequestProcessor(token_manager, http_client)
+        processor = RequestProcessor(token_manager, http_client, job_queue)
 
         processor.context_loader.fetch_claude_md = AsyncMock(return_value="")
-        processor.sdk_executor.execute_sdk = AsyncMock(return_value="Triage complete")
 
         with patch(
             "services.agent_worker.processors.request_processor.get_command_registry"
@@ -188,7 +206,7 @@ class TestRequestProcessorExecution:
             mock_cmd_registry.execute = AsyncMock(return_value=mock_result)
             mock_registry.return_value = mock_cmd_registry
 
-            response = await processor._execute(
+            job_id = await processor._execute(
                 repo="owner/repo",
                 issue_number=456,
                 command="triage",
@@ -197,21 +215,26 @@ class TestRequestProcessorExecution:
                 auto_triage=True,
             )
 
-            assert response == "Triage complete"
+            assert job_id == "job-101"
+            # Verify job was created with auto_triage flag
+            call_args = job_queue.create_job.call_args[0][0]
+            assert call_args["auto_triage"] is True
 
     @pytest.mark.asyncio
     async def test_execute_claude_md_fetch_failure(self):
         """Test execution continues when CLAUDE.md fetch fails."""
         token_manager = AsyncMock()
+        token_manager.get_token = AsyncMock(return_value="test-token")
         http_client = AsyncMock()
+        job_queue = AsyncMock()
+        job_queue.create_job = AsyncMock(return_value="job-202")
 
-        processor = RequestProcessor(token_manager, http_client)
+        processor = RequestProcessor(token_manager, http_client, job_queue)
 
         # Mock CLAUDE.md fetch to raise exception
         processor.context_loader.fetch_claude_md = AsyncMock(
             side_effect=Exception("Network error")
         )
-        processor.sdk_executor.execute_sdk = AsyncMock(return_value="SDK response")
 
         with patch(
             "services.agent_worker.processors.request_processor.get_command_registry"
@@ -223,7 +246,7 @@ class TestRequestProcessorExecution:
             mock_registry.return_value = mock_cmd_registry
 
             # Should not raise exception, continues without CLAUDE.md
-            response = await processor._execute(
+            job_id = await processor._execute(
                 repo="owner/repo",
                 issue_number=123,
                 command="test",
@@ -232,25 +255,51 @@ class TestRequestProcessorExecution:
                 auto_triage=False,
             )
 
-            assert response == "SDK response"
+            assert job_id == "job-202"
+            job_queue.create_job.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_execute_claude_sdk_method(self):
-        """Test _execute_claude_sdk method."""
+        """Test process method with Langfuse integration."""
         token_manager = AsyncMock()
+        token_manager.get_token = AsyncMock(return_value="test-token")
         http_client = AsyncMock()
+        job_queue = AsyncMock()
+        job_queue.create_job = AsyncMock(return_value="job-303")
+        langfuse_client = MagicMock()
 
-        processor = RequestProcessor(token_manager, http_client)
+        # Mock Langfuse span context manager
+        mock_span = MagicMock()
+        mock_span.update = MagicMock()
+        mock_span.__enter__ = MagicMock(return_value=mock_span)
+        mock_span.__exit__ = MagicMock(return_value=False)
+        langfuse_client.start_as_current_span = MagicMock(return_value=mock_span)
+        langfuse_client.flush = MagicMock()
 
-        # Mock dependencies
-        processor.mcp_builder.create_mcp_config = AsyncMock(return_value={"github": {}})
-        processor.observability.setup_langfuse_hooks = MagicMock(return_value={})
-        processor.mcp_builder.create_agent_options = MagicMock(return_value=MagicMock())
-        processor.sdk_executor.execute_sdk = AsyncMock(return_value="SDK result")
+        processor = RequestProcessor(
+            token_manager, http_client, job_queue, langfuse_client
+        )
 
-        result = await processor._execute_claude_sdk("Test prompt")
+        processor.context_loader.fetch_claude_md = AsyncMock(return_value="")
 
-        assert result == "SDK result"
-        processor.mcp_builder.create_mcp_config.assert_called_once()
-        processor.observability.setup_langfuse_hooks.assert_called_once()
-        processor.sdk_executor.execute_sdk.assert_called_once()
+        with patch(
+            "services.agent_worker.processors.request_processor.get_command_registry"
+        ) as mock_registry:
+            mock_cmd_registry = MagicMock()
+            mock_result = MagicMock()
+            mock_result.prompt = "Test prompt"
+            mock_cmd_registry.execute = AsyncMock(return_value=mock_result)
+            mock_registry.return_value = mock_cmd_registry
+
+            job_id = await processor.process(
+                repo="owner/repo",
+                issue_number=123,
+                command="test",
+                user="testuser",
+                auto_review=False,
+                auto_triage=False,
+            )
+
+            assert job_id == "job-303"
+            langfuse_client.start_as_current_span.assert_called_once()
+            langfuse_client.flush.assert_called_once()

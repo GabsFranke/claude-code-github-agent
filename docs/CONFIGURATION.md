@@ -1,18 +1,40 @@
- # Configuration Guide
+# Configuration Reference
 
-This project uses Pydantic Settings for type-safe configuration management with automatic validation.
+Complete reference for all environment variables and configuration options.
 
-## Configuration Files
+## Quick Reference
 
-Configuration is loaded from:
+**Required**:
 
-1. Environment variables
-2. `.env` file in the project root
-3. Default values defined in `shared/config.py`
+```bash
+ANTHROPIC_AUTH_TOKEN=sk-ant-...
+GITHUB_APP_ID=123456
+GITHUB_INSTALLATION_ID=789012
+GITHUB_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----"
+GITHUB_WEBHOOK_SECRET=your-webhook-secret
+```
 
-## Configuration Validation
+**Optional** (with defaults):
 
-All configuration is validated at startup. If any required fields are missing or invalid, the service will fail fast with a clear error message.
+```bash
+LOG_LEVEL=INFO
+GITHUB_RATE_LIMIT=5000
+ANTHROPIC_RATE_LIMIT=100
+MAX_TURNS=50
+SDK_TIMEOUT=1800
+```
+
+## Configuration System
+
+Uses Pydantic Settings for type-safe configuration with automatic validation.
+
+**Loading order**:
+
+1. Environment variables (highest priority)
+2. `.env` file
+3. Default values in `shared/config.py`
+
+**Validation**: All configuration is validated at startup. Invalid config fails fast with clear error messages.
 
 ## Worker Configuration
 
@@ -176,31 +198,3 @@ github_app_id = config.github.github_app_id
 api_key = config.anthropic.get_api_key_or_raise()
 is_langfuse_enabled = config.langfuse.is_enabled
 ```
-
-## Migration from Environment Variables
-
-Before:
-
-```python
-import os
-github_app_id = os.getenv("GITHUB_APP_ID")
-if not github_app_id:
-    raise ValueError("GITHUB_APP_ID required")
-```
-
-After:
-
-```python
-from shared.config import get_worker_config
-config = get_worker_config()  # Validates automatically
-github_app_id = config.github.github_app_id  # Type-safe
-```
-
-## Benefits
-
-1. **Type Safety**: All values are properly typed
-2. **Validation**: Invalid config fails fast at startup
-3. **Documentation**: Config classes serve as documentation
-4. **IDE Support**: Autocomplete and type hints
-5. **Testing**: Easy to mock and test
-6. **Defaults**: Sensible defaults for optional values
