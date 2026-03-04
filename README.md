@@ -1,6 +1,5 @@
 # Simple Claude Code GitHub Agent
 
-
 AI-powered GitHub agent that automatically reviews pull requests and responds to commands using Claude Agent SDK and GitHub's official MCP server.
 
 > [!WARNING]
@@ -95,10 +94,10 @@ docker-compose -f docker-compose.minimal.yml up --build -d
 # Option 2: Full setup with Langfuse (recommended for debugging)
 docker-compose up --build -d
 
-# Optional: Scale workers for parallel processing
-docker-compose up --scale worker=2 -d
+# Optional: Scale sandbox workers for parallel processing
+docker-compose up --scale sandbox_worker=5 -d
 # or with minimal setup:
-docker-compose -f docker-compose.minimal.yml up --scale worker=2 -d
+docker-compose -f docker-compose.minimal.yml up --scale sandbox_worker=5 -d
 
 # View logs
 docker-compose logs -f

@@ -28,6 +28,7 @@ def setup_langfuse_hooks() -> dict:
 
     async def langfuse_stop_hook_async(input_data, _tool_use_id, _context):
         error_msg = None
+        process = None
         try:
             hook_payload = json.dumps(input_data)
             process = await asyncio.create_subprocess_exec(
@@ -66,6 +67,15 @@ def setup_langfuse_hooks() -> dict:
 
         except Exception as e:
             logger.warning(f"Error running Langfuse hook: {e}")
+            error_msg = str(e)
+        finally:
+            # Ensure process is cleaned up if it exists and hasn't been waited on
+            if process and process.returncode is None:
+                try:
+                    process.kill()
+                    await process.wait()
+                except Exception:
+                    pass  # Process already terminated
 
         return {"success": False, "error": error_msg}
 
@@ -90,6 +100,11 @@ async def execute_sandbox_request(
     # The sandbox executor container is given ANTHROPIC_API_KEY globally in docker-compose.
     # We don't need to manually configure it as the SDK picks it up.
 
+    # Set working directory to current directory to keep temp files accessible
+    working_dir = os.getcwd()
+    os.environ["CLAUDE_TEMP_DIR"] = working_dir
+    os.environ["TMPDIR"] = working_dir
+
     # 2. Build Options (Equivalent of MCPConfigurationBuilder)
     mcp_servers = {
         "github": {
@@ -110,6 +125,7 @@ async def execute_sandbox_request(
         plugins=[{"type": "local", "path": "/app/plugins/pr-review-toolkit"}],
         hooks=hooks,
         max_turns=50,
+        cwd=working_dir,  # Set working directory for SDK operations
     )
 
     # 3. Execute

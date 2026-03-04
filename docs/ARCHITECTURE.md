@@ -41,19 +41,20 @@ Complete system architecture for the Simple Claude Code GitHub Agent.
 │  │ Worker 1 │ │ Worker 2 │ │  N  │  │
 │  │(Claude   │ │(Claude   │ │     │  │
 │  │ SDK)     │ │ SDK)     │ │     │  │
-│  └──────────┘ └──────────┘ └─────┘  │
-└────────┬────────────────────────────┘
-         │
-         ▼
-┌─────────────────┐
-│  GitHub MCP     │
-│  (Official)     │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│   GitHub API    │
-└─────────────────┘
+│  └────┬─────┘ └────┬─────┘ └──┬──┘  │
+└───────┼────────────┼──────────┼─────┘
+        └────────────┴──────────┘
+                     │
+                     ▼
+              ┌─────────────────┐
+              │  GitHub MCP     │
+              │  (Official)     │
+              └────────┬────────┘
+                       │
+                       ▼
+              ┌─────────────────┐
+              │   GitHub API    │
+              └─────────────────┘
 ```
 
 ## Core Components
@@ -114,21 +115,7 @@ os.chdir(workspace)
 shutil.rmtree(workspace)  # Cleanup
 ```
 
-### 4. Result Poster Service
-
-**Technology**: Python
-**Purpose**: Posts agent responses to GitHub
-
-**Responsibilities**:
-
-- Listens for job completion via Redis pub/sub
-- Posts responses to GitHub issues/PRs
-- Handles success and error cases
-- Single instance (pub/sub handles concurrency)
-
-**Key Files**: `services/result_poster/main.py`
-
-### 5. Claude Agent SDK
+### 4. Claude Agent SDK
 
 **Technology**: Python SDK by Anthropic
 **Purpose**: Autonomous coding agent
@@ -144,7 +131,7 @@ shutil.rmtree(workspace)  # Cleanup
 
 **Configuration**: Programmatic via `ClaudeAgentOptions`
 
-### 6. GitHub MCP Server
+### 5. GitHub MCP Server
 
 **Technology**: HTTP-based MCP server by GitHub
 **Endpoint**: `https://api.githubcopilot.com/mcp`
@@ -162,8 +149,8 @@ shutil.rmtree(workspace)  # Cleanup
 4. Worker picks up message, creates job
 5. Sandbox worker executes Claude SDK
 6. Claude SDK uses GitHub MCP to read PR
-7. Claude SDK posts review via GitHub MCP
-8. Result poster confirms completion
+7. Claude SDK posts review directly via GitHub MCP
+8. Job marked as complete in Redis
 
 ### Manual Command
 
@@ -172,7 +159,7 @@ shutil.rmtree(workspace)  # Cleanup
 3. Webhook parses command and publishes
 4. Worker creates job with command
 5. Sandbox worker executes
-6. Claude SDK reads code and posts explanation
+6. Claude SDK reads code and posts explanation directly via GitHub MCP
 7. Developer sees response on GitHub
 
 ## Job Queue Architecture
@@ -191,10 +178,6 @@ shutil.rmtree(workspace)  # Cleanup
 - `agent:job:status:{job_id}` - Job status (pending/processing/success/error)
 - `agent:job:result:{job_id}` - Job result (response or error)
 
-**Pub/Sub**:
-
-- `agent:job:complete:{job_id}` - Job completion events
-
 ### Benefits
 
 1. **Workspace Isolation**: Each job in clean temporary directory
@@ -211,7 +194,6 @@ shutil.rmtree(workspace)  # Cleanup
 docker-compose up --scale sandbox_worker=10 -d
 
 # Worker stays at 1 (lightweight coordinator)
-# Result poster stays at 1 (pub/sub handles concurrency)
 ```
 
 ### Performance

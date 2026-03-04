@@ -1,5 +1,6 @@
 """Job queue for managing long-running agent execution jobs."""
 
+import asyncio
 import json
 import logging
 import uuid
@@ -44,6 +45,7 @@ class JobQueue:
         self.job_data_prefix = "agent:job:data:"
         self.job_result_prefix = "agent:job:result:"
         self.job_status_prefix = "agent:job:status:"
+        self.dead_letter_queue = "agent:jobs:dead_letter"
 
     async def _connect(self) -> None:
         """Connect to Redis if not already connected."""
@@ -59,8 +61,33 @@ class JobQueue:
                 logger.debug("Connected to Redis for job queue")
             except ImportError as e:
                 raise QueueError("redis package is required for JobQueue") from e
+            except ConnectionRefusedError as e:
+                raise QueueError(
+                    f"Redis connection refused at {self.redis_url}. "
+                    "Is Redis running?"
+                ) from e
+            except TimeoutError as e:
+                raise QueueError(
+                    f"Redis connection timed out at {self.redis_url}"
+                ) from e
             except OSError as e:
                 raise QueueError(f"Failed to connect to Redis: {e}") from e
+
+    @staticmethod
+    def _validate_job_id(job_id: str) -> bool:
+        """Validate job ID format (UUID).
+
+        Args:
+            job_id: Job identifier to validate
+
+        Returns:
+            True if valid UUID format
+        """
+        try:
+            uuid.UUID(job_id)
+            return True
+        except (ValueError, AttributeError):
+            return False
 
     async def create_job(self, job_data: dict[str, Any]) -> str:
         """Create a new job and add to pending queue.
@@ -135,11 +162,27 @@ class JobQueue:
 
             _, job_id = result
 
+            # Validate job_id format for security
+            if not self._validate_job_id(job_id):
+                logger.error(f"Invalid job_id format: {job_id}")
+                return None
+
             # Get job data
             job_data_json = await self.redis.get(f"{self.job_data_prefix}{job_id}")
 
             if not job_data_json:
                 logger.warning(f"Job {job_id} data not found (expired?)")
+                # Move to dead letter queue for investigation
+                await self.redis.rpush(
+                    self.dead_letter_queue,
+                    json.dumps(
+                        {
+                            "job_id": job_id,
+                            "reason": "data_expired",
+                            "timestamp": asyncio.get_event_loop().time(),
+                        }
+                    ),
+                )
                 return None
 
             job_data = json.loads(job_data_json)
@@ -156,7 +199,22 @@ class JobQueue:
             return job_id, job_data
 
         except json.JSONDecodeError as e:
-            logger.error(f"Failed to decode job data: {e}", exc_info=True)
+            logger.error(f"Failed to decode job data for {job_id}: {e}", exc_info=True)
+            # Move corrupted job to dead letter queue
+            try:
+                await self.redis.rpush(
+                    self.dead_letter_queue,
+                    json.dumps(
+                        {
+                            "job_id": job_id,
+                            "reason": "json_decode_error",
+                            "error": str(e),
+                            "timestamp": asyncio.get_event_loop().time(),
+                        }
+                    ),
+                )
+            except Exception:
+                pass  # Don't fail if dead letter queue fails
             return None
         except OSError as e:
             logger.error(f"Redis error getting next job: {e}", exc_info=True)
@@ -280,6 +338,39 @@ class JobQueue:
         except OSError as e:
             logger.error(f"Failed to get processing count: {e}", exc_info=True)
             return 0
+
+    async def get_dead_letter_count(self) -> int:
+        """Get number of jobs in dead letter queue.
+
+        Returns:
+            Number of failed jobs
+        """
+        await self._connect()
+
+        try:
+            count: int = await self.redis.llen(self.dead_letter_queue)
+            return count
+        except OSError as e:
+            logger.error(f"Failed to get dead letter count: {e}", exc_info=True)
+            return 0
+
+    async def inspect_dead_letters(self, limit: int = 10) -> list[dict[str, Any]]:
+        """Inspect dead letter queue entries.
+
+        Args:
+            limit: Maximum number of entries to return
+
+        Returns:
+            List of dead letter entries
+        """
+        await self._connect()
+
+        try:
+            entries = await self.redis.lrange(self.dead_letter_queue, 0, limit - 1)
+            return [json.loads(entry) for entry in entries]
+        except (OSError, json.JSONDecodeError) as e:
+            logger.error(f"Failed to inspect dead letters: {e}", exc_info=True)
+            return []
 
     async def close(self) -> None:
         """Close Redis connection."""

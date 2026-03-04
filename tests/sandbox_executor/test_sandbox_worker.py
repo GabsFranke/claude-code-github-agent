@@ -315,7 +315,7 @@ class TestProcessJob:
         mock_queue = AsyncMock()
         mock_queue.complete_job = AsyncMock()
 
-        job_id = "test-job-123"
+        job_id = "550e8400-e29b-41d4-a716-446655440000"  # Valid UUID
         job_data = {
             "prompt": "Test prompt",
             "github_token": "test_token",
@@ -347,7 +347,7 @@ class TestProcessJob:
         mock_queue = AsyncMock()
         mock_queue.complete_job = AsyncMock()
 
-        job_id = "test-job-456"
+        job_id = "550e8400-e29b-41d4-a716-446655440001"  # Valid UUID
         job_data = {
             "prompt": "Test",
             "github_token": "token",
@@ -379,7 +379,7 @@ class TestProcessJob:
         mock_queue = AsyncMock()
         mock_queue.complete_job = AsyncMock()
 
-        job_id = "test-job-789"
+        job_id = "550e8400-e29b-41d4-a716-446655440002"  # Valid UUID
         job_data = {
             "prompt": "Test",
             "github_token": "token",

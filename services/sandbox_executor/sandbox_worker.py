@@ -8,6 +8,7 @@ import shutil
 import signal
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 
 # Add parent directory to path for shared imports - must be before other imports
@@ -61,6 +62,7 @@ def setup_langfuse_hooks() -> dict:
 
     async def langfuse_stop_hook_async(input_data, _tool_use_id, _context):
         error_msg = None
+        process = None
         try:
             hook_payload = json.dumps(input_data)
             process = await asyncio.create_subprocess_exec(
@@ -102,6 +104,15 @@ def setup_langfuse_hooks() -> dict:
 
         except Exception as e:
             logger.warning(f"Error running Langfuse hook: {e}")
+            error_msg = str(e)
+        finally:
+            # Ensure process is cleaned up if it exists and hasn't been waited on
+            if process and process.returncode is None:
+                try:
+                    process.kill()
+                    await process.wait()
+                except Exception:
+                    pass  # Process already terminated
 
         return {"success": False, "error": error_msg}
 
@@ -128,6 +139,10 @@ async def execute_in_workspace(workspace: str, job_data: dict) -> str:
         os.chdir(workspace)
         logger.info(f"Executing in workspace: {workspace}")
 
+        # Set Claude temp directory to workspace to keep all files accessible
+        os.environ["CLAUDE_TEMP_DIR"] = workspace
+        os.environ["TMPDIR"] = workspace  # Fallback for general temp operations
+
         # Build MCP server configuration
         mcp_servers = {
             "github": {
@@ -149,6 +164,7 @@ async def execute_in_workspace(workspace: str, job_data: dict) -> str:
             plugins=[{"type": "local", "path": "/app/plugins/pr-review-toolkit"}],
             hooks=hooks,
             max_turns=50,
+            cwd=workspace,  # Set working directory to isolated workspace
         )
 
         # Execute SDK
@@ -212,6 +228,23 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
     workspace = None
 
     try:
+        # Validate job_id format for security (prevent directory traversal)
+        try:
+            uuid.UUID(job_id)
+        except (ValueError, AttributeError):
+            logger.error(f"Invalid job_id format: {job_id}")
+            await job_queue.complete_job(
+                job_id,
+                {
+                    "status": "error",
+                    "error": f"Invalid job_id format: {job_id}",
+                    "repo": job_data.get("repo", "unknown"),
+                    "issue_number": job_data.get("issue_number", 0),
+                },
+                status="error",
+            )
+            return
+
         # Create isolated workspace in tmpfs mount for automatic cleanup
         # /tmp is intentional - mounted as tmpfs in Docker for security
         workspace = tempfile.mkdtemp(
