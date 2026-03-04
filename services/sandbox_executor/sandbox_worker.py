@@ -144,7 +144,7 @@ async def execute_in_workspace(workspace: str, job_data: dict) -> str:
         options = ClaudeAgentOptions(
             allowed_tools=["Task", "mcp__github__*"],
             permission_mode="acceptEdits",
-            mcp_servers=mcp_servers,
+            mcp_servers=mcp_servers,  # type: ignore[arg-type]
             agents=AGENTS,
             plugins=[{"type": "local", "path": "/app/plugins/pr-review-toolkit"}],
             hooks=hooks,

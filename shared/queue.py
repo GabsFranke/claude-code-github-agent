@@ -141,7 +141,7 @@ class PubSubQueue(MessageQueue):
     async def publish(self, message: dict[str, Any]) -> None:
         """Publish a message to Pub/Sub."""
         try:
-            from google.cloud import pubsub_v1
+            from google.cloud import pubsub_v1  # type: ignore[attr-defined]
         except ImportError as e:
             raise QueueError("google-cloud-pubsub is required for PubSubQueue") from e
 
@@ -169,7 +169,7 @@ class PubSubQueue(MessageQueue):
     ) -> None:
         """Subscribe to Pub/Sub and process messages."""
         try:
-            from google.cloud import pubsub_v1
+            from google.cloud import pubsub_v1  # type: ignore[attr-defined]
         except ImportError as e:
             raise QueueError("google-cloud-pubsub is required for PubSubQueue") from e
 

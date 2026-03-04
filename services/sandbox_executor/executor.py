@@ -105,7 +105,7 @@ async def execute_sandbox_request(
     options = ClaudeAgentOptions(
         allowed_tools=["Task", "mcp__github__*"],
         permission_mode="acceptEdits",
-        mcp_servers=mcp_servers,
+        mcp_servers=mcp_servers,  # type: ignore[arg-type]
         agents=AGENTS,
         plugins=[{"type": "local", "path": "/app/plugins/pr-review-toolkit"}],
         hooks=hooks,
