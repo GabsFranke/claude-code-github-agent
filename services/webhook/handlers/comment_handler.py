@@ -13,7 +13,9 @@ from parsers.command_parser import parse_command  # noqa: E402
 logger = logging.getLogger(__name__)
 
 
-async def handle_comment_created(data: dict[str, Any], queue) -> dict[str, str] | None:
+async def handle_comment_created(
+    data: dict[str, Any], queue, sync_queue
+) -> dict[str, str] | None:
     """Handle issue comment created event."""
     comment_body = data["comment"]["body"]
     command = parse_command(comment_body)
@@ -39,6 +41,12 @@ async def handle_comment_created(data: dict[str, Any], queue) -> dict[str, str] 
         request_data["issue_number"],
     )
 
+    ref = "main"
+    if "pull_request" in data["issue"]:
+        ref = f"refs/pull/{request_data['issue_number']}/head"
+
+    # Publish sync request - sync worker will use GitHub App credentials
+    await sync_queue.publish({"repo": request_data["repository"], "ref": ref})
     await queue.publish(request_data)
 
     return {"status": "accepted", "message": "Agent is processing your request"}

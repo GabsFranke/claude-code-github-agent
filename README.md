@@ -191,17 +191,19 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed system design.
 **High-level flow**:
 
 ```
-GitHub Event → Webhook → Redis Queue → Worker → Job Queue → Sandbox Pool → GitHub MCP → GitHub API
+GitHub Event → Webhook → Redis Queues → Worker → Job Queue → Sandbox Pool (Local Worktrees) → GitHub MCP → GitHub API
+                              ↓
+                         Repo Sync Service → Bare Repo Cache → Git Worktrees
 ```
 
 **Key components**:
 
 - **Webhook Service** - Receives GitHub events (FastAPI)
 - **Worker** - Lightweight job coordinator
-- **Sandbox Pool** - Executes Claude SDK in isolated workspaces
-- **Result Poster** - Posts responses to GitHub
-- **Redis** - Message queue and job queue
-- **Claude Agent SDK** - Autonomous coding agent
+- **Repo Sync Service** - Manages cached bare repositories
+- **Sandbox Pool** - Executes Claude SDK in isolated git worktrees
+- **Redis** - Message queue, job queue, and sync coordination
+- **Claude Agent SDK** - Autonomous coding agent with local file access
 - **GitHub MCP** - Official GitHub integration
 
 **Scaling**: `docker-compose up --scale sandbox_worker=10 -d`
@@ -289,10 +291,14 @@ Tests run automatically on every PR via GitHub Actions.
 ```
 claude-code-github-agent/
 ├── services/
-│   ├── agent_worker/         # Claude Code worker
+│   ├── agent_worker/         # Job coordinator
+│   ├── repo_sync/            # Repository cache manager
+│   ├── sandbox_executor/     # Sandbox worker pool
 │   └── webhook/              # Webhook receiver
 ├── shared/
-│   └── queue.py             # Message queue abstraction
+│   ├── github_auth.py       # Shared authentication
+│   ├── queue.py             # Message queue abstraction
+│   └── job_queue.py         # Job queue abstraction
 ├── docker-compose.yml       # Docker Compose config
 └── docs/                    # Documentation
 ```
@@ -306,6 +312,8 @@ docker-compose logs -f
 # View specific service
 docker-compose logs -f worker
 docker-compose logs -f webhook
+docker-compose logs -f sandbox_worker
+docker-compose logs -f repo_sync
 
 # Check status
 docker-compose ps

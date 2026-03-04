@@ -234,14 +234,14 @@ class PubSubQueue(MessageQueue):
         self._running = False
 
 
-def get_queue() -> MessageQueue:
+def get_queue(queue_name: str = "agent-requests") -> MessageQueue:
     """Get the appropriate message queue based on environment."""
     queue_type = os.getenv("QUEUE_TYPE", "redis").lower()
 
     if queue_type == "pubsub":
         logger.info("Using Google Pub/Sub message queue")
-        return PubSubQueue()
+        return PubSubQueue(topic_name=queue_name)
 
     logger.info("Using Redis message queue")
     redis_password = os.getenv("REDIS_PASSWORD")
-    return RedisQueue(password=redis_password)
+    return RedisQueue(queue_name=queue_name, password=redis_password)

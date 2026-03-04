@@ -66,6 +66,8 @@ services:
       # tmpfs for automatic workspace cleanup on restart
       - /tmp:size=2G,mode=1777
     volumes:
+      # Persistent cache for bare repositories across all workers
+      - repo-cache:/var/cache/repos:rw
       # Plugins (read-only) — sandbox compiles ClaudeAgentOptions
       - ./plugins:/app/plugins:ro
       # gcloud credentials for Vertex AI — sandbox is the one calling the SDK
@@ -244,7 +246,33 @@ services:
       langfuse-minio:
         condition: service_healthy
 
+  repo_sync:
+    build:
+      context: .
+      dockerfile: services/repo_sync/Dockerfile
+    env_file: .env
+    volumes:
+      - repo-cache:/var/cache/repos:rw
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-myredissecret}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      # GitHub App credentials for cloning private repos when token not provided
+      - GITHUB_APP_ID=${GITHUB_APP_ID}
+      - GITHUB_INSTALLATION_ID=${GITHUB_INSTALLATION_ID}
+      - GITHUB_PRIVATE_KEY=${GITHUB_PRIVATE_KEY}
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
 volumes:
+  repo-cache:
   langfuse-db-data:
   langfuse-clickhouse-data:
   langfuse-clickhouse-logs:

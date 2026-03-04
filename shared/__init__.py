@@ -25,6 +25,7 @@ from .exceptions import (
     TokenRefreshError,
     WebhookValidationError,
 )
+from .github_auth import GitHubAuthService, get_github_auth_service
 from .health import HealthChecker, HealthStatus
 from .http_client import AsyncHTTPClient, close_http_client, get_http_client
 from .job_queue import JobQueue
@@ -57,6 +58,9 @@ __all__ = [
     "SDKTimeoutError",
     "TokenRefreshError",
     "WebhookValidationError",
+    # GitHub Auth
+    "GitHubAuthService",
+    "get_github_auth_service",
     # Health
     "HealthChecker",
     "HealthStatus",

@@ -8,6 +8,7 @@ import shutil
 import signal
 import sys
 import tempfile
+import time
 import uuid
 from pathlib import Path
 
@@ -122,6 +123,72 @@ def setup_langfuse_hooks() -> dict:
     }
 
 
+async def execute_git_command(cmd: str, cwd: str | None = None) -> tuple[int, str, str]:
+    """Execute a git command asynchronously."""
+    process = await asyncio.create_subprocess_shell(
+        cmd,
+        cwd=cwd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await process.communicate()
+    return process.returncode or 0, stdout.decode().strip(), stderr.decode().strip()
+
+
+async def ensure_repo_synced(
+    repo: str, ref: str, redis_client, github_token: str
+) -> str:
+    """Ensure bare repo is synced, tracking complete flag with fallback to lock + clone."""
+    complete_key = f"agent:sync:complete:{repo}:{ref}"
+    lock_key = f"agent:sync:lock:{repo}"
+    cache_base = "/var/cache/repos"
+    repo_dir = os.path.join(cache_base, f"{repo}.git")
+    auth_prefix = f"https://x-access-token:{github_token}@"
+
+    # Wait for up to 20 seconds for sync worker (increased from 15)
+    for i in range(20):
+        is_complete = await redis_client.get(complete_key)
+        if is_complete:
+            logger.info(f"Sync completed for {repo} after {i} seconds")
+            return repo_dir
+        await asyncio.sleep(1)
+
+    logger.warning(
+        f"Sync worker timeout for {repo} after 20s, executing fallback sync..."
+    )
+    os.makedirs(os.path.dirname(repo_dir), exist_ok=True)
+
+    # Fallback to doing it ourselves
+    try:
+        lock = redis_client.lock(lock_key, timeout=300)
+        acquired = await lock.acquire(blocking=True, blocking_timeout=10)
+        if not acquired:
+            logger.warning(
+                f"Fallback couldn't acquire lock for {repo}, assuming it's synced"
+            )
+            return repo_dir
+
+        try:
+            if not os.path.exists(repo_dir):
+                logger.info(f"Fallback clone for {repo}...")
+                clone_url = f"{auth_prefix}github.com/{repo}.git"
+                cmd = f"git clone --bare {clone_url} {repo_dir}"
+                await execute_git_command(cmd)
+            else:
+                logger.info(f"Fallback fetch for {repo}...")
+                cmd = f"git --git-dir={repo_dir} fetch origin '*:refs/remotes/origin/*'"
+                await execute_git_command(cmd)
+
+            await redis_client.set(complete_key, "1", ex=300)  # 5 minutes TTL
+        finally:
+            await lock.release()
+
+    except Exception as e:
+        logger.error(f"Fallback sync failed: {e}")
+
+    return repo_dir
+
+
 async def execute_in_workspace(workspace: str, job_data: dict) -> str:
     """Execute Claude Agent SDK in isolated workspace.
 
@@ -157,7 +224,16 @@ async def execute_in_workspace(workspace: str, job_data: dict) -> str:
 
         # Build Claude Agent options
         options = ClaudeAgentOptions(
-            allowed_tools=["Task", "mcp__github__*"],
+            allowed_tools=[
+                "Task",
+                "Bash",
+                "Read",
+                "Write",
+                "Edit",
+                "List",
+                "Search",
+                "mcp__github__*",
+            ],
             permission_mode="acceptEdits",
             mcp_servers=mcp_servers,  # type: ignore[arg-type]
             agents=AGENTS,
@@ -226,6 +302,7 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
         job_data: Job data dictionary
     """
     workspace = None
+    repo_dir = None
 
     try:
         # Validate job_id format for security (prevent directory traversal)
@@ -245,13 +322,87 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
             )
             return
 
+        # Ensure repo is synced and setup worktree
+        repo = job_data["repo"]
+        ref = job_data.get("ref", "main")
+        logger.info(f"Setting up worktree for {repo} (ref {ref})")
+
+        repo_dir = await ensure_repo_synced(
+            repo, ref, job_queue.redis, job_data["github_token"]
+        )
+
         # Create isolated workspace in tmpfs mount for automatic cleanup
         # /tmp is intentional - mounted as tmpfs in Docker for security
-        workspace = tempfile.mkdtemp(
+        workspace_base = tempfile.mkdtemp(
             prefix=f"job_{job_id[:8]}_",
             dir="/tmp",  # nosec B108
         )
+        os.rmdir(workspace_base)  # git worktree add needs it to not exist
+        workspace = workspace_base
         logger.info(f"Created workspace for job {job_id}: {workspace}")
+
+        # Create worktree with unique branch name
+        base_ref = ref.replace("refs/", "") if ref.startswith("refs/") else ref
+        # In bare repos, branches are at refs/heads/* not refs/remotes/origin/*
+        bare_ref = base_ref if base_ref.startswith("heads/") else f"heads/{base_ref}"
+
+        # Generate unique branch name with timestamp to avoid collisions
+        timestamp = int(time.time() * 1000) % 1000000  # Last 6 digits of milliseconds
+        branch_name = f"job-{job_id[:8]}-{timestamp}"
+
+        # First, try to create worktree with new branch from the specified ref
+        wt_cmd = f"git --git-dir={repo_dir} worktree add -b {branch_name} {workspace} {bare_ref}"
+        code, _out, err = await execute_git_command(wt_cmd)
+
+        if code != 0:
+            logger.warning(
+                f"Worktree ref {bare_ref} failed: {err}. Trying to detect default branch..."
+            )
+
+            # List all branches and pick the first one (usually main or master)
+            list_cmd = f"git --git-dir={repo_dir} branch --list"
+            list_code, list_out, list_err = await execute_git_command(list_cmd)
+
+            default_branch = "heads/main"  # Fallback
+            if list_code == 0 and list_out:
+                # Output is like "* main" or "  master", pick first branch
+                branches = [
+                    b.strip().lstrip("* ") for b in list_out.split("\n") if b.strip()
+                ]
+                if branches:
+                    default_branch = f"heads/{branches[0]}"
+                    logger.info(f"Detected default branch: {default_branch}")
+            else:
+                logger.warning(
+                    f"Could not list branches: {list_err}. Using fallback: {default_branch}"
+                )
+
+            # Try with detected default branch
+            wt_cmd_fallback = f"git --git-dir={repo_dir} worktree add -b {branch_name} {workspace} {default_branch}"
+            code, _out, err = await execute_git_command(wt_cmd_fallback)
+            if code != 0:
+                # If still failing, try without creating new branch (detached HEAD)
+                logger.warning(
+                    f"Worktree with new branch failed: {err}. Trying detached HEAD"
+                )
+                wt_cmd_detached = f"git --git-dir={repo_dir} worktree add --detach {workspace} {default_branch}"
+                code, _out, err = await execute_git_command(wt_cmd_detached)
+                if code != 0:
+                    raise Exception(
+                        f"Failed to create worktree after all attempts: {err}"
+                    )
+
+        # Inject git credentials into the workspace
+        # Configure git to use credential helper
+        await execute_git_command("git config credential.helper store", cwd=workspace)
+
+        # Write credentials to home directory where git expects them
+        home_dir = os.path.expanduser("~")
+        os.makedirs(home_dir, exist_ok=True)
+        with open(
+            os.path.join(home_dir, ".git-credentials"), "w", encoding="utf-8"
+        ) as f:
+            f.write(f"https://x-access-token:{job_data['github_token']}@github.com\n")
 
         # Execute in isolated workspace
         response = await execute_in_workspace(workspace, job_data)
@@ -286,10 +437,16 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
         )
 
     finally:
-        # Cleanup workspace
+        # Cleanup workspace and worktree
         if workspace:
             try:
-                shutil.rmtree(workspace)
+                if repo_dir and os.path.exists(workspace):
+                    # Remove worktree from bare repo tracking
+                    await execute_git_command(
+                        f"git --git-dir={repo_dir} worktree remove --force {workspace}"
+                    )
+                elif os.path.exists(workspace):
+                    shutil.rmtree(workspace)
                 logger.debug(f"Cleaned up workspace: {workspace}")
             except Exception as e:
                 logger.warning(f"Failed to cleanup workspace {workspace}: {e}")

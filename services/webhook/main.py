@@ -70,6 +70,7 @@ app = FastAPI(title="ClaudeCodeGitHubAgent Webhook Service")
 
 # Initialize queue
 queue = get_queue()
+sync_queue = get_queue(queue_name="agent:sync:requests")
 
 
 @app.get("/")
@@ -108,17 +109,24 @@ async def webhook(request: Request):
 
         logger.info("Received %s event (action: %s)", event_type, action)
 
-        # Ignore push events
+        # Handle push events for proactive cache warming
         if event_type == "push":
-            logger.debug("Ignoring push event to %s", data.get("ref", "unknown ref"))
-            return {"status": "ignored", "message": "Push events are not handled"}
+            ref = data.get("ref")
+            repo = data.get("repository", {}).get("full_name")
+            logger.info(
+                "Handling push event to %s in %s for proactive cache warming", ref, repo
+            )
+            if repo and ref:
+                await sync_queue.publish({"repo": repo, "ref": ref})
+                return {"status": "accepted", "message": "Proactive sync triggered"}
+            return {"status": "ignored", "message": "Push event missing repo or ref"}
 
         # Route to appropriate handler
         if event_type == "issues" and action == "opened":
-            return await handle_issue_opened(data, queue)
+            return await handle_issue_opened(data, queue, sync_queue)
 
         if event_type == "issue_comment" and action == "created":
-            result = await handle_comment_created(data, queue)
+            result = await handle_comment_created(data, queue, sync_queue)
             if result:
                 return result
             # No command found, return ignored
@@ -126,7 +134,7 @@ async def webhook(request: Request):
 
         if event_type == "pull_request":
             if action == "opened":
-                return await handle_pr_opened(data, queue)
+                return await handle_pr_opened(data, queue, sync_queue)
             return handle_pr_other_action(action, data["pull_request"]["number"])
 
         return {"status": "ignored", "message": "Event not handled"}

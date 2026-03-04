@@ -6,9 +6,7 @@ from typing import TYPE_CHECKING, Optional
 import httpx
 
 if TYPE_CHECKING:
-    from shared import MultiRateLimiter
-
-    from ..auth import GitHubTokenManager
+    from shared import GitHubAuthService, MultiRateLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +16,7 @@ class RepositoryContextLoader:
 
     def __init__(
         self,
-        token_manager: "GitHubTokenManager",
+        token_manager: "GitHubAuthService",
         http_client: httpx.AsyncClient,
         rate_limiters: Optional["MultiRateLimiter"] = None,
     ):

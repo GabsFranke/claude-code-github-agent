@@ -6,7 +6,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-async def handle_pr_opened(data: dict[str, Any], queue) -> dict[str, str]:
+async def handle_pr_opened(data: dict[str, Any], queue, sync_queue) -> dict[str, str]:
     """Handle pull request opened event (auto-review)."""
     pr_number = data["pull_request"]["number"]
     pr_title = data["pull_request"]["title"]
@@ -22,6 +22,10 @@ async def handle_pr_opened(data: dict[str, Any], queue) -> dict[str, str]:
 
     logger.info("Auto-reviewing PR #%s in %s", pr_number, request_data["repository"])
 
+    # Publish sync request - sync worker will use GitHub App credentials
+    await sync_queue.publish(
+        {"repo": request_data["repository"], "ref": f"refs/pull/{pr_number}/head"}
+    )
     await queue.publish(request_data)
 
     return {"status": "accepted", "message": "Agent will review this PR"}

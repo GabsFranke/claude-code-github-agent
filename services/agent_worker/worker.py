@@ -18,7 +18,6 @@ from shared.config import get_worker_config
 from shared.health import HealthChecker
 
 # Import modularized components
-from .auth import GitHubTokenManager
 from .processors import RequestProcessor
 
 # Load configuration first with detailed error reporting
@@ -167,8 +166,10 @@ async def main():
     logger.info("Job queue initialized")
 
     try:
-        # Initialize token manager with config
-        token_manager = GitHubTokenManager(
+        # Initialize shared GitHub auth service
+        from shared import GitHubAuthService
+
+        token_manager = GitHubAuthService(
             app_id=config.github.github_app_id,
             private_key=config.github.github_private_key,
             installation_id=config.github.github_installation_id,

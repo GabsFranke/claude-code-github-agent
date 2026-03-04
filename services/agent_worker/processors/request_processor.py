@@ -7,9 +7,8 @@ from typing import TYPE_CHECKING, Optional
 import httpx
 from langfuse import Langfuse
 
-from shared import JobQueue
+from shared import GitHubAuthService, JobQueue
 
-from ..auth import GitHubTokenManager
 from ..commands import CommandContext, get_command_registry
 from .repository_context_loader import RepositoryContextLoader
 
@@ -24,7 +23,7 @@ class RequestProcessor:
 
     def __init__(
         self,
-        token_manager: GitHubTokenManager,
+        token_manager: GitHubAuthService,
         http_client: httpx.AsyncClient,
         job_queue: JobQueue,
         langfuse_client: Langfuse | None = None,
@@ -153,11 +152,19 @@ class RequestProcessor:
         # Get GitHub token
         github_token = await self.token_manager.get_token()
 
+        # Determine ref based on context
+        ref = "main"
+        if auto_review:
+            # For PR reviews, use the PR head ref
+            ref = f"refs/pull/{issue_number}/head"
+        # For issues and manual commands, default to main
+
         # Create job in queue
         job_id = await self.job_queue.create_job(
             {
                 "repo": repo,
                 "issue_number": issue_number,
+                "ref": ref,
                 "prompt": prompt,
                 "github_token": github_token,
                 "user": user,

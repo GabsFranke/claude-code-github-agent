@@ -118,7 +118,7 @@ async def execute_sandbox_request(
 
     # Sandbox container expects plugins mapped to /app/plugins
     options = ClaudeAgentOptions(
-        allowed_tools=["Task", "mcp__github__*"],
+        allowed_tools=["Task", "Bash", "mcp__github__*"],
         permission_mode="acceptEdits",
         mcp_servers=mcp_servers,  # type: ignore[arg-type]
         agents=AGENTS,
