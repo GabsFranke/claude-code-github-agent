@@ -13,13 +13,12 @@ from langfuse import Langfuse
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 # Import shared utilities
-from shared import MultiRateLimiter, get_queue
+from shared import JobQueue, MultiRateLimiter, get_queue
 from shared.config import get_worker_config
 from shared.health import HealthChecker
 
 # Import modularized components
 from .auth import GitHubTokenManager
-from .config import setup_claude_settings, setup_mcp_config
 from .processors import RequestProcessor
 
 # Load configuration first with detailed error reporting
@@ -88,6 +87,7 @@ shutdown_event = asyncio.Event()
 processor = None
 health_checker = None
 rate_limiters = None
+job_queue = None
 
 
 def handle_shutdown(signum, _frame):
@@ -102,31 +102,11 @@ def setup_signal_handlers():
     signal.signal(signal.SIGINT, handle_shutdown)
 
 
-def login_claude_code():
-    """Setup authentication for Claude Agent SDK."""
-    import os
-
-    anthropic_key = config.anthropic.get_api_key_or_raise()
-    os.environ["ANTHROPIC_API_KEY"] = anthropic_key
-
-    # Set optional environment variables
-    if config.anthropic.anthropic_base_url:
-        os.environ["ANTHROPIC_BASE_URL"] = config.anthropic.anthropic_base_url
-    if config.anthropic.anthropic_vertex_project_id:
-        os.environ["ANTHROPIC_VERTEX_PROJECT_ID"] = (
-            config.anthropic.anthropic_vertex_project_id
-        )
-    if config.anthropic.anthropic_vertex_region:
-        os.environ["ANTHROPIC_VERTEX_REGION"] = config.anthropic.anthropic_vertex_region
-
-    logger.info("Claude Agent SDK authentication configured")
-
-
 async def main():
     """Main worker loop - subscribes to queue and processes messages."""
-    global http_client, processor, health_checker, rate_limiters  # pylint: disable=global-statement
+    global http_client, processor, health_checker, rate_limiters, job_queue  # pylint: disable=global-statement
 
-    logger.info("Starting Claude Agent SDK worker (queue mode)")
+    logger.info("Starting Claude Agent SDK worker (job queue mode)")
 
     # Setup signal handlers
     setup_signal_handlers()
@@ -178,13 +158,15 @@ async def main():
         f"Anthropic={config.anthropic_rate_limit}/min"
     )
 
+    # Initialize job queue
+    job_queue = JobQueue(
+        redis_url=config.queue.redis_url,
+        password=config.queue.redis_password,
+        job_ttl=3600,  # 1 hour
+    )
+    logger.info("Job queue initialized")
+
     try:
-        # Setup authentication
-        login_claude_code()
-
-        # Setup Claude Code settings
-        setup_claude_settings()
-
         # Initialize token manager with config
         token_manager = GitHubTokenManager(
             app_id=config.github.github_app_id,
@@ -193,14 +175,11 @@ async def main():
             http_client=http_client,
         )
 
-        # Setup GitHub MCP
-        token = await token_manager.get_token()
-        setup_mcp_config(token)
-
         # Initialize request processor
         processor = RequestProcessor(
             token_manager=token_manager,
             http_client=http_client,
+            job_queue=job_queue,
             langfuse_client=langfuse,
             shutdown_event=shutdown_event,
             rate_limiters=rate_limiters,
@@ -269,6 +248,8 @@ async def main():
             await processor.cleanup()
         if rate_limiters:
             await rate_limiters.cleanup()
+        if job_queue:
+            await job_queue.close()
         await http_client.aclose()
         if langfuse:
             langfuse.flush()

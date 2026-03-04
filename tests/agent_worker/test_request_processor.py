@@ -15,17 +15,16 @@ class TestRequestProcessor:
         """Test RequestProcessor initialization."""
         token_manager = MagicMock()
         http_client = MagicMock()
+        job_queue = MagicMock()
 
-        processor = RequestProcessor(token_manager, http_client)
+        processor = RequestProcessor(token_manager, http_client, job_queue)
 
         assert processor.token_manager == token_manager
         assert processor.http_client == http_client
+        assert processor.job_queue == job_queue
         assert processor.langfuse is None
         assert processor.shutdown_event is not None
         assert processor.context_loader is not None
-        assert processor.mcp_builder is not None
-        assert processor.observability is not None
-        assert processor.sdk_executor is not None
 
     def test_initialization_with_optional_params(self):
         """Test initialization with optional parameters."""

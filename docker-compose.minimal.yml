@@ -24,7 +24,7 @@ services:
       - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET}
       - QUEUE_TYPE=redis
       - REDIS_URL=redis://redis:6379
-      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - REDIS_PASSWORD=myredissecret
       - PORT=8080
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     depends_on:
@@ -35,11 +35,32 @@ services:
     build:
       context: .
       dockerfile: services/agent_worker/Dockerfile
+    environment:
+      # Worker creates jobs in queue (lightweight coordinator)
+      - GITHUB_APP_ID=${GITHUB_APP_ID}
+      - GITHUB_INSTALLATION_ID=${GITHUB_INSTALLATION_ID}
+      - GITHUB_PRIVATE_KEY=${GITHUB_PRIVATE_KEY}
+      - QUEUE_TYPE=redis
+      - REDIS_URL=redis://redis:6379
+      - REDIS_PASSWORD=myredissecret
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  sandbox_worker:
+    build:
+      context: .
+      dockerfile: services/sandbox_executor/Dockerfile
+    command: python -m services.sandbox_executor.sandbox_worker
+    tmpfs:
+      # tmpfs for automatic workspace cleanup on restart
+      - /tmp:size=2G,mode=1777
     volumes:
-      # Mount your personal gcloud credentials for local Vertex AI access (Windows path)
-      - ${APPDATA}/gcloud/application_default_credentials.json:/root/.config/gcloud/application_default_credentials.json:ro
-      # Mount all plugins directory
+      # Mount plugins directory (read-only)
       - ./plugins:/app/plugins:ro
+      # Mount gcloud credentials for Vertex AI
+      - ${APPDATA}/gcloud/application_default_credentials.json:/root/.config/gcloud/application_default_credentials.json:ro
     environment:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - ANTHROPIC_AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN}
@@ -47,13 +68,8 @@ services:
       - ANTHROPIC_DEFAULT_HAIKU_MODEL=${ANTHROPIC_DEFAULT_HAIKU_MODEL}
       - ANTHROPIC_DEFAULT_SONNET_MODEL=${ANTHROPIC_DEFAULT_SONNET_MODEL}
       - ANTHROPIC_DEFAULT_OPUS_MODEL=${ANTHROPIC_DEFAULT_OPUS_MODEL}
-      # Vertex AI configuration
       - ANTHROPIC_VERTEX_PROJECT_ID=${ANTHROPIC_VERTEX_PROJECT_ID}
       - ANTHROPIC_VERTEX_REGION=${ANTHROPIC_VERTEX_REGION}
-      - GITHUB_APP_ID=${GITHUB_APP_ID}
-      - GITHUB_INSTALLATION_ID=${GITHUB_INSTALLATION_ID}
-      - GITHUB_PRIVATE_KEY=${GITHUB_PRIVATE_KEY}
-      - QUEUE_TYPE=redis
       - REDIS_URL=redis://redis:6379
       - REDIS_PASSWORD=myredissecret
       - LOG_LEVEL=${LOG_LEVEL:-INFO}

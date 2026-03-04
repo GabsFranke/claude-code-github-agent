@@ -27,6 +27,7 @@ from .exceptions import (
 )
 from .health import HealthChecker, HealthStatus
 from .http_client import AsyncHTTPClient, close_http_client, get_http_client
+from .job_queue import JobQueue
 from .models import AgentRequest, AgentResponse
 from .queue import MessageQueue, PubSubQueue, RedisQueue, get_queue
 from .rate_limiter import MultiRateLimiter, RateLimiter
@@ -63,6 +64,8 @@ __all__ = [
     "AsyncHTTPClient",
     "get_http_client",
     "close_http_client",
+    # Job Queue
+    "JobQueue",
     # Models
     "AgentRequest",
     "AgentResponse",
