@@ -2,21 +2,27 @@
 
 AI-powered GitHub agent that automatically reviews pull requests and responds to commands using Claude Agent SDK and GitHub's official MCP server.
 
-> [!WARNING]
-> This agent has full write access to your repositories and can autonomously create branches, commit changes, and open PRs. The current implementation auto-approves all GitHub MCP tool calls (configured with `autoApprove: ['*']`) to allow Claude Code to operate without manual confirmation. Fine-grained permission controls are not yet implemented. Use with caution.
-
 > [!IMPORTANT]
 > This project is currently self-hosted only. You'll need to run it on your own infrastructure with Docker or manually. Cloud deployment options may be added in the future.
 
 ## Features
 
-- 🤖 **Automatic PR Reviews** - Reviews code quality, security, and best practices when PRs are opened
-- 💬 **Command-based Interaction** - Respond to `/agent` commands in issues and PRs
-- 🔧 **Code Analysis** - Answers questions about your codebase
-- 🚀 **Autonomous Actions** - Can create branches, make changes, and open PRs
-- 🤝 **Specialized Subagents** - Delegates tasks to focused agents (context-gathering, code review, bug investigation, test writing)
-- 📝 **Per-repo Customization** - Support for CLAUDE.md configuration files
+### Webhook-Driven Automation
+
+- 🤖 **Automatic PR Reviews** - Triggered when PRs are opened, reviews code quality, security, and best practices
+- 💬 **Command Invocation** - Responds to `/<command>` or `/agent <request>` in issue and PR comments
+- 📋 **Issue Management** - Can triage issues, add labels, and provide analysis
+- 🔧 **Code Analysis** - Answers questions about your codebase, searches files, explains code
+- 🚀 **Autonomous Actions** - Creates branches, commits changes, and opens PRs
+- 🤝 **Specialized Subagents** - Delegates to focused agents (architecture review, security scanning, bug hunting, test writing)
+- 📝 **Per-repo Customization** - Reads CLAUDE.md configuration files from repository root
 - 📊 **Full Observability** - Self-hosted Langfuse integration for tracing tool calls and reasoning
+
+### Planned Features
+
+- 🧪 **Auto-fix Failed Tests** - Reacts to failed GitHub Actions and attempts fixes
+- 💭 **Persistent Chat Sessions** - Long-running planning sessions from GitHub Discussions
+- 🎯 **Auto-coding from Issues** - Picks up issues and autonomously creates PRs with solutions
 
 ## Quick Start
 
@@ -125,16 +131,24 @@ When you open a PR, the agent automatically reviews it and posts:
 - Inline comments on specific lines
 - Suggestions for improvements
 
-### Manual Commands
+### Commands
 
-Comment on any issue or PR with `/agent` followed by your request:
+Comment on any issue or PR with `/agent` followed by a command or request:
+
+**Built-in Commands:**
+
+- `/review` (or `/review-pr`, `/pr-review`) - Comprehensive PR review with subagents
+- `/triage` (or `/triage-issue`) - Analyze and triage an issue
+
+**Generic Requests:**
 
 ```
-/agent explain how authentication works
 /agent review the security of this code
 /agent create a PR to add error handling
-/agent what does this function do?
+/agent find all uses of the deprecated API
 ```
+
+The agent has access to the full repository and can read files, search code, make changes, and interact with GitHub.
 
 ### Per-Repository Configuration
 
@@ -318,6 +332,9 @@ docker-compose logs -f repo_sync
 # Check status
 docker-compose ps
 ```
+
+> [!WARNING]
+> This agent has full write access to your repositories and can autonomously create branches, commit changes, and open PRs. The current implementation auto-approves all GitHub MCP tool calls (configured with `autoApprove: ['*']`) to allow Claude Code to operate without manual confirmation. Fine-grained permission controls are not yet implemented. Use with caution.
 
 ## License
 
