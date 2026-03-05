@@ -41,6 +41,7 @@ class TestCommentHandler:
                 "issue_number": 123,
                 "command": "review this code",
                 "user": "testuser",
+                "ref": "main",
             }
         )
         mock_sync_queue.publish.assert_called_once()
@@ -88,6 +89,7 @@ class TestCommentHandler:
                 "issue_number": 456,
                 "command": "review",
                 "user": "testuser",
+                "ref": "main",
             }
         )
         mock_sync_queue.publish.assert_called_once()

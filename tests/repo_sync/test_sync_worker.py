@@ -223,6 +223,7 @@ class TestProcessSyncRequest:
         mock_lock.release = AsyncMock()
         mock_redis.lock = MagicMock(return_value=mock_lock)
         mock_redis.set = AsyncMock()
+        mock_redis.publish = AsyncMock()
 
         message = {"repo": "owner/repo", "ref": "main"}
 
@@ -247,11 +248,20 @@ class TestProcessSyncRequest:
 
             await process_sync_request(message, mock_redis)
 
-            # Verify fetch was attempted (not clone)
-            mock_git.assert_called_once()
-            call_args = mock_git.call_args[0][0]
-            assert "git --git-dir=" in call_args
-            assert "fetch origin" in call_args
+            # Verify fetch was attempted (not clone) - should be called twice:
+            # 1. set-url to update remote with token
+            # 2. fetch to get updates
+            assert mock_git.call_count == 2
+
+            # First call: set remote URL
+            first_call_args = mock_git.call_args_list[0][0][0]
+            assert "git --git-dir=" in first_call_args
+            assert "remote set-url origin" in first_call_args
+
+            # Second call: fetch
+            second_call_args = mock_git.call_args_list[1][0][0]
+            assert "git --git-dir=" in second_call_args
+            assert "fetch origin" in second_call_args
 
             # Verify completion signal was set
             mock_redis.set.assert_called_once()
