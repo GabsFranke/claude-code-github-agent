@@ -10,12 +10,7 @@ import sys
 import tempfile
 import time
 import uuid
-from pathlib import Path
 
-# Add parent directory to path for shared imports - must be before other imports
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-
-# flake8: noqa: E402 - imports after path modification
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
@@ -121,8 +116,15 @@ def setup_langfuse_hooks() -> dict:
                 try:
                     process.kill()
                     await process.wait()
-                except Exception:
-                    pass  # Process already terminated
+                except ProcessLookupError:
+                    pass  # Expected - process already terminated
+                except OSError as e:
+                    logger.warning(f"Failed to cleanup Langfuse hook process: {e}")
+                except Exception as e:
+                    logger.error(
+                        f"Unexpected error cleaning up Langfuse hook process: {e}",
+                        exc_info=True,
+                    )
 
         return {"success": False, "error": error_msg}
 

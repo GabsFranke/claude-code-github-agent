@@ -2,25 +2,24 @@
 
 import asyncio
 import logging
-import sys
-from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Literal, Optional
 
 import httpx
 from langfuse import Langfuse
 
-# Add top-level to path for workflows
-sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+from shared import GitHubAuthService, JobQueue
+from workflows import WorkflowEngine
 
-from shared import GitHubAuthService, JobQueue  # noqa: E402
-from workflows import WorkflowEngine  # noqa: E402
-
-from .repository_context_loader import RepositoryContextLoader  # noqa: E402
+from .repository_context_loader import RepositoryContextLoader
 
 if TYPE_CHECKING:
     from shared import HealthChecker, MultiRateLimiter
 
 logger = logging.getLogger(__name__)
+
+
+# Type alias for process return value
+ProcessResult = str | Literal["ignored"]
 
 
 class RequestProcessor:
@@ -60,7 +59,7 @@ class RequestProcessor:
         user_query: str,
         user: str,
         ref: str | None = None,
-    ) -> str:
+    ) -> ProcessResult:
         """Process a single agent request by creating a job.
 
         Args:
@@ -70,6 +69,9 @@ class RequestProcessor:
             user_query: User-provided query/context
             user: User who triggered the request
             ref: Git ref to use (if None, defaults to main)
+
+        Returns:
+            Job ID string if job was created, or "ignored" if no workflow matched
         """
         logger.info(f"Processing request for {repo} issue #{issue_number} by {user}")
         logger.info(
@@ -132,7 +134,7 @@ class RequestProcessor:
         user_query: str,
         user: str,
         ref: str | None = None,
-    ) -> str:
+    ) -> ProcessResult:
         """Create a job for sandbox execution.
 
         Args:
@@ -142,6 +144,9 @@ class RequestProcessor:
             user_query: User-provided query/context
             user: User who triggered the request
             ref: Git ref to use (if None, defaults to main)
+
+        Returns:
+            Job ID string if job was created, or "ignored" if no workflow matched
         """
         # Route event/command to workflow
         event_type = event_data.get("event_type", "")

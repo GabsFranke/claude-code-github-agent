@@ -6,13 +6,9 @@ import logging
 import os
 import signal
 import sys
-from pathlib import Path
 
-# Add parent directory to path for shared imports
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-
-from shared.github_auth import get_github_auth_service  # noqa: E402
-from shared.queue import RedisQueue  # noqa: E402
+from shared.github_auth import get_github_auth_service
+from shared.queue import RedisQueue
 
 # Configure logging
 logging.basicConfig(

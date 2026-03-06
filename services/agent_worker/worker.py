@@ -4,13 +4,9 @@ import asyncio
 import logging
 import signal
 import sys
-from pathlib import Path
 
 import httpx
 from langfuse import Langfuse
-
-# Add parent directory to path for shared imports
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 # Import shared utilities
 from shared import JobQueue, MultiRateLimiter, get_queue
@@ -137,9 +133,16 @@ async def main():
         )
         rate_limiters = MultiRateLimiter(backend=redis_backend)
         logger.info("Using Redis-based distributed rate limiting (multi-worker safe)")
-    except (ImportError, ConnectionError) as e:
+    except (ImportError, ConnectionError, TimeoutError) as e:
         logger.warning(
             f"Failed to initialize Redis rate limiting: {e}. "
+            "Falling back to in-memory rate limiting (single worker only)"
+        )
+        rate_limiters = MultiRateLimiter()  # Falls back to in-memory backend
+    except Exception as e:
+        # Catch Redis-specific errors (AuthenticationError, ResponseError, etc.)
+        logger.warning(
+            f"Redis error during rate limiter initialization: {e}. "
             "Falling back to in-memory rate limiting (single worker only)"
         )
         rate_limiters = MultiRateLimiter()  # Falls back to in-memory backend

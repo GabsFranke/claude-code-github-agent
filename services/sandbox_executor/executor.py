@@ -2,11 +2,6 @@ import asyncio
 import json
 import logging
 import os
-import sys
-from pathlib import Path
-
-# Add parent directory to path for shared imports
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -80,8 +75,15 @@ def setup_langfuse_hooks() -> dict:
                 try:
                     process.kill()
                     await process.wait()
-                except Exception:
-                    pass  # Process already terminated
+                except ProcessLookupError:
+                    pass  # Expected - process already terminated
+                except OSError as e:
+                    logger.warning(f"Failed to cleanup Langfuse hook process: {e}")
+                except Exception as e:
+                    logger.error(
+                        f"Unexpected error cleaning up Langfuse hook process: {e}",
+                        exc_info=True,
+                    )
 
         return {"success": False, "error": error_msg}
 

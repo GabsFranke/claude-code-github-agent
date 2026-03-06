@@ -3,13 +3,8 @@
 import logging
 import re
 import sys
-from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-
-# Add shared to path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-
 from validators import verify_signature
 
 from shared import get_queue
@@ -96,6 +91,11 @@ async def webhook(request: Request):
         # Verify signature
         webhook_secret = config.github.github_webhook_secret
         if webhook_secret and not verify_signature(payload, signature, webhook_secret):
+            logger.warning(
+                "Webhook signature verification failed for %s event from %s",
+                event_type,
+                request.client.host if request.client else "unknown",
+            )
             raise HTTPException(status_code=401, detail="Invalid signature")
 
         # Parse payload

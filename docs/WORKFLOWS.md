@@ -19,16 +19,14 @@ Each workflow consists of:
 
 ```yaml
 review-pr:
-  name: "PR Review"
   description: "Comprehensive pull request review"
   triggers:
     events:
-      - event_type: "pull_request"
-        action: "opened"
+      - pull_request.opened
     commands:
-      - "/review"
-      - "/pr-review"
-      - "/review-pr"
+      - /review
+      - /pr-review
+      - /review-pr
   prompt:
     template: "/pr-review-toolkit:review-pr {repo} {issue_number}"
     system_context: "review.md"
@@ -38,24 +36,25 @@ review-pr:
 
 ### Event Triggers
 
-Respond to GitHub webhook events:
+Respond to GitHub webhook events using the format `event_type.action`:
 
 ```yaml
 triggers:
   events:
-    - event_type: "pull_request"
-      action: "opened"
-    - event_type: "pull_request"
-      action: "synchronize"
+    - pull_request.opened
+    - pull_request.synchronize
 ```
 
-**Common event types:**
+**Common event formats:**
 
-- `pull_request` - PR opened, updated, closed, etc.
-- `issues` - Issue opened, edited, closed, etc.
-- `issue_comment` - Comments on issues/PRs
-- `push` - Code pushed to repository
-- `workflow_run` - GitHub Actions workflow completed
+- `pull_request.opened` - PR opened
+- `pull_request.synchronize` - PR updated with new commits
+- `pull_request.closed` - PR closed
+- `issues.opened` - Issue opened
+- `issues.edited` - Issue edited
+- `issue_comment.created` - Comment added to issue/PR
+- `push` - Code pushed to repository (no action needed)
+- `workflow_run.completed` - GitHub Actions workflow completed
 
 ### Command Triggers
 
@@ -64,12 +63,14 @@ Respond to `/command` in issue/PR comments:
 ```yaml
 triggers:
   commands:
-    - "/review"
-    - "/fix-ci"
-    - "/agent"
+    - /review
+    - /fix-ci
+    - /agent
 ```
 
 Commands are extracted from comment bodies using regex: `^(/\S+)\s*(.*)`
+
+Note: Commands in YAML don't need quotes unless they contain special characters.
 
 ### Combined Triggers
 
@@ -78,10 +79,9 @@ A workflow can have both event and command triggers:
 ```yaml
 triggers:
   events:
-    - event_type: "pull_request"
-      action: "opened"
+    - pull_request.opened
   commands:
-    - "/review"
+    - /review
 ```
 
 ## Prompts
@@ -155,15 +155,13 @@ Add your workflow definition:
 ```yaml
 workflows:
   fix-ci:
-    name: "Fix CI"
     description: "Analyze and fix CI failures"
     triggers:
       events:
-        - event_type: "workflow_run"
-          action: "completed"
+        - workflow_run.completed
       commands:
-        - "/fix-ci"
-        - "/fix-build"
+        - /fix-ci
+        - /fix-build
     prompt:
       template: "/fix-ci {repo}"
       system_context: "fix-ci.md"
@@ -242,15 +240,12 @@ Respond to multiple actions on the same event:
 
 ```yaml
 pr-updated:
-  name: "PR Updated"
+  description: "Review PR on open or update"
   triggers:
     events:
-      - event_type: "pull_request"
-        action: "opened"
-      - event_type: "pull_request"
-        action: "synchronize"
-      - event_type: "pull_request"
-        action: "reopened"
+      - pull_request.opened
+      - pull_request.synchronize
+      - pull_request.reopened
   prompt:
     template: "/pr-review-toolkit:review-pr {repo} {issue_number}"
     system_context: "review.md"
@@ -262,12 +257,12 @@ Multiple commands for the same workflow:
 
 ```yaml
 help:
-  name: "Help"
+  description: "Provide help documentation"
   triggers:
     commands:
-      - "/help"
-      - "/?"
-      - "/docs"
+      - /help
+      - /?
+      - /docs
   prompt:
     template: "Provide help documentation for {repo}"
     system_context: "help.md"
@@ -279,10 +274,10 @@ No template, just system context:
 
 ```yaml
 explain:
-  name: "Explain Code"
+  description: "Explain code in detail"
   triggers:
     commands:
-      - "/explain"
+      - /explain
   prompt:
     template: "{user_query}"
     system_context: |

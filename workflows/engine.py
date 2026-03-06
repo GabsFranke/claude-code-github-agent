@@ -1,31 +1,84 @@
 """YAML-driven workflow engine."""
 
 import logging
+import string
 from pathlib import Path
 from typing import Any
 
 import yaml  # type: ignore[import-untyped]
+from pydantic import BaseModel, Field, ValidationError
 
 logger = logging.getLogger(__name__)
+
+
+class PromptConfig(BaseModel):
+    """Prompt configuration for a workflow."""
+
+    template: str = Field(..., description="Prompt template with placeholders")
+    system_context: str | None = Field(
+        None, description="System context (inline or .md file reference)"
+    )
+
+
+class TriggersConfig(BaseModel):
+    """Trigger configuration for a workflow."""
+
+    events: list[str] = Field(default_factory=list, description="GitHub event triggers")
+    commands: list[str] = Field(default_factory=list, description="Command triggers")
+
+
+class WorkflowConfig(BaseModel):
+    """Configuration for a single workflow."""
+
+    triggers: TriggersConfig = Field(..., description="Event and command triggers")
+    prompt: PromptConfig = Field(..., description="Prompt configuration")
+    description: str = Field(default="", description="Workflow description")
+
+
+class WorkflowsConfig(BaseModel):
+    """Root configuration containing all workflows."""
+
+    workflows: dict[str, WorkflowConfig] = Field(
+        ..., description="Map of workflow names to configurations"
+    )
 
 
 class WorkflowEngine:
     """Loads workflows from YAML and routes events/commands to prompts."""
 
-    def __init__(self, config_path: str | Path = "workflows.yaml"):
+    def __init__(self, config_path: str | Path | None = None):
         """Initialize workflow engine from YAML config.
 
         Args:
-            config_path: Path to workflows.yaml file
+            config_path: Path to workflows.yaml file (defaults to workflows.yaml in project root)
         """
+        if config_path is None:
+            config_path = Path(__file__).parent.parent / "workflows.yaml"
         config_path = Path(config_path)
         if not config_path.exists():
             raise FileNotFoundError(f"Workflow config not found: {config_path}")
 
         with open(config_path, encoding="utf-8") as f:
-            config = yaml.safe_load(f)
+            raw_config = yaml.safe_load(f)
 
-        self.workflows = config["workflows"]
+        # Validate configuration with Pydantic
+        try:
+            validated_config = WorkflowsConfig(**raw_config)
+        except ValidationError as e:
+            logger.error(f"Invalid workflow configuration in {config_path}")
+            logger.error("Validation errors:")
+            for error in e.errors():
+                loc = " -> ".join(str(x) for x in error["loc"])
+                logger.error(f"  {loc}: {error['msg']}")
+            raise ValueError(
+                f"Invalid workflow configuration: {e.error_count()} validation error(s). "
+                "See logs for details."
+            ) from e
+
+        self.workflows = {
+            name: workflow.model_dump()
+            for name, workflow in validated_config.workflows.items()
+        }
 
         # Build lookup tables for fast routing
         self._event_map: dict[str, str] = {}
@@ -111,14 +164,41 @@ class WorkflowEngine:
         workflow = self.workflows[workflow_name]
         prompt_config = workflow["prompt"]
 
-        # Fill template with variables
+        # Validate template placeholders to prevent injection
         template = prompt_config["template"]
-        prompt = template.format(
-            repo=repo,
-            issue_number=issue_number or "",
-            user_query=user_query,
-            **kwargs,
-        )
+        try:
+            # Get all field names from template
+            field_names = [
+                field_name
+                for _, field_name, _, _ in string.Formatter().parse(template)
+                if field_name is not None
+            ]
+
+            # Build safe variables dict
+            safe_vars = {
+                "repo": repo,
+                "issue_number": issue_number or "",
+                "user_query": user_query,
+                **kwargs,
+            }
+
+            # Validate all required fields are present
+            for field_name in field_names:
+                if field_name not in safe_vars:
+                    raise ValueError(
+                        f"Template requires field '{field_name}' but it was not provided"
+                    )
+
+            # Fill template with validated variables
+            prompt = template.format(**safe_vars)
+
+        except (KeyError, ValueError) as e:
+            logger.error(
+                f"Template formatting error in workflow '{workflow_name}': {e}"
+            )
+            raise ValueError(
+                f"Invalid template in workflow '{workflow_name}': {e}"
+            ) from e
 
         # Add system context if defined
         system_context = prompt_config.get("system_context")
@@ -126,20 +206,32 @@ class WorkflowEngine:
             # Check if it's a file reference (ends with .md)
             if system_context.endswith(".md"):
                 context_file = Path(__file__).parent.parent / "prompts" / system_context
-                if context_file.exists():
-                    system_context = context_file.read_text().strip()
-                    logger.debug(f"Loaded system context from {system_context}")
-                else:
+                try:
+                    system_context = context_file.read_text(encoding="utf-8").strip()
+                    logger.debug(f"Loaded system context from {context_file}")
+                except FileNotFoundError:
                     logger.warning(f"System context file not found: {context_file}")
+                    system_context = ""
+                except Exception as e:
+                    logger.error(
+                        f"Error reading system context file {context_file}: {e}"
+                    )
                     system_context = ""
 
             # Fill system context with variables if it's not empty
             if system_context:
-                system_context = system_context.format(
-                    repo=repo,
-                    issue_number=issue_number or "",
-                    **kwargs,
-                )
+                try:
+                    system_context = system_context.format(
+                        repo=repo,
+                        issue_number=issue_number or "",
+                        **kwargs,
+                    )
+                except (KeyError, ValueError) as e:
+                    logger.warning(
+                        f"Error formatting system context in workflow '{workflow_name}': {e}"
+                    )
+                    # Continue without formatted system context
+                    pass
 
                 # Combine: prompt + system_context + user_query
                 if user_query:
