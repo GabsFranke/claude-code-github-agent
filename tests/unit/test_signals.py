@@ -85,19 +85,28 @@ def test_signal_handler_logs_signal_number(shutdown_event, mock_logger):
 def test_cleanup_restores_default_handlers(shutdown_event, mock_logger):
     """Test that cleanup function restores default signal handlers."""
     with patch("signal.signal") as mock_signal:
+        # Mock signal.signal to return the old handler (simulating real behavior)
+        old_sigterm = signal.SIG_DFL
+        old_sigint = signal.SIG_DFL
+        mock_signal.side_effect = [old_sigterm, old_sigint, None, None]
+
         cleanup = setup_graceful_shutdown(shutdown_event, mock_logger)
 
         # Reset mock to track cleanup calls
         mock_signal.reset_mock()
+        mock_signal.side_effect = None
 
         # Call cleanup
         cleanup()
 
-        # Verify default handlers were restored
+        # Verify handlers were restored (the cleanup function restores the old handlers)
         assert mock_signal.call_count == 2
         calls = mock_signal.call_args_list
-        assert calls[0][0] == (signal.SIGTERM, signal.SIG_DFL)
-        assert calls[1][0] == (signal.SIGINT, signal.SIG_DFL)
+        assert calls[0][0][0] == signal.SIGTERM
+        assert calls[1][0][0] == signal.SIGINT
+        # The second argument should be the old handler (SIG_DFL in this case)
+        assert calls[0][0][1] == old_sigterm
+        assert calls[1][0][1] == old_sigint
 
 
 def test_multiple_signal_types_set_same_event(shutdown_event, mock_logger):

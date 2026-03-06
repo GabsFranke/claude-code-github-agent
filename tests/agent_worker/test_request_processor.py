@@ -91,6 +91,9 @@ class TestRequestProcessorExecution:
 
                 mock_engine = MagicMock()
                 mock_engine.build_prompt = MagicMock(return_value="Review PR prompt")
+                mock_engine.workflows = {
+                    "review-pr": MagicMock()
+                }  # Add workflow to dict
                 mock_engine_class.return_value = mock_engine
 
                 processor = RequestProcessor(token_manager, http_client, job_queue)
@@ -129,6 +132,7 @@ class TestRequestProcessorExecution:
 
                 mock_engine = MagicMock()
                 mock_engine.build_prompt = MagicMock(return_value="Generic prompt")
+                mock_engine.workflows = {"generic": MagicMock()}  # Add workflow to dict
                 mock_engine_class.return_value = mock_engine
 
                 processor = RequestProcessor(token_manager, http_client, job_queue)
@@ -164,6 +168,7 @@ class TestRequestProcessorExecution:
 
                 mock_engine = MagicMock()
                 mock_engine.build_prompt = MagicMock(return_value="Test prompt")
+                mock_engine.workflows = {"generic": MagicMock()}  # Add workflow to dict
                 mock_engine_class.return_value = mock_engine
 
                 processor = RequestProcessor(token_manager, http_client, job_queue)
@@ -232,6 +237,7 @@ class TestRequestProcessorExecution:
 
                 mock_engine = MagicMock()
                 mock_engine.build_prompt = MagicMock(return_value="Test prompt")
+                mock_engine.workflows = {"generic": MagicMock()}  # Add workflow to dict
                 mock_engine_class.return_value = mock_engine
 
                 processor = RequestProcessor(token_manager, http_client, job_queue)
@@ -277,6 +283,7 @@ class TestRequestProcessorExecution:
 
                 mock_engine = MagicMock()
                 mock_engine.build_prompt = MagicMock(return_value="Test prompt")
+                mock_engine.workflows = {"generic": MagicMock()}  # Add workflow to dict
                 mock_engine_class.return_value = mock_engine
 
                 processor = RequestProcessor(
