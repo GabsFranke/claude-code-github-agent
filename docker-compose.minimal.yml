@@ -1,12 +1,18 @@
 services:
   redis:
     image: redis:7-alpine
-    command: --requirepass myredissecret
+    env_file: .env
+    command: sh -c 'redis-server --requirepass "$${REDIS_PASSWORD:-myredissecret}"'
     ports:
       - "6379:6379"
     healthcheck:
       test:
-        ["CMD", "redis-cli", "--no-auth-warning", "-a", "myredissecret", "ping"]
+        [
+          "CMD",
+          "sh",
+          "-c",
+          "redis-cli --no-auth-warning -a $${REDIS_PASSWORD:-myredissecret} ping",
+        ]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -15,16 +21,18 @@ services:
     build:
       context: .
       dockerfile: services/webhook/Dockerfile
+    env_file: .env
     ports:
       - "10000:8080"
     environment:
+      - PYTHONPATH=/app
       - GITHUB_APP_ID=${GITHUB_APP_ID}
       - GITHUB_INSTALLATION_ID=${GITHUB_INSTALLATION_ID}
       - GITHUB_PRIVATE_KEY=${GITHUB_PRIVATE_KEY}
       - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET}
       - QUEUE_TYPE=redis
       - REDIS_URL=redis://redis:6379
-      - REDIS_PASSWORD=myredissecret
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-myredissecret}
       - PORT=8080
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     depends_on:
@@ -35,14 +43,16 @@ services:
     build:
       context: .
       dockerfile: services/agent_worker/Dockerfile
+    env_file: .env
     environment:
+      - PYTHONPATH=/app
       # Worker creates jobs in queue (lightweight coordinator)
       - GITHUB_APP_ID=${GITHUB_APP_ID}
       - GITHUB_INSTALLATION_ID=${GITHUB_INSTALLATION_ID}
       - GITHUB_PRIVATE_KEY=${GITHUB_PRIVATE_KEY}
       - QUEUE_TYPE=redis
       - REDIS_URL=redis://redis:6379
-      - REDIS_PASSWORD=myredissecret
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-myredissecret}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     depends_on:
       redis:
@@ -53,15 +63,19 @@ services:
       context: .
       dockerfile: services/sandbox_executor/Dockerfile
     command: python -m services.sandbox_executor.sandbox_worker
+    env_file: .env
     tmpfs:
       # tmpfs for automatic workspace cleanup on restart
       - /tmp:size=2G,mode=1777
     volumes:
-      # Mount plugins directory (read-only)
+      # Persistent cache for bare repositories across all workers
+      - repo-cache:/var/cache/repos:rw
+      # Plugins (read-only) — sandbox compiles ClaudeAgentOptions
       - ./plugins:/app/plugins:ro
-      # Mount gcloud credentials for Vertex AI
+      # gcloud credentials for Vertex AI — sandbox is the one calling the SDK
       - ${APPDATA}/gcloud/application_default_credentials.json:/root/.config/gcloud/application_default_credentials.json:ro
     environment:
+      - PYTHONPATH=/app
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - ANTHROPIC_AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN}
       - ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL}
@@ -71,8 +85,37 @@ services:
       - ANTHROPIC_VERTEX_PROJECT_ID=${ANTHROPIC_VERTEX_PROJECT_ID}
       - ANTHROPIC_VERTEX_REGION=${ANTHROPIC_VERTEX_REGION}
       - REDIS_URL=redis://redis:6379
-      - REDIS_PASSWORD=myredissecret
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-myredissecret}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     depends_on:
       redis:
         condition: service_healthy
+
+  repo_sync:
+    build:
+      context: .
+      dockerfile: services/repo_sync/Dockerfile
+    env_file: .env
+    volumes:
+      - repo-cache:/var/cache/repos:rw
+    environment:
+      - PYTHONPATH=/app
+      - REDIS_URL=redis://redis:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-myredissecret}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      # GitHub App credentials for cloning private repos when token not provided
+      - GITHUB_APP_ID=${GITHUB_APP_ID}
+      - GITHUB_INSTALLATION_ID=${GITHUB_INSTALLATION_ID}
+      - GITHUB_PRIVATE_KEY=${GITHUB_PRIVATE_KEY}
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  repo-cache:

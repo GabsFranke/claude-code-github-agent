@@ -205,16 +205,17 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed system design.
 **High-level flow**:
 
 ```
-GitHub Event → Webhook → Redis Queues → Worker → Job Queue → Sandbox Pool (Local Worktrees) → GitHub MCP → GitHub API
+GitHub Event → Webhook → Redis Queues → Worker (Workflow Engine) → Job Queue → Sandbox Pool (Local Worktrees) → GitHub MCP → GitHub API
                               ↓
-                         Repo Sync Service → Bare Repo Cache → Git Worktrees
+                         Repo Sync Service (on-demand) → Bare Repo Cache → Git Worktrees
 ```
 
 **Key components**:
 
-- **Webhook Service** - Receives GitHub events (FastAPI)
-- **Worker** - Lightweight job coordinator
-- **Repo Sync Service** - Manages cached bare repositories
+- **Webhook Service** - Receives GitHub events, extracts raw data (FastAPI)
+- **Worker** - Routes events/commands via YAML workflows, creates jobs
+- **Workflow Engine** - YAML-driven routing (workflows.yaml)
+- **Repo Sync Service** - Manages cached bare repositories (on-demand)
 - **Sandbox Pool** - Executes Claude SDK in isolated git worktrees
 - **Redis** - Message queue, job queue, and sync coordination
 - **Claude Agent SDK** - Autonomous coding agent with local file access
@@ -226,6 +227,7 @@ GitHub Event → Webhook → Redis Queues → Worker → Job Queue → Sandbox P
 
 - [Getting Started](docs/GETTING_STARTED.md) - Installation and setup
 - [Architecture](docs/ARCHITECTURE.md) - System design and components
+- [Workflows](docs/WORKFLOWS.md) - Creating and managing workflows
 - [Configuration](docs/CONFIGURATION.md) - Environment variables
 - [Development](docs/DEVELOPMENT.md) - Testing and contributing
 - [Langfuse Setup](docs/LANGFUSE_SETUP.md) - Observability

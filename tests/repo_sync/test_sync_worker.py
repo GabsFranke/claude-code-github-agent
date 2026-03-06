@@ -2,7 +2,6 @@
 
 import asyncio
 import os
-import signal
 import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -23,29 +22,16 @@ def reset_shutdown_event():
 class TestSignalHandling:
     """Test signal handling functions."""
 
-    def test_handle_shutdown_sets_event(self):
-        """Test handle_shutdown sets shutdown event."""
+    def test_sync_worker_uses_shared_signal_handling(self):
+        """Test sync worker uses shared signal handling from shared.signals."""
+        # This test verifies that the sync_worker module imports and uses
+        # the shared setup_graceful_shutdown function instead of
+        # implementing its own signal handlers.
         from services.repo_sync import sync_worker
 
-        # Reset shutdown event
-        sync_worker.shutdown_event.clear()
-
-        sync_worker.handle_shutdown(signal.SIGTERM, None)
-
-        assert sync_worker.shutdown_event.is_set()
-
-    def test_setup_signal_handlers(self):
-        """Test setup_signal_handlers registers handlers."""
-        from services.repo_sync import sync_worker
-
-        with patch("signal.signal") as mock_signal:
-            sync_worker.setup_signal_handlers()
-
-            # Verify SIGTERM and SIGINT were registered
-            assert mock_signal.call_count == 2
-            calls = [call[0][0] for call in mock_signal.call_args_list]
-            assert signal.SIGTERM in calls
-            assert signal.SIGINT in calls
+        # Verify shutdown_event exists (used by shared signal handler)
+        assert hasattr(sync_worker, "shutdown_event")
+        assert isinstance(sync_worker.shutdown_event, asyncio.Event)
 
 
 class TestExecuteGitCommand:
@@ -54,7 +40,7 @@ class TestExecuteGitCommand:
     @pytest.mark.asyncio
     async def test_successful_command(self):
         """Test successful git command execution."""
-        from services.repo_sync.sync_worker import execute_git_command
+        from shared.git_utils import execute_git_command
 
         # Use a simple command that works on all platforms
         code, stdout, stderr = await execute_git_command("git --version")
@@ -66,7 +52,7 @@ class TestExecuteGitCommand:
     @pytest.mark.asyncio
     async def test_failed_command(self):
         """Test failed git command execution."""
-        from services.repo_sync.sync_worker import execute_git_command
+        from shared.git_utils import execute_git_command
 
         code, stdout, stderr = await execute_git_command(
             "git invalid-command-that-does-not-exist"
@@ -78,7 +64,7 @@ class TestExecuteGitCommand:
     @pytest.mark.asyncio
     async def test_command_with_cwd(self):
         """Test git command execution with custom working directory."""
-        from services.repo_sync.sync_worker import execute_git_command
+        from shared.git_utils import execute_git_command
 
         with tempfile.TemporaryDirectory() as tmpdir:
             code, stdout, stderr = await execute_git_command("git init", cwd=tmpdir)

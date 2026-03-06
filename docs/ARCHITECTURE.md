@@ -37,11 +37,101 @@ flowchart LR
 
 1. **GitHub** → Webhook events (PR, comments, push)
 2. **Webhook Service** → Validates and publishes to Redis queues
-3. **Worker** → Creates jobs from requests
-4. **Repo Sync** → Maintains cached bare repositories
+3. **Worker** → Routes events/commands to workflows, creates jobs
+4. **Repo Sync** → Maintains cached bare repositories (only when needed)
 5. **Sandbox Workers** → Execute Claude SDK in isolated worktrees
 6. **Claude SDK** → Local file operations + GitHub MCP for API calls
 7. **Results** → Posted back to GitHub via MCP
+
+## Workflow System
+
+### YAML-Driven Configuration
+
+The system uses a declarative YAML configuration (`workflows.yaml`) as the single source of truth for all workflows, eliminating code duplication and making it easy to add new behaviors.
+
+**Structure:**
+
+```
+claude-code-github-agent/
+├── workflows.yaml           # Single config file - defines all workflows
+├── workflows/
+│   ├── __init__.py
+│   └── engine.py           # WorkflowEngine - loads YAML and routes
+├── prompts/
+│   ├── review.md           # System context for PR reviews
+│   ├── triage.md           # System context for issue triage
+│   └── generic.md          # System context for generic requests
+└── services/
+    ├── webhook/
+    │   └── main.py         # Extracts raw event data
+    └── agent_worker/
+        ├── worker.py       # Receives event data
+        └── processors/
+            └── request_processor.py  # Routes via WorkflowEngine
+```
+
+**Example workflows.yaml:**
+
+```yaml
+workflows:
+  review-pr:
+    name: "PR Review"
+    description: "Comprehensive pull request review"
+    triggers:
+      events:
+        - event_type: "pull_request"
+          action: "opened"
+      commands:
+        - "/review"
+        - "/pr-review"
+        - "/review-pr"
+    prompt:
+      template: "/pr-review-toolkit:review-pr {repo} {issue_number}"
+      system_context: "review.md"
+
+  triage-issue:
+    name: "Issue Triage"
+    description: "Analyze and triage issues"
+    triggers:
+      events:
+        - event_type: "issues"
+          action: "opened"
+      commands:
+        - "/triage"
+        - "/triage-issue"
+    prompt:
+      template: "/issue-toolkit:triage-issue {repo} {issue_number}"
+      system_context: "triage.md"
+
+  generic:
+    name: "Generic Agent"
+    description: "Handle generic agent requests"
+    triggers:
+      commands:
+        - "/agent"
+    prompt:
+      template: "{user_query}"
+      system_context: "generic.md"
+```
+
+### Workflow Routing
+
+**Webhook Service** (simple):
+
+- Receives GitHub events
+- Extracts raw data: `event_type`, `action`, `command` (if present), `user_query`
+- Queues raw event data to Redis
+- NO workflow logic
+
+**Agent Worker** (smart):
+
+- Receives raw event data from queue
+- Uses `WorkflowEngine` to route events/commands → workflow names
+- Builds complete prompts (command + system context + user query)
+- Triggers repo sync ONLY if workflow found
+- Creates jobs for sandbox execution
+
+See [WORKFLOWS.md](WORKFLOWS.md) for details on creating and managing workflows.
 
 ## Core Components
 
@@ -55,28 +145,38 @@ flowchart LR
 
 - Validates webhook signatures (HMAC)
 - Parses GitHub events (issue_comment, pull_request, push)
-- Extracts `/agent` commands from comments
-- Publishes to Redis message queue (`agent:requests`)
-- Publishes to Redis sync queue (`agent:sync:requests`) for proactive caching
+- Extracts `/command` patterns from comments
+- Extracts raw event data: `event_type`, `action`, `command`, `user_query`
+- Publishes raw event data to Redis message queue (`agent:requests`)
+- Publishes push events to sync queue (`agent:sync:requests`) for proactive caching
 - Returns immediately (< 100ms)
+- NO workflow routing logic (handled by worker)
 
 **Key Files**: `services/webhook/main.py`
 
 ### 2. Worker Service (Coordinator)
 
 **Technology**: Python
-**Purpose**: Lightweight job coordinator
+**Purpose**: Lightweight job coordinator with workflow routing
 
 **Responsibilities**:
 
 - Subscribes to Redis message queue (`agent:requests`)
-- Generates prompts via command registry
+- Routes events/commands to workflows via `WorkflowEngine`
+- Builds prompts from workflow templates + system context + user queries
 - Fetches CLAUDE.md from repositories
+- Triggers repo sync ONLY when workflow is found (efficient)
 - Determines appropriate git ref (main, PR head, etc.)
 - Creates jobs in Redis job queue with repo, ref, and prompt
+- Ignores unhandled events gracefully
 - Returns immediately (non-blocking)
 
-**Key Files**: `services/agent_worker/worker.py`
+**Key Files**:
+
+- `services/agent_worker/worker.py`
+- `services/agent_worker/processors/request_processor.py`
+- `workflows/engine.py`
+- `workflows.yaml`
 
 ### 3. Repository Sync Service
 
@@ -270,26 +370,41 @@ async with GitHubAuthService(app_id, private_key, installation_id) as auth:
 ### Automatic PR Review
 
 1. Developer opens PR
-2. GitHub sends `pull_request` webhook
-3. Webhook validates signature, publishes sync request and job to Redis
-4. Repo sync service clones/updates bare repository
-5. Worker picks up message, creates job with PR ref
-6. Sandbox worker waits for sync, creates worktree from bare repo
-7. Claude SDK executes in local worktree with file system access
-8. Claude SDK uses local tools (Read, Write, Edit, List, Search, Bash)
-9. Claude SDK uses GitHub MCP to post review
-10. Job marked as complete in Redis
+2. GitHub sends `pull_request.opened` webhook
+3. Webhook extracts event data, publishes to Redis (`agent:requests`)
+4. Worker receives event, `WorkflowEngine` routes `pull_request.opened` → `review-pr` workflow
+5. Worker triggers repo sync for PR ref
+6. Worker builds prompt from workflow template + system context
+7. Worker creates job in job queue
+8. Repo sync service clones/updates bare repository
+9. Sandbox worker waits for sync, creates worktree from bare repo
+10. Claude SDK executes in local worktree with file system access
+11. Claude SDK uses local tools (Read, Write, Edit, List, Search, Bash)
+12. Claude SDK uses GitHub MCP to post review
+13. Job marked as complete in Redis
 
 ### Manual Command
 
-1. Developer comments `/agent explain this function`
-2. GitHub sends `issue_comment` webhook
-3. Webhook parses command, publishes sync request and job
-4. Repo sync service ensures repository is cached
-5. Worker creates job with command
-6. Sandbox worker creates worktree, executes SDK
-7. Claude SDK reads code locally and posts explanation via GitHub MCP
-8. Developer sees response on GitHub
+1. Developer comments `/review check auth logic`
+2. GitHub sends `issue_comment.created` webhook
+3. Webhook parses: `command="/review"`, `user_query="check auth logic"`
+4. Webhook publishes raw event data to Redis
+5. Worker receives event, `WorkflowEngine` routes `/review` → `review-pr` workflow
+6. Worker triggers repo sync
+7. Worker builds prompt: template + system context + user query
+8. Worker creates job
+9. Sandbox worker creates worktree, executes SDK
+10. Claude SDK reads code locally and posts review via GitHub MCP
+11. Developer sees response on GitHub
+
+### Unhandled Event
+
+1. GitHub sends `issue_comment.deleted` webhook
+2. Webhook extracts event data, publishes to Redis
+3. Worker receives event, `WorkflowEngine` finds no matching workflow
+4. Worker logs "No workflow configured" and returns "ignored"
+5. NO repo sync triggered (efficient)
+6. Event gracefully ignored
 
 ### Push Event (Proactive Cache Warming)
 

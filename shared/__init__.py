@@ -27,6 +27,7 @@ from .exceptions import (
     WebhookValidationError,
     WorktreeCreationError,
 )
+from .git_utils import execute_git_command
 from .github_auth import (
     GitHubAuthService,
     close_github_auth_service,
@@ -35,10 +36,12 @@ from .github_auth import (
 from .health import HealthChecker, HealthStatus
 from .http_client import AsyncHTTPClient, close_http_client, get_http_client
 from .job_queue import JobQueue
+from .logging_utils import setup_logging
 from .models import AgentRequest, AgentResponse
 from .queue import MessageQueue, PubSubQueue, RedisQueue, get_queue
 from .rate_limiter import MultiRateLimiter, RateLimiter
 from .retry import async_retry
+from .signals import setup_graceful_shutdown
 
 __all__ = [
     # Config
@@ -66,6 +69,8 @@ __all__ = [
     "TokenRefreshError",
     "WebhookValidationError",
     "WorktreeCreationError",
+    # Git Utils
+    "execute_git_command",
     # GitHub Auth
     "GitHubAuthService",
     "get_github_auth_service",
@@ -79,6 +84,8 @@ __all__ = [
     "close_http_client",
     # Job Queue
     "JobQueue",
+    # Logging
+    "setup_logging",
     # Models
     "AgentRequest",
     "AgentResponse",
@@ -92,4 +99,6 @@ __all__ = [
     "MultiRateLimiter",
     # Retry
     "async_retry",
+    # Signals
+    "setup_graceful_shutdown",
 ]

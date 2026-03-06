@@ -6,7 +6,7 @@ pytest-mock>=3.15.1
 black>=26.1.0
 isort>=8.0.1
 mypy>=1.19.1
-ruff>=0.15.4
+ruff>=0.15.5
 pylint>=4.0.5
 
 # Include all service dependencies for local dev

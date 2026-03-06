@@ -4,12 +4,11 @@ import os
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
+from shared.logging_utils import setup_logging
+
 from .executor import execute_sandbox_request
 
-logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO"),
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
+setup_logging(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Claude Agent SDK Sandbox Executor")

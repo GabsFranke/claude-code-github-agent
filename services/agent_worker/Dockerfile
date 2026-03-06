@@ -5,6 +5,11 @@ WORKDIR /app
 # Copy shared module
 COPY shared/ ./shared/
 
+# Copy workflows and prompts (NEW - needed for WorkflowEngine)
+COPY workflows/ ./workflows/
+COPY workflows.yaml ./workflows.yaml
+COPY prompts/ ./prompts/
+
 # Copy agent_worker requirements and install
 COPY services/agent_worker/requirements.txt ./
 RUN pip3 install --no-cache-dir -r requirements.txt

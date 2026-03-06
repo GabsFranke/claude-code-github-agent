@@ -1,10 +1,54 @@
 """Configuration management using Pydantic Settings."""
 
+import logging
 import os
+import sys
 from typing import Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def handle_config_error(e: Exception, service_name: str) -> None:
+    """Handle configuration validation errors with detailed reporting.
+
+    Args:
+        e: The exception that was raised during config validation
+        service_name: Name of the service (e.g., "webhook", "worker", "sandbox_worker")
+
+    This function logs the error, prints a detailed message to stderr, and exits.
+    """
+    # Setup basic logging for error reporting before config is loaded
+    logging.basicConfig(
+        level=logging.ERROR,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+    error_logger = logging.getLogger(__name__)
+
+    error_logger.error(
+        f"FATAL: Configuration validation failed. Cannot start {service_name}.",
+        exc_info=True,
+    )
+    error_logger.error(f"Error details: {type(e).__name__}: {e}")
+    error_logger.error(
+        "Please check your .env file and ensure all required environment variables are set correctly."
+    )
+    error_logger.error("See docs/CONFIGURATION.md for configuration requirements.")
+
+    # Also print to stderr for container logs
+    print(f"\n{'='*60}", file=sys.stderr)
+    print("FATAL ERROR: Configuration Validation Failed", file=sys.stderr)
+    print(f"{'='*60}", file=sys.stderr)
+    print(f"Service: {service_name}", file=sys.stderr)
+    print(f"Error: {type(e).__name__}: {e}", file=sys.stderr)
+    print("\nPlease verify:", file=sys.stderr)
+    print("  1. .env file exists and is readable", file=sys.stderr)
+    print("  2. All required environment variables are set", file=sys.stderr)
+    print("  3. Values are in correct format (URLs, integers, etc.)", file=sys.stderr)
+    print("\nSee docs/CONFIGURATION.md for details.", file=sys.stderr)
+    print(f"{'='*60}\n", file=sys.stderr)
+
+    sys.exit(1)
 
 
 class BaseConfig(BaseSettings):
