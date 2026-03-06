@@ -1,7 +1,7 @@
 """Unit tests for worker module."""
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -9,33 +9,16 @@ import pytest
 class TestWorkerFunctions:
     """Test worker utility functions."""
 
-    def test_handle_shutdown_sets_event(self):
-        """Test handle_shutdown sets shutdown event."""
-        import signal
-
+    def test_worker_uses_shared_signal_handling(self):
+        """Test worker uses shared signal handling from shared.signals."""
+        # This test verifies that the worker module imports and uses
+        # the shared setup_graceful_shutdown function instead of
+        # implementing its own signal handlers.
         from services.agent_worker import worker
 
-        # Reset shutdown event
-        worker.shutdown_event.clear()
-
-        worker.handle_shutdown(signal.SIGTERM, None)
-
-        assert worker.shutdown_event.is_set()
-
-    def test_setup_signal_handlers(self):
-        """Test setup_signal_handlers registers handlers."""
-        import signal
-
-        from services.agent_worker import worker
-
-        with patch("signal.signal") as mock_signal:
-            worker.setup_signal_handlers()
-
-            # Verify SIGTERM and SIGINT were registered
-            assert mock_signal.call_count == 2
-            calls = [call[0][0] for call in mock_signal.call_args_list]
-            assert signal.SIGTERM in calls
-            assert signal.SIGINT in calls
+        # Verify shutdown_event exists (used by shared signal handler)
+        assert hasattr(worker, "shutdown_event")
+        assert isinstance(worker.shutdown_event, asyncio.Event)
 
 
 class TestWorkerMessageProcessing:

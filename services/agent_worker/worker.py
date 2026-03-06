@@ -2,20 +2,16 @@
 
 import asyncio
 import logging
-import signal
 import sys
-from pathlib import Path
 
 import httpx
 from langfuse import Langfuse
 
-# Add parent directory to path for shared imports
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-
 # Import shared utilities
-from shared import JobQueue, MultiRateLimiter, get_queue
-from shared.config import get_worker_config
+from shared import JobQueue, MultiRateLimiter, get_queue, setup_graceful_shutdown
+from shared.config import get_worker_config, handle_config_error
 from shared.health import HealthChecker
+from shared.logging_utils import setup_logging
 
 # Import modularized components
 from .processors import RequestProcessor
@@ -24,42 +20,10 @@ from .processors import RequestProcessor
 try:
     config = get_worker_config()
 except Exception as e:
-    # Setup basic logging for error reporting before config is loaded
-    logging.basicConfig(
-        level=logging.ERROR,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    )
-    error_logger = logging.getLogger(__name__)
-
-    error_logger.error(
-        "FATAL: Configuration validation failed. Cannot start worker.",
-        exc_info=True,
-    )
-    error_logger.error(f"Error details: {type(e).__name__}: {e}")
-    error_logger.error(
-        "Please check your .env file and ensure all required environment variables are set correctly."
-    )
-    error_logger.error("See docs/CONFIGURATION.md for configuration requirements.")
-
-    # Also print to stderr for container logs
-    print(f"\n{'='*60}", file=sys.stderr)
-    print("FATAL ERROR: Configuration Validation Failed", file=sys.stderr)
-    print(f"{'='*60}", file=sys.stderr)
-    print(f"Error: {type(e).__name__}: {e}", file=sys.stderr)
-    print("\nPlease verify:", file=sys.stderr)
-    print("  1. .env file exists and is readable", file=sys.stderr)
-    print("  2. All required environment variables are set", file=sys.stderr)
-    print("  3. Values are in correct format (URLs, integers, etc.)", file=sys.stderr)
-    print("\nSee docs/CONFIGURATION.md for details.", file=sys.stderr)
-    print(f"{'='*60}\n", file=sys.stderr)
-
-    sys.exit(1)
+    handle_config_error(e, "worker")
 
 # Configure logging
-logging.basicConfig(
-    level=getattr(logging, config.log_level, logging.INFO),
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
+setup_logging(level=config.log_level, silence_noisy=True)
 logger = logging.getLogger(__name__)
 
 logger.info(f"Logging configured at {config.log_level} level")
@@ -86,18 +50,6 @@ rate_limiters = None
 job_queue = None
 
 
-def handle_shutdown(signum, _frame):
-    """Handle shutdown signals gracefully."""
-    logger.info("Received signal %s, initiating graceful shutdown...", signum)
-    shutdown_event.set()
-
-
-def setup_signal_handlers():
-    """Setup signal handlers for graceful shutdown."""
-    signal.signal(signal.SIGTERM, handle_shutdown)
-    signal.signal(signal.SIGINT, handle_shutdown)
-
-
 async def main():
     """Main worker loop - subscribes to queue and processes messages."""
     global http_client, processor, health_checker, rate_limiters, job_queue  # pylint: disable=global-statement
@@ -105,7 +57,7 @@ async def main():
     logger.info("Starting Claude Agent SDK worker (job queue mode)")
 
     # Setup signal handlers
-    setup_signal_handlers()
+    setup_graceful_shutdown(shutdown_event, logger)
 
     # Initialize HTTP client
     http_client = httpx.AsyncClient(
@@ -132,9 +84,16 @@ async def main():
         )
         rate_limiters = MultiRateLimiter(backend=redis_backend)
         logger.info("Using Redis-based distributed rate limiting (multi-worker safe)")
-    except (ImportError, ConnectionError) as e:
+    except (ImportError, ConnectionError, TimeoutError) as e:
         logger.warning(
             f"Failed to initialize Redis rate limiting: {e}. "
+            "Falling back to in-memory rate limiting (single worker only)"
+        )
+        rate_limiters = MultiRateLimiter()  # Falls back to in-memory backend
+    except Exception as e:
+        # Catch Redis-specific errors (AuthenticationError, ResponseError, etc.)
+        logger.warning(
+            f"Redis error during rate limiter initialization: {e}. "
             "Falling back to in-memory rate limiting (single worker only)"
         )
         rate_limiters = MultiRateLimiter()  # Falls back to in-memory backend
@@ -198,35 +157,45 @@ async def main():
             try:
                 repo = message.get("repository")
                 issue_number = message.get("issue_number")
-                command = message.get("command")
+                event_data = message.get("event_data", {})
+                user_query = message.get("user_query", "")
                 user = message.get("user", "unknown")
-                auto_review = message.get("auto_review", False)
-                auto_triage = message.get("auto_triage", False)
-                ref = message.get("ref")  # Optional ref from webhook
+                ref = message.get("ref")
+                workflow_name = message.get("workflow_name")
 
-                logger.info(f"Received message with ref: {ref}")
+                logger.info(
+                    f"Received message with ref: {ref}, workflow: {workflow_name}"
+                )
                 logger.info(f"Message keys: {list(message.keys())}")
+                logger.info(f"Event data: {event_data}")
 
-                if not all([repo, issue_number, command]):
+                if not all([repo, event_data, workflow_name]):
                     logger.error(f"Invalid message format: {message}")
                     health_checker.record_error()
                     return
 
                 # Type assertions after validation
                 assert isinstance(repo, str)
-                assert isinstance(issue_number, int)
-                assert isinstance(command, str)
+                assert isinstance(event_data, dict)
+                assert isinstance(user_query, str)
                 assert isinstance(user, str)
+                assert isinstance(workflow_name, str)
 
-                await processor.process(
+                job_id = await processor.process(
                     repo,
                     issue_number,
-                    command,
+                    event_data,
+                    user_query,
                     user,
-                    auto_review,
-                    auto_triage,
                     ref,
+                    workflow_name,
                 )
+
+                # Check if event was ignored
+                if job_id == "ignored":
+                    logger.debug("Event ignored, no workflow configured")
+                    health_checker.record_activity()
+                    return
 
                 # Record successful processing
                 health_checker.record_activity()

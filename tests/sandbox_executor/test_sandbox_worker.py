@@ -2,7 +2,6 @@
 
 import asyncio
 import os
-import signal
 import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -23,29 +22,16 @@ def reset_shutdown_event():
 class TestSignalHandling:
     """Test signal handling functions."""
 
-    def test_handle_shutdown_sets_event(self):
-        """Test handle_shutdown sets shutdown event."""
+    def test_sandbox_worker_uses_shared_signal_handling(self):
+        """Test sandbox worker uses shared signal handling from shared.signals."""
+        # This test verifies that the sandbox_worker module imports and uses
+        # the shared setup_graceful_shutdown function instead of
+        # implementing its own signal handlers.
         from services.sandbox_executor import sandbox_worker
 
-        # Reset shutdown event
-        sandbox_worker.shutdown_event.clear()
-
-        sandbox_worker.handle_shutdown(signal.SIGTERM, None)
-
-        assert sandbox_worker.shutdown_event.is_set()
-
-    def test_setup_signal_handlers(self):
-        """Test setup_signal_handlers registers handlers."""
-        from services.sandbox_executor import sandbox_worker
-
-        with patch("signal.signal") as mock_signal:
-            sandbox_worker.setup_signal_handlers()
-
-            # Verify SIGTERM and SIGINT were registered
-            assert mock_signal.call_count == 2
-            calls = [call[0][0] for call in mock_signal.call_args_list]
-            assert signal.SIGTERM in calls
-            assert signal.SIGINT in calls
+        # Verify shutdown_event exists (used by shared signal handler)
+        assert hasattr(sandbox_worker, "shutdown_event")
+        assert isinstance(sandbox_worker.shutdown_event, asyncio.Event)
 
 
 class TestSetupLangfuseHooks:

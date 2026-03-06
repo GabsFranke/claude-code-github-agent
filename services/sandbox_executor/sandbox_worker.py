@@ -5,17 +5,11 @@ import json
 import logging
 import os
 import shutil
-import signal
 import sys
 import tempfile
 import time
 import uuid
-from pathlib import Path
 
-# Add parent directory to path for shared imports - must be before other imports
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-
-# flake8: noqa: E402 - imports after path modification
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
@@ -32,14 +26,14 @@ from shared import (
     SDKError,
     SDKTimeoutError,
     WorktreeCreationError,
+    execute_git_command,
+    setup_graceful_shutdown,
 )
+from shared.logging_utils import setup_logging
 from subagents import AGENTS
 
 # Configure logging
-logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO"),
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
+setup_logging(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 
 # Configure Claude Agent SDK logger to match our log level
@@ -47,18 +41,6 @@ logging.getLogger("claude_agent_sdk").setLevel(os.getenv("LOG_LEVEL", "INFO"))
 
 # Global state
 shutdown_event = asyncio.Event()
-
-
-def handle_shutdown(signum, _frame):
-    """Handle shutdown signals gracefully."""
-    logger.info("Received signal %s, initiating graceful shutdown...", signum)
-    shutdown_event.set()
-
-
-def setup_signal_handlers():
-    """Setup signal handlers for graceful shutdown."""
-    signal.signal(signal.SIGTERM, handle_shutdown)
-    signal.signal(signal.SIGINT, handle_shutdown)
 
 
 def setup_langfuse_hooks() -> dict:
@@ -121,8 +103,15 @@ def setup_langfuse_hooks() -> dict:
                 try:
                     process.kill()
                     await process.wait()
-                except Exception:
-                    pass  # Process already terminated
+                except ProcessLookupError:
+                    pass  # Expected - process already terminated
+                except OSError as e:
+                    logger.warning(f"Failed to cleanup Langfuse hook process: {e}")
+                except Exception as e:
+                    logger.error(
+                        f"Unexpected error cleaning up Langfuse hook process: {e}",
+                        exc_info=True,
+                    )
 
         return {"success": False, "error": error_msg}
 
@@ -130,18 +119,6 @@ def setup_langfuse_hooks() -> dict:
         "Stop": [HookMatcher(matcher="*", hooks=[langfuse_stop_hook_async])],
         "SubagentStop": [HookMatcher(matcher="*", hooks=[langfuse_stop_hook_async])],
     }
-
-
-async def execute_git_command(cmd: str, cwd: str | None = None) -> tuple[int, str, str]:
-    """Execute a git command asynchronously."""
-    process = await asyncio.create_subprocess_shell(
-        cmd,
-        cwd=cwd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await process.communicate()
-    return process.returncode or 0, stdout.decode().strip(), stderr.decode().strip()
 
 
 async def ensure_repo_synced(
@@ -367,7 +344,7 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
 
         # Create worktree with unique branch name
         # Handle different ref formats:
-        # - refs/heads/main -> heads/main (regular branch)
+        # - refs/heads/main -> refs/remotes/origin/main (regular branch)
         # - refs/pull/30/head -> refs/pull/30/head (PR ref, keep as-is)
         # - refs/tags/v1.0 -> refs/tags/v1.0 (tag, keep as-is)
         if ref.startswith("refs/pull/"):
@@ -377,11 +354,13 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
             # Tag refs need to be kept as-is
             bare_ref = ref
         else:
-            # Regular branch refs: convert refs/heads/main -> heads/main
-            base_ref = ref.replace("refs/", "") if ref.startswith("refs/") else ref
-            bare_ref = (
-                base_ref if base_ref.startswith("heads/") else f"heads/{base_ref}"
+            # Regular branch refs: convert refs/heads/main -> refs/remotes/origin/main
+            base_ref = (
+                ref.replace("refs/heads/", "")
+                if ref.startswith("refs/heads/")
+                else ref.replace("refs/", "")
             )
+            bare_ref = f"refs/remotes/origin/{base_ref}"
 
         # Generate unique branch name with timestamp to avoid collisions
         timestamp = int(time.time() * 1000) % 1000000  # Last 6 digits of milliseconds
@@ -397,17 +376,21 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
             )
 
             # List all branches and pick the first one (usually main or master)
-            list_cmd = f"git --git-dir={repo_dir} branch --list"
+            list_cmd = f"git --git-dir={repo_dir} branch --list -r"
             list_code, list_out, list_err = await execute_git_command(list_cmd)
 
-            default_branch = "heads/main"  # Fallback
+            default_branch = "refs/remotes/origin/main"  # Fallback
             if list_code == 0 and list_out:
-                # Output is like "* main" or "  master", pick first branch
+                # Output is like "  origin/main" or "  origin/master", pick first branch
                 branches = [
-                    b.strip().lstrip("* ") for b in list_out.split("\n") if b.strip()
+                    b.strip()
+                    for b in list_out.split("\n")
+                    if b.strip() and "origin/" in b
                 ]
                 if branches:
-                    default_branch = f"heads/{branches[0]}"
+                    # branches[0] is like "origin/main", convert to refs/remotes/origin/main
+                    branch_name_only = branches[0].replace("origin/", "")
+                    default_branch = f"refs/remotes/origin/{branch_name_only}"
                     logger.info(f"Detected default branch: {default_branch}")
             else:
                 logger.warning(
@@ -431,7 +414,13 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
 
         # Inject git credentials into the workspace
         # Configure git to use credential helper
-        await execute_git_command("git config credential.helper store", cwd=workspace)
+        config_code, _, config_err = await execute_git_command(
+            "git config credential.helper store", cwd=workspace
+        )
+        if config_code != 0:
+            raise WorktreeCreationError(
+                f"Failed to configure git credentials: {config_err}"
+            )
 
         # Write credentials to home directory where git expects them
         home_dir = os.path.expanduser("~")
@@ -502,7 +491,7 @@ async def main():
     logger.info("Starting sandbox worker")
 
     # Setup signal handlers
-    setup_signal_handlers()
+    setup_graceful_shutdown(shutdown_event, logger)
 
     # Initialize job queue
     redis_url = os.getenv("REDIS_URL", "redis://redis:6379")

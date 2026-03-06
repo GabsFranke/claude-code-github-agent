@@ -1,66 +1,25 @@
 """GitHub webhook receiver."""
 
 import logging
+import re
 import sys
-from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-
-# Add shared to path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-
-from handlers import (
-    handle_comment_created,
-    handle_issue_opened,
-    handle_pr_opened,
-    handle_pr_other_action,
-)
 from validators import verify_signature
 
 from shared import get_queue
-from shared.config import get_webhook_config
+from shared.config import get_webhook_config, handle_config_error
+from shared.logging_utils import setup_logging
+from workflows import WorkflowEngine
 
 # Load configuration with detailed error reporting
 try:
     config = get_webhook_config()
 except Exception as e:
-    # Setup basic logging for error reporting before config is loaded
-    logging.basicConfig(
-        level=logging.ERROR,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    )
-    error_logger = logging.getLogger(__name__)
-
-    error_logger.error(
-        "FATAL: Configuration validation failed. Cannot start webhook service.",
-        exc_info=True,
-    )
-    error_logger.error(f"Error details: {type(e).__name__}: {e}")
-    error_logger.error(
-        "Please check your .env file and ensure all required environment variables are set correctly."
-    )
-    error_logger.error("See docs/CONFIGURATION.md for configuration requirements.")
-
-    # Also print to stderr for container logs
-    print(f"\n{'='*60}", file=sys.stderr)
-    print("FATAL ERROR: Configuration Validation Failed", file=sys.stderr)
-    print(f"{'='*60}", file=sys.stderr)
-    print(f"Error: {type(e).__name__}: {e}", file=sys.stderr)
-    print("\nPlease verify:", file=sys.stderr)
-    print("  1. .env file exists and is readable", file=sys.stderr)
-    print("  2. All required environment variables are set", file=sys.stderr)
-    print("  3. Values are in correct format (URLs, integers, etc.)", file=sys.stderr)
-    print("  4. GITHUB_WEBHOOK_SECRET is set correctly", file=sys.stderr)
-    print("\nSee docs/CONFIGURATION.md for details.", file=sys.stderr)
-    print(f"{'='*60}\n", file=sys.stderr)
-
-    sys.exit(1)
+    handle_config_error(e, "webhook service")
 
 # Configure logging
-logging.basicConfig(
-    level=getattr(logging, config.log_level, logging.INFO),
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
+setup_logging(level=config.log_level)
 logger = logging.getLogger(__name__)
 
 logger.info(f"Logging configured at {config.log_level} level")
@@ -71,6 +30,18 @@ app = FastAPI(title="ClaudeCodeGitHubAgent Webhook Service")
 # Initialize queue
 queue = get_queue()
 sync_queue = get_queue(queue_name="agent:sync:requests")
+
+# Initialize workflow engine for event filtering
+try:
+    workflow_engine = WorkflowEngine()
+    logger.info(
+        f"Loaded {len(workflow_engine.workflows)} workflows for event filtering"
+    )
+except Exception as e:
+    logger.error(f"Failed to load workflow engine: {e}", exc_info=True)
+    print("\nFATAL ERROR: Failed to load workflows.yaml", file=sys.stderr)
+    print(f"Error: {e}", file=sys.stderr)
+    sys.exit(1)
 
 
 @app.get("/")
@@ -101,18 +72,23 @@ async def webhook(request: Request):
         # Verify signature
         webhook_secret = config.github.github_webhook_secret
         if webhook_secret and not verify_signature(payload, signature, webhook_secret):
+            logger.warning(
+                "Webhook signature verification failed for %s event from %s",
+                event_type,
+                request.client.host if request.client else "unknown",
+            )
             raise HTTPException(status_code=401, detail="Invalid signature")
 
         # Parse payload
         data = await request.json()
-        action = data.get("action", "N/A")
+        action = data.get("action", "")
+        repo = data.get("repository", {}).get("full_name")
 
-        logger.info("Received %s event (action: %s)", event_type, action)
+        logger.info("Received %s event (action: %s) for %s", event_type, action, repo)
 
-        # Handle push events for proactive cache warming
+        # Handle push events for proactive cache warming (special case)
         if event_type == "push":
             ref = data.get("ref")
-            repo = data.get("repository", {}).get("full_name")
             logger.info(
                 "Handling push event to %s in %s for proactive cache warming", ref, repo
             )
@@ -121,23 +97,136 @@ async def webhook(request: Request):
                 return {"status": "accepted", "message": "Proactive sync triggered"}
             return {"status": "ignored", "message": "Push event missing repo or ref"}
 
-        # Route to appropriate handler
-        if event_type == "issues" and action == "opened":
-            return await handle_issue_opened(data, queue, sync_queue)
+        # Determine event data and user query
+        event_data = {
+            "event_type": event_type,
+            "action": action,
+        }
+        user_query = ""
+        issue_number = None
+        ref = "main"
 
+        # Check if it's a comment with a command
+        command = None
         if event_type == "issue_comment" and action == "created":
-            result = await handle_comment_created(data, queue, sync_queue)
-            if result:
-                return result
-            # No command found, return ignored
-            return {"status": "ignored", "message": "No /agent command found"}
+            body = data.get("comment", {}).get("body", "")
+            issue_number = data.get("issue", {}).get("number")
 
-        if event_type == "pull_request":
-            if action == "opened":
-                return await handle_pr_opened(data, queue, sync_queue)
-            return handle_pr_other_action(action, data["pull_request"]["number"])
+            # Validate issue_number exists
+            if issue_number is None:
+                logger.warning("Issue comment event missing issue number")
+                return {
+                    "status": "error",
+                    "message": "Invalid issue comment: missing issue number",
+                }
 
-        return {"status": "ignored", "message": "Event not handled"}
+            # Parse command from comment
+            match = re.match(r"^(/\S+)\s*(.*)", body.strip())
+            if match:
+                command = match.group(1)
+                user_query = match.group(2).strip()
+
+                # Validate command format
+                if len(command) > 50:
+                    logger.warning(f"Command too long: {command[:50]}...")
+                    return {
+                        "status": "error",
+                        "message": "Command is too long (max 50 characters)",
+                    }
+
+                if not re.match(r"^/[a-z0-9\-]+$", command):
+                    logger.warning(f"Invalid command format: {command}")  # type: ignore[unreachable]
+                    return {
+                        "status": "error",
+                        "message": "Invalid command format. Use lowercase letters, numbers, and hyphens only.",
+                    }
+
+                event_data["command"] = command
+
+                # Determine ref for PRs
+                if "pull_request" in data.get("issue", {}):
+                    ref = f"refs/pull/{issue_number}/head"
+
+                logger.info(
+                    "Command '%s' on issue #%s with query: %s",
+                    command,
+                    issue_number,
+                    user_query[:50] if user_query else "(none)",
+                )
+            else:
+                logger.debug("Comment does not contain a command")  # type: ignore[unreachable]
+                return {"status": "ignored", "message": "No command found in comment"}
+        elif event_type == "pull_request":
+            # For PR events, extract PR number
+            issue_number = data.get("pull_request", {}).get("number")
+            if issue_number is None:
+                logger.warning("Pull request event missing PR number")
+                return {
+                    "status": "error",
+                    "message": "Invalid pull request: missing PR number",
+                }
+            ref = f"refs/pull/{issue_number}/head"
+            logger.info("Event %s.%s for issue #%s", event_type, action, issue_number)
+        elif event_type == "issues":
+            # For issue events, extract issue number
+            issue_number = data.get("issue", {}).get("number")
+            if issue_number is None:
+                logger.warning("Issue event missing issue number")
+                return {
+                    "status": "error",
+                    "message": "Invalid issue: missing issue number",
+                }
+            logger.info("Event %s.%s for issue #%s", event_type, action, issue_number)
+
+        # Check if we have a workflow configured for this event/command
+        workflow_name = None
+        if command:
+            workflow_name = workflow_engine.get_workflow_for_command(command)
+            logger.info(f"Command '{command}' -> workflow '{workflow_name}'")
+        elif event_type:
+            workflow_name = workflow_engine.get_workflow_for_event(event_type, action)
+            logger.info(f"Event {event_type}.{action} -> workflow '{workflow_name}'")
+
+        if not workflow_name:
+            logger.info(
+                f"No workflow configured for event={event_type}.{action} command={command} - ignoring"
+            )
+            return {
+                "status": "ignored",
+                "message": "No workflow configured for this event",
+            }
+
+        # Get user who triggered this
+        user = "unknown"
+        if event_type == "issue_comment":
+            user = data.get("comment", {}).get("user", {}).get("login", "unknown")
+        elif event_type == "pull_request":
+            user = data.get("pull_request", {}).get("user", {}).get("login", "unknown")
+        elif event_type == "issues":
+            user = data.get("issue", {}).get("user", {}).get("login", "unknown")
+
+        # Queue agent job with event data
+        job = {
+            "repository": repo,
+            "issue_number": issue_number,
+            "event_data": event_data,
+            "user_query": user_query,
+            "user": user,
+            "ref": ref,
+            "workflow_name": workflow_name,  # Pass workflow name to worker
+        }
+
+        logger.info(
+            "Queueing job: workflow=%s, event=%s.%s, issue=%s, query=%s",
+            workflow_name,
+            event_type,
+            action,
+            issue_number,
+            user_query[:50] if user_query else "(none)",
+        )
+        await queue.publish(job)
+
+        return {"status": "accepted", "message": "Agent is processing your request"}
 
     except HTTPException:
         raise

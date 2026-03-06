@@ -2,20 +2,24 @@
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Literal, Optional
 
 import httpx
 from langfuse import Langfuse
 
 from shared import GitHubAuthService, JobQueue
+from workflows import WorkflowEngine
 
-from ..commands import CommandContext, get_command_registry
 from .repository_context_loader import RepositoryContextLoader
 
 if TYPE_CHECKING:
     from shared import HealthChecker, MultiRateLimiter
 
 logger = logging.getLogger(__name__)
+
+
+# Type alias for process return value
+ProcessResult = str | Literal["ignored"]
 
 
 class RequestProcessor:
@@ -39,6 +43,9 @@ class RequestProcessor:
         self.rate_limiters = rate_limiters
         self.health_checker = health_checker
 
+        # Initialize workflow engine
+        self.workflow_engine = WorkflowEngine()
+
         # Initialize focused components
         self.context_loader = RepositoryContextLoader(
             token_manager, http_client, rate_limiters
@@ -47,26 +54,31 @@ class RequestProcessor:
     async def process(
         self,
         repo: str,
-        issue_number: int,
-        command: str,
+        issue_number: int | None,
+        event_data: dict,
+        user_query: str,
         user: str,
-        auto_review: bool = False,
-        auto_triage: bool = False,
         ref: str | None = None,
-    ) -> str:
+        workflow_name: str | None = None,
+    ) -> ProcessResult:
         """Process a single agent request by creating a job.
 
         Args:
             repo: Repository full name (owner/repo)
-            issue_number: Issue or PR number
-            command: Command to execute
+            issue_number: Issue or PR number (optional)
+            event_data: Raw event data (event_type, action, command if present)
+            user_query: User-provided query/context
             user: User who triggered the request
-            auto_review: Whether this is an automatic PR review
-            auto_triage: Whether this is an automatic issue triage
-            ref: Git ref to use (if None, will be detected based on context)
+            ref: Git ref to use (if None, defaults to main)
+            workflow_name: Workflow name (pre-determined by webhook)
+
+        Returns:
+            Job ID string if job was created, or "ignored" if no workflow matched
         """
         logger.info(f"Processing request for {repo} issue #{issue_number} by {user}")
-        logger.info(f"Command: {command}")
+        logger.info(
+            f"Event: {event_data}, Query: {user_query[:100] if user_query else '(none)'}"
+        )
 
         if self.langfuse:
             with self.langfuse.start_as_current_span(
@@ -76,21 +88,28 @@ class RequestProcessor:
                     input={
                         "repo": repo,
                         "issue_number": issue_number,
-                        "command": command,
+                        "event_data": event_data,
+                        "user_query": user_query,
                         "user": user,
-                        "auto_review": auto_review,
-                        "auto_triage": auto_triage,
+                        "workflow_name": workflow_name,
                     },
                     metadata={
                         "repo": repo,
                         "issue_number": issue_number,
                         "user": user,
+                        "workflow_name": workflow_name,
                     },
                 )
 
                 try:
                     job_id = await self._execute(
-                        repo, issue_number, command, user, auto_review, auto_triage, ref
+                        repo,
+                        issue_number,
+                        event_data,
+                        user_query,
+                        user,
+                        ref,
+                        workflow_name,
                     )
 
                     trace.update(
@@ -114,89 +133,94 @@ class RequestProcessor:
                     self.langfuse.flush()
         else:
             return await self._execute(
-                repo, issue_number, command, user, auto_review, auto_triage, ref
+                repo, issue_number, event_data, user_query, user, ref, workflow_name
             )
 
     async def _execute(
         self,
         repo: str,
-        issue_number: int,
-        command: str,
+        issue_number: int | None,
+        event_data: dict,
+        user_query: str,
         user: str,
-        auto_review: bool,
-        auto_triage: bool,
         ref: str | None = None,
-    ) -> str:
+        workflow_name: str | None = None,
+    ) -> ProcessResult:
         """Create a job for sandbox execution.
 
         Args:
             repo: Repository full name
-            issue_number: Issue or PR number
-            command: Command to execute
+            issue_number: Issue or PR number (optional)
+            event_data: Raw event data (event_type, action, command if present)
+            user_query: User-provided query/context
             user: User who triggered the request
-            auto_review: Whether this is an automatic PR review
-            auto_triage: Whether this is an automatic issue triage
-            ref: Git ref to use (if None, will be detected)
-        """
-        # Determine event type
-        if auto_review:
-            event_type = "auto_review"
-        elif auto_triage:
-            event_type = "auto_triage"
-        else:
-            event_type = "manual"
+            ref: Git ref to use (if None, defaults to main)
+            workflow_name: Workflow name (pre-determined by webhook)
 
-        # Build command context
-        context = CommandContext(
+        Returns:
+            Job ID string if job was created, or "ignored" if no workflow matched
+        """
+        # Workflow name should be provided by webhook
+        if not workflow_name:
+            logger.error("No workflow_name provided - webhook should filter events")
+            return "ignored"
+
+        # Validate workflow exists before triggering sync
+        if workflow_name not in self.workflow_engine.workflows:
+            logger.error(
+                f"Unknown workflow '{workflow_name}' - ignoring request for {repo}"
+            )
+            return "ignored"
+
+        logger.info(f"Processing workflow '{workflow_name}' for {repo}")
+
+        # Workflow validated - trigger repo sync
+        logger.info(f"Triggering sync for {repo} ref {ref or 'main'}")
+        from shared import get_queue
+
+        sync_queue = get_queue(queue_name="agent:sync:requests")
+        await sync_queue.publish({"repo": repo, "ref": ref or "main"})
+
+        # Build prompt using workflow engine
+        prompt = self.workflow_engine.build_prompt(
+            workflow_name=workflow_name,
             repo=repo,
             issue_number=issue_number,
-            command_text=command,
-            user=user,
-            event_type=event_type,
-            raw_data={},
+            user_query=user_query,
         )
 
-        # Execute command via registry to generate prompt
-        registry = get_command_registry()
-        result = await registry.execute(context)
-        prompt = result.prompt
+        logger.info(f"Built prompt: {prompt[:150]}...")
 
         # Fetch CLAUDE.md if exists
         try:
             claude_md = await self.context_loader.fetch_claude_md(repo)
             if claude_md:
                 prompt = f"{claude_md}\n\n{prompt}"
+                logger.info("Prepended CLAUDE.md context to prompt")
         except Exception as e:
             logger.warning(
                 f"Failed to fetch CLAUDE.md from {repo}, continuing without repository context: {e}"
             )
 
-        # Determine ref based on context (use provided ref or detect)
-        if ref is None:
-            ref = "main"
-            if auto_review:
-                # For PR reviews, use the PR head ref
-                ref = f"refs/pull/{issue_number}/head"
-            # For issues and manual commands, default to main
-
-        logger.info(f"Using ref: {ref}")
+        # Use provided ref or default to main
+        final_ref = ref or "main"
+        logger.info(f"Using ref: {final_ref}")
 
         # Get GitHub token
         github_token = await self.token_manager.get_token()
 
         # Create job in queue
-        logger.info(f"Creating job with ref: {ref}")
+        logger.info(f"Creating job with ref: {final_ref}")
         job_id = await self.job_queue.create_job(
             {
                 "repo": repo,
                 "issue_number": issue_number,
-                "ref": ref,
+                "ref": final_ref,
                 "prompt": prompt,
                 "github_token": github_token,
                 "user": user,
-                "auto_review": auto_review,
-                "auto_triage": auto_triage,
-                "command": command,
+                "workflow_name": workflow_name,
+                "user_query": user_query,
             }
         )
 

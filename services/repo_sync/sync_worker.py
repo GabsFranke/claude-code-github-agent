@@ -4,49 +4,20 @@ import asyncio
 import json
 import logging
 import os
-import signal
 import sys
-from pathlib import Path
 
-# Add parent directory to path for shared imports
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-
-from shared.github_auth import get_github_auth_service  # noqa: E402
-from shared.queue import RedisQueue  # noqa: E402
+from shared.git_utils import execute_git_command
+from shared.github_auth import get_github_auth_service
+from shared.logging_utils import setup_logging
+from shared.queue import RedisQueue
+from shared.signals import setup_graceful_shutdown
 
 # Configure logging
-logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO"),
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
+setup_logging(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 
 # Global state
 shutdown_event = asyncio.Event()
-
-
-def handle_shutdown(signum, _frame):
-    """Handle shutdown signals gracefully."""
-    logger.info("Received signal %s, initiating graceful shutdown...", signum)
-    shutdown_event.set()
-
-
-def setup_signal_handlers():
-    """Setup signal handlers for graceful shutdown."""
-    signal.signal(signal.SIGTERM, handle_shutdown)
-    signal.signal(signal.SIGINT, handle_shutdown)
-
-
-async def execute_git_command(cmd: str, cwd: str | None = None) -> tuple[int, str, str]:
-    """Execute a git command asynchronously."""
-    process = await asyncio.create_subprocess_shell(
-        cmd,
-        cwd=cwd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await process.communicate()
-    return process.returncode or 0, stdout.decode().strip(), stderr.decode().strip()
 
 
 async def cleanup_old_repos():
@@ -132,9 +103,9 @@ async def process_sync_request(message: dict, redis_client):
                 await execute_git_command(set_url_cmd)
 
             # Fetch all branches, tags, and PR refs into the bare repo
-            # In bare repos, remote branches are stored as refs/heads/* not refs/remotes/origin/*
+            # Use refs/remotes/origin/* to avoid conflicts with checked-out worktrees
             # PR refs are stored as refs/pull/*/head
-            cmd = f"git --git-dir={repo_dir} fetch origin '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*' '+refs/pull/*/head:refs/pull/*/head'"
+            cmd = f"git --git-dir={repo_dir} fetch origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '+refs/pull/*/head:refs/pull/*/head'"
             code, _out, err = await execute_git_command(cmd)
 
             if code != 0:
@@ -179,7 +150,7 @@ async def process_sync_request(message: dict, redis_client):
 
 async def main():
     logger.info("Starting Repository Sync Worker...")
-    setup_signal_handlers()
+    setup_graceful_shutdown(shutdown_event, logger)
 
     redis_url = os.getenv("REDIS_URL", "redis://redis:6379")
     redis_password = os.getenv("REDIS_PASSWORD")
