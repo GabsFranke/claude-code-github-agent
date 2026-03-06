@@ -13,11 +13,9 @@ workflows:
         - /review
         - /pr-review
         - /review-pr
-
     prompt:
       template: "/pr-review-toolkit:review-pr {repo} {issue_number}"
-      system_context: "review.md" # Load from prompts/review.md
-
+      # system_context: "review.md" # Load from prompts/review.md
     description: "Review a pull request"
 
   triage-issue:
@@ -31,16 +29,13 @@ workflows:
     prompt:
       template: "Triage issue #{issue_number} in {repo}"
       system_context: "triage.md" # Load from prompts/triage.md
-
     description: "Triage an issue"
 
   generic:
     triggers:
       commands:
         - /agent
-
     prompt:
       template: "{user_query}"
       system_context: "generic.md" # Load from prompts/generic.md
-
     description: "Generic agent request"
