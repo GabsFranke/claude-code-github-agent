@@ -1,11 +1,17 @@
 """Tests for fix-ci workflow integration."""
 
+import os
+
 from pathlib import Path
 
 import pytest
 import yaml
 
 from workflows.engine import WorkflowEngine
+
+# Marker for intentional failure tests
+# These tests should only run when explicitly testing the fix-ci workflow
+SKIP_INTENTIONAL_FAILURES = not os.getenv("RUN_INTENTIONAL_FAILURE_TESTS")
 
 
 class TestFixCIWorkflow:
@@ -269,13 +275,32 @@ class TestFixCIWorkflowValidation:
 
 
 class TestFixCIWorkflowTrigger:
-    """Test to intentionally fail and trigger fix-ci workflow."""
+    """Test to intentionally fail and trigger fix-ci workflow.
 
+    These tests are designed to intentionally fail to trigger the fix-ci workflow.
+    They should only be run when explicitly testing the fix-ci workflow functionality,
+    not in regular CI runs.
+
+    To run these tests:
+        pytest tests/workflows/test_fix_ci_workflow.py::TestFixCIWorkflowTrigger -v
+        or
+        pytest -m "intentional_failure" tests/workflows/test_fix_ci_workflow.py -v
+    """
+
+    @pytest.mark.intentional_failure
+    @pytest.mark.skipif(
+        SKIP_INTENTIONAL_FAILURES,
+        reason="Intentional failure test for fix-ci workflow. "
+        "Run with: RUN_INTENTIONAL_FAILURE_TESTS=1 pytest tests/workflows/test_fix_ci_workflow.py::TestFixCIWorkflowTrigger -v"
+    )
     def test_intentional_failure_to_trigger_fix_ci(self):
         """This test intentionally fails to trigger the fix-ci workflow.
 
         When this test fails in CI, it should trigger the workflow_job.completed
         event with conclusion=failure, which should activate the fix-ci workflow.
+
+        NOTE: This test is skipped by default to avoid breaking normal CI runs.
+        Run it explicitly with: RUN_INTENTIONAL_FAILURE_TESTS=1 pytest tests/workflows/test_fix_ci_workflow.py::TestFixCIWorkflowTrigger -v
         """
         # Intentional failure to test fix-ci workflow
         result = 2 + 2
@@ -284,8 +309,18 @@ class TestFixCIWorkflowTrigger:
             "Expected: 5, Got: 4. This is a deliberate error to test CI failure handling."
         )
 
+    @pytest.mark.intentional_failure
+    @pytest.mark.skipif(
+        SKIP_INTENTIONAL_FAILURES,
+        reason="Intentional failure test for fix-ci workflow. "
+        "Run with: RUN_INTENTIONAL_FAILURE_TESTS=1 pytest tests/workflows/test_fix_ci_workflow.py::TestFixCIWorkflowTrigger -v"
+    )
     def test_another_intentional_failure(self):
-        """Another intentional failure with different error type."""
+        """Another intentional failure with different error type.
+
+        NOTE: This test is skipped by default to avoid breaking normal CI runs.
+        Run it explicitly with: RUN_INTENTIONAL_FAILURE_TESTS=1 pytest tests/workflows/test_fix_ci_workflow.py::TestFixCIWorkflowTrigger -v
+        """
         # This will raise an exception
         data = {"key": "value"}
         # Intentionally accessing non-existent key
