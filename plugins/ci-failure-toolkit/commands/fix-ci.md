@@ -38,18 +38,30 @@ Extract from $ARGUMENTS:
 
 ### 2. Fetch Workflow Failure Information
 
-Use GitHub MCP to get failure details:
+You already have the run_id from the Workflow Failure Context injected into your prompt.
 
-```bash
-# Get workflow run details
-mcp__github__get_workflow_run(owner, repo, run_id)
+Use GitHub MCP tools to get detailed failure information:
 
-# Get workflow run logs
-mcp__github__get_workflow_run_logs(owner, repo, run_id)
+**Get job details and identify which step failed:**
 
-# If PR number provided, get associated workflow runs
-mcp__github__list_workflow_runs_for_pr(owner, repo, pr_number)
+```python
+mcp__github__list_workflow_run_jobs(owner, repo, run_id)
+# Returns: jobs array with name, conclusion, steps (each step has name, conclusion, number)
 ```
+
+**Download complete logs with error messages:**
+
+```python
+mcp__github__download_workflow_run_logs(owner, repo, run_id)
+# Returns: Full log output as text with all error messages and stack traces
+```
+
+Parse the logs to identify:
+
+- Which job failed
+- Which step in that job failed
+- The actual error message
+- Stack traces if available
 
 ### 3. Analyze Failure Logs
 
@@ -61,74 +73,38 @@ Parse logs to identify:
 - **Stack traces**: Full error context
 - **Exit codes**: Process exit status
 
-### 4. Determine Applicable Agents
+### 4. Analyze and Implement Fixes
 
-Based on failure type:
+Based on the failure type, implement appropriate fixes:
 
-- **Build failures** → `build-failure-analyzer`
-  - Compilation errors
-  - Dependency issues
-  - Missing environment variables
-  - Configuration problems
+**For Build Failures:**
 
-- **Test failures** → `test-failure-analyzer`
-  - Unit test failures
-  - Integration test failures
-  - Flaky tests
-  - Timeout issues
+- Fix compilation errors, missing imports, syntax issues
+- Update dependencies in requirements.txt/package.json
+- Fix configuration files
 
-- **Lint/Type failures** → `lint-failure-analyzer`
-  - Code style violations
-  - Type errors
-  - Import issues
-  - Formatting problems
+**For Test Failures:**
 
-- **Deployment failures** → `deploy-failure-analyzer`
-  - Docker build failures
-  - Container issues
-  - Health check failures
-  - Resource constraints
+- Fix test logic errors and assertions
+- Update test expectations if API/behavior changed
+- Fix flaky tests (race conditions, timeouts)
+- Run tests locally to verify: `pytest tests/` or `npm test`
 
-- **Unknown/Multiple** → Launch all applicable agents
+**For Lint/Type Failures:**
 
-### 5. Launch Specialized Agents
+- Use auto-fixers first: `black .`, `isort .`, `ruff check --fix .`
+- Add missing type annotations
+- Fix import order and unused imports
+- Run linters to verify fixes
 
-Use Task tool to delegate to specialized agents:
+**For Deploy Failures:**
 
-```python
-# Example: Analyze test failure
-result = Task(
-    agent="test-failure-analyzer",
-    prompt=f"""Analyze test failure in {repo}:
+- Fix Dockerfile syntax and paths
+- Update docker-compose.yml environment variables
+- Fix health checks and resource limits
+- Test locally: `docker build -t test .`
 
-Error log:
-{error_log}
-
-Failed tests:
-{failed_tests}
-
-Identify root cause and implement fixes."""
-)
-```
-
-**Sequential approach** (recommended):
-
-1. Launch primary agent for failure type
-2. Review findings
-3. Launch additional agents if needed
-4. Aggregate results
-
-### 6. Implement Fixes
-
-Agents will:
-
-1. Read relevant files using local tools (Read, List, Search)
-2. Identify root cause (not just symptoms)
-3. Implement targeted fixes using Edit/Write
-4. Run local tests to verify: `bash -c "pytest tests/"`
-5. Check for similar issues in codebase
-
-### 7. Commit and Push Changes
+### 5. Commit and Push Changes
 
 After fixes are implemented:
 
@@ -149,7 +125,7 @@ Fixes workflow run #${run_id}"
 git push origin HEAD
 ```
 
-### 8. Post Results to GitHub
+### 6. Post Results to GitHub
 
 Use GitHub MCP to communicate results:
 
@@ -183,7 +159,7 @@ mcp__github__create_pull_request(
 )
 ```
 
-### 9. Summary Format
+### 7. Summary Format
 
 Post a comprehensive summary:
 
@@ -289,44 +265,13 @@ Auto-detect failure type from logs:
 # Only analyzes build failures
 ```
 
-## Agent Descriptions:
+## Key GitHub MCP Tools:
 
-**build-failure-analyzer**:
-
-- Diagnoses compilation errors
-- Resolves dependency conflicts
-- Fixes configuration issues
-- Handles missing environment variables
-
-**test-failure-analyzer**:
-
-- Identifies failing test cases
-- Fixes test logic errors
-- Resolves flaky tests
-- Updates test expectations
-
-**lint-failure-analyzer**:
-
-- Fixes code style violations
-- Resolves import issues
-- Applies formatting rules
-- Handles linter configuration
-
-**deploy-failure-analyzer**:
-
-- Fixes Docker build issues
-- Resolves container problems
-- Handles deployment configuration
-- Fixes health check failures
-
-## GitHub MCP Tools:
-
-- `get_workflow_run` - Get workflow run details
-- `get_workflow_run_logs` - Fetch failure logs
-- `list_workflow_runs_for_pr` - Find runs for PR
-- `add_issue_comment` - Post analysis results
-- `create_branch` - Create fix branch
-- `create_pull_request` - Open PR with fixes
+- `list_workflow_run_jobs` - Get job details and identify failed steps
+- `download_workflow_run_logs` - Fetch complete error logs
+- `add_issue_comment` - Post analysis results to PR/issue
+- `create_branch` - Create fix branch (if needed)
+- `create_pull_request` - Open PR with fixes (if needed)
 
 ## Tips:
 
