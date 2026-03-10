@@ -126,11 +126,25 @@ async def execute_sandbox_request(
 
     # Sandbox container expects plugins mapped to /app/plugins
     options = ClaudeAgentOptions(
-        allowed_tools=["Task", "Bash", "mcp__github__*"],
+        allowed_tools=[
+            "Task",
+            "Bash",
+            "Read",
+            "Write",
+            "Edit",
+            "List",
+            "Search",
+            "Grep",
+            "Glob",
+            "mcp__github__*",
+        ],
         permission_mode="acceptEdits",
         mcp_servers=mcp_servers,  # type: ignore[arg-type]
         agents=AGENTS,
-        plugins=[{"type": "local", "path": "/app/plugins/pr-review-toolkit"}],
+        plugins=[
+            {"type": "local", "path": "/app/plugins/pr-review-toolkit"},
+            {"type": "local", "path": "/app/plugins/ci-failure-toolkit"},
+        ],
         hooks=hooks,
         max_turns=50,
         cwd=working_dir,  # Set working directory for SDK operations

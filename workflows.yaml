@@ -31,6 +31,19 @@ workflows:
       system_context: "triage.md" # Load from prompts/triage.md
     description: "Triage an issue"
 
+  fix-ci:
+    triggers:
+      events:
+        - workflow_job.completed
+      commands:
+        - /fix-ci
+        - /fix-build
+        - /fix-tests
+    prompt:
+      template: "/ci-failure-toolkit:fix-ci {repo} {issue_number}"
+      system_context: "fix-ci.md"
+    description: "Analyze and fix CI/CD failures"
+
   generic:
     triggers:
       commands:

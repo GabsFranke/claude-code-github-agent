@@ -56,6 +56,10 @@ ANTHROPIC_AUTH_TOKEN=sk-ant-...
 ### Optional Settings
 
 ```bash
+# Bot Identity (for git commits)
+BOT_USERNAME="Claude Code Agent"  # Git user.name for commits
+BOT_USER_EMAIL="claude-code-agent[bot]@users.noreply.github.com"  # Git user.email
+
 # Logging
 LOG_LEVEL=INFO  # DEBUG, INFO, WARNING, ERROR, CRITICAL
 

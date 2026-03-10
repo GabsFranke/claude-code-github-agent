@@ -190,6 +190,11 @@ class WebhookConfig(BaseConfig):
 
     port: int = Field(default=8080, description="Webhook service port", ge=1, le=65535)
     log_level: str = Field(default="INFO", description="Logging level")
+    webhook_bot_username: str = Field(
+        default="claude-code-agent[bot]",
+        description="Bot GitHub username for preventing infinite loops",
+        alias="WEBHOOK_BOT_USERNAME",
+    )
 
     _github_config: GitHubConfig | None = None
     _queue_config: QueueConfig | None = None

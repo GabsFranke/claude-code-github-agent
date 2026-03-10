@@ -234,7 +234,10 @@ async def execute_in_workspace(workspace: str, job_data: dict) -> str:
             permission_mode="acceptEdits",
             mcp_servers=mcp_servers,  # type: ignore[arg-type]
             agents=AGENTS,
-            plugins=[{"type": "local", "path": "/app/plugins/pr-review-toolkit"}],
+            plugins=[
+                {"type": "local", "path": "/app/plugins/pr-review-toolkit"},
+                {"type": "local", "path": "/app/plugins/ci-failure-toolkit"},
+            ],
             hooks=hooks,
             max_turns=50,
             cwd=workspace,  # Set working directory to isolated workspace
@@ -428,6 +431,16 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
         credentials_file = os.path.join(home_dir, ".git-credentials")
         with open(credentials_file, "w", encoding="utf-8") as f:
             f.write(f"https://x-access-token:{job_data['github_token']}@github.com\n")
+
+        # Configure git user for commits (required for git commit to work)
+        bot_username = os.getenv("BOT_USERNAME", "Claude Code Agent")
+        bot_email = os.getenv(
+            "BOT_USER_EMAIL", "claude-code-agent[bot]@users.noreply.github.com"
+        )
+        await execute_git_command(
+            f'git config user.name "{bot_username}"', cwd=workspace
+        )
+        await execute_git_command(f'git config user.email "{bot_email}"', cwd=workspace)
 
         # Execute in isolated workspace
         response = await execute_in_workspace(workspace, job_data)
