@@ -33,6 +33,10 @@ class WorkflowConfig(BaseModel):
     triggers: TriggersConfig = Field(..., description="Event and command triggers")
     prompt: PromptConfig = Field(..., description="Prompt configuration")
     description: str = Field(default="", description="Workflow description")
+    skip_self: bool = Field(
+        default=True,
+        description="Skip events triggered by the bot itself (default: true)",
+    )
 
 
 class WorkflowsConfig(BaseModel):
@@ -234,6 +238,20 @@ class WorkflowEngine:
             return self._event_map[event_type]
 
         return None
+
+    def should_skip_self(self, workflow_name: str) -> bool:
+        """Check if workflow should skip events from the bot itself.
+
+        Args:
+            workflow_name: Name of the workflow
+
+        Returns:
+            True if events from bot should be skipped, False otherwise
+        """
+        if workflow_name not in self.workflows:
+            return True  # Default to skipping if workflow not found
+
+        return self.workflows[workflow_name].skip_self
 
     def get_workflow_for_command(self, command: str) -> str | None:
         """Get workflow name for a user command.

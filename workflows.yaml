@@ -3,6 +3,7 @@
 # - triggers: What GitHub events or user commands trigger it
 # - prompt: How to build the prompt for Claude Agent SDK
 # - description: Human-readable description
+# - skip_self: Whether to skip events triggered by the bot itself (optional, default: true)
 
 workflows:
   review-pr:
@@ -17,6 +18,7 @@ workflows:
       template: "/pr-review-toolkit:review-pr {repo} {issue_number}"
       # system_context: "review.md" # Load from prompts/review.md
     description: "Review a pull request"
+    # skip_self defaults to true (can be omitted)
 
   triage-issue:
     triggers:
@@ -30,6 +32,7 @@ workflows:
       template: "Triage issue #{issue_number} in {repo}"
       system_context: "triage.md" # Load from prompts/triage.md
     description: "Triage an issue"
+    # skip_self defaults to true (can be omitted)
 
   fix-ci:
     triggers:
@@ -43,6 +46,7 @@ workflows:
       template: "/ci-failure-toolkit:fix-ci {repo} {issue_number}"
       system_context: "fix-ci.md"
     description: "Analyze and fix CI/CD failures"
+    skip_self: true # Explicitly set - don't auto-fix CI failures on bot's own PRs
 
   generic:
     triggers:
@@ -52,3 +56,4 @@ workflows:
       template: "{user_query}"
       system_context: "generic.md" # Load from prompts/generic.md
     description: "Generic agent request"
+    skip_self: false # Allow bot to respond to its own /agent commands if needed

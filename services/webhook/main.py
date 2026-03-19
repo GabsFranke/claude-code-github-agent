@@ -190,24 +190,22 @@ async def webhook(request: Request):
                     "message": f"Workflow job conclusion is '{conclusion}', not 'failure'",
                 }
 
-            # Prevent infinite loops: ignore workflow failures from bot's own PRs
-            # (unless manually triggered via /fix-ci command)
-            sender = data.get("sender", {}).get("login", "")
-            if sender == config.webhook_bot_username:
-                logger.info(
-                    "Ignoring workflow failure from bot's own PR (sender: %s) to prevent infinite loops. "
-                    "Use /fix-ci command to manually trigger fixes.",
-                    sender,
-                )
-                return {
-                    "status": "ignored",
-                    "message": f"Skipping auto-trigger from bot PR to prevent loops (sender: {sender})",
-                }
-
             # Extract workflow run information
             run_id = data.get("workflow_job", {}).get("run_id")
             workflow_name_gh = data.get("workflow_job", {}).get("workflow_name")
             job_name = data.get("workflow_job", {}).get("name")
+
+            # Extract the branch/ref where the workflow ran
+            # This is needed to target the correct branch for fixes
+            head_branch = data.get("workflow_job", {}).get("head_branch")
+            if head_branch:
+                ref = f"refs/heads/{head_branch}"
+                logger.info(f"Workflow ran on branch: {head_branch}")
+            else:
+                ref = "main"
+                logger.warning(
+                    "Could not determine branch from workflow_job, defaulting to main"
+                )
 
             if run_id is None:
                 logger.warning("Workflow job event missing run_id")
@@ -220,10 +218,11 @@ async def webhook(request: Request):
             issue_number = run_id
 
             logger.info(
-                "Workflow job failed: workflow='%s', job='%s', run_id=%s",
+                "Workflow job failed: workflow='%s', job='%s', run_id=%s, branch=%s",
                 workflow_name_gh,
                 job_name,
                 run_id,
+                head_branch or "unknown",
             )
 
             # Store additional context for CI failure analysis
@@ -231,6 +230,7 @@ async def webhook(request: Request):
             event_data["workflow_name_gh"] = workflow_name_gh
             event_data["job_name"] = job_name
             event_data["conclusion"] = conclusion
+            event_data["head_branch"] = head_branch
 
         # Check if we have a workflow configured for this event/command
         workflow_name = None
@@ -258,6 +258,25 @@ async def webhook(request: Request):
             user = data.get("pull_request", {}).get("user", {}).get("login", "unknown")
         elif event_type == "issues":
             user = data.get("issue", {}).get("user", {}).get("login", "unknown")
+
+        # Check if we should skip events from the bot itself
+        if workflow_engine.should_skip_self(workflow_name):
+            # Check various sources for the actor/sender
+            sender = data.get("sender", {}).get("login", "")
+            pr_user = data.get("pull_request", {}).get("user", {}).get("login", "")
+            issue_user = data.get("issue", {}).get("user", {}).get("login", "")
+
+            # Check if any of these match the bot username
+            bot_username = config.webhook_bot_username
+            if bot_username and bot_username in [sender, pr_user, issue_user, user]:
+                logger.info(
+                    f"Skipping workflow '{workflow_name}' - event triggered by bot itself "
+                    f"(user: {user}, sender: {sender}, skip_self: true)"
+                )
+                return {
+                    "status": "ignored",
+                    "message": f"Skipping event from bot itself (skip_self enabled for workflow '{workflow_name}')",
+                }
 
         # Queue agent job with event data
         job = {

@@ -14,6 +14,7 @@ Each workflow consists of:
 - **description**: What the workflow does
 - **triggers**: Events and/or commands that activate the workflow
 - **prompt**: Template and system context for the agent
+- **skip_self**: Whether to skip events triggered by the bot itself (default: true)
 
 ## Example Workflow
 
@@ -30,6 +31,7 @@ review-pr:
   prompt:
     template: "/pr-review-toolkit:review-pr {repo} {issue_number}"
     system_context: "review.md"
+  skip_self: true # Don't review PRs created by the bot itself
 ```
 
 ## Triggers
@@ -83,6 +85,92 @@ triggers:
   commands:
     - /review
 ```
+
+## Skip Self
+
+The `skip_self` option prevents infinite loops by ignoring events triggered by the bot itself.
+
+### Default Behavior
+
+By default, `skip_self: true` is applied to all workflows. This means:
+
+- PRs created by the bot won't trigger automatic reviews
+- Issues created by the bot won't trigger automatic triage
+- CI failures on bot's PRs won't trigger automatic fixes (use `/fix-ci` command instead)
+
+### Configuration
+
+`skip_self` is optional and defaults to `true`. You can omit it entirely or set it explicitly:
+
+```yaml
+review-pr:
+  # skip_self omitted - defaults to true
+  triggers:
+    events:
+      - pull_request.opened
+  # ... rest of workflow
+
+fix-ci:
+  skip_self: true # Explicitly set to true
+  triggers:
+    events:
+      - workflow_job.completed
+  # ... rest of workflow
+
+generic:
+  skip_self: false # Explicitly set to false - allow bot self-interaction
+  triggers:
+    commands:
+      - /agent
+  # ... rest of workflow
+```
+
+### How It Works
+
+The webhook checks if the event was triggered by the bot by comparing:
+
+- `sender.login` - Event sender
+- `pull_request.user.login` - PR author
+- `issue.user.login` - Issue author
+- `comment.user.login` - Comment author
+
+Against the configured `WEBHOOK_BOT_USERNAME` environment variable.
+
+### When to Use skip_self: false
+
+Use `skip_self: false` when:
+
+- You want the bot to respond to its own commands (e.g., `/agent` in bot comments)
+- You're building a workflow that should process bot-generated content
+- You have external safeguards against infinite loops
+
+### Example: Preventing Infinite Loops
+
+**Without skip_self (dangerous):**
+
+1. Bot creates PR
+2. `pull_request.opened` event triggers review workflow
+3. Bot reviews its own PR
+4. Bot creates another PR based on review
+5. Infinite loop! 🔄
+
+**With skip_self: true (safe):**
+
+1. Bot creates PR
+2. `pull_request.opened` event received
+3. Webhook checks: sender == bot username
+4. Event ignored, no infinite loop ✓
+
+### Manual Override
+
+Even with `skip_self: true`, you can manually trigger workflows on bot PRs using commands:
+
+```
+/review  # Manually review bot's PR
+/fix-ci  # Manually fix CI on bot's PR
+```
+
+Commands bypass the skip_self check when explicitly invoked by a human.
 
 ## Prompts
 

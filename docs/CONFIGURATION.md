@@ -120,6 +120,9 @@ GITHUB_WEBHOOK_SECRET=your-webhook-secret
 PORT=8080  # Webhook service port (1-65535)
 LOG_LEVEL=INFO
 
+# Bot Identity (for preventing infinite loops)
+WEBHOOK_BOT_USERNAME=claude-code-agent[bot]  # GitHub username of the bot (must match GitHub App username)
+
 # Queue
 QUEUE_TYPE=redis
 REDIS_URL=redis://localhost:6379
