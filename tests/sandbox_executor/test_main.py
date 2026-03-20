@@ -1,5 +1,6 @@
 """Unit tests for sandbox executor FastAPI service."""
 
+import os
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -63,6 +64,7 @@ class TestExecuteEndpoint:
                 user="testuser",
                 auto_review=False,
                 auto_triage=False,
+                workspace=os.getcwd(),
             )
 
     @pytest.mark.asyncio
