@@ -17,6 +17,13 @@ from subagents import AGENTS
 
 logger = logging.getLogger(__name__)
 
+# Only enable SDK debug logging if SDK_DEBUG is set
+sdk_debug = os.getenv("SDK_DEBUG", "false").lower() == "true"
+if sdk_debug:
+    logging.getLogger("claude_agent_sdk").setLevel(logging.DEBUG)
+else:
+    logging.getLogger("claude_agent_sdk").setLevel(logging.WARNING)
+
 
 # We recreate the ObservabilityManager logic here inside the sandbox
 def setup_langfuse_hooks() -> dict:
@@ -49,7 +56,7 @@ def setup_langfuse_hooks() -> dict:
                     "CC_LANGFUSE_DEBUG": "true",
                     "PARENT_SPAN_ID": span_id or "",
                     "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-                    "HOME": os.environ.get("HOME", "/root"),
+                    "HOME": os.environ.get("HOME", "/home/bot"),
                 },
             )
 
@@ -101,6 +108,7 @@ async def execute_sandbox_request(
     user: str,
     auto_review: bool,
     auto_triage: bool,
+    workspace: str,  # Add workspace parameter
 ) -> str:
     """Execute the Claude Agent SDK inside the sandbox"""
 
@@ -108,8 +116,8 @@ async def execute_sandbox_request(
     # The sandbox executor container is given ANTHROPIC_API_KEY globally in docker-compose.
     # We don't need to manually configure it as the SDK picks it up.
 
-    # Set working directory to current directory to keep temp files accessible
-    working_dir = os.getcwd()
+    # Use provided workspace as working directory
+    working_dir = workspace
     os.environ["CLAUDE_TEMP_DIR"] = working_dir
     os.environ["TMPDIR"] = working_dir
 
@@ -124,10 +132,31 @@ async def execute_sandbox_request(
 
     hooks = setup_langfuse_hooks()
 
-    # Sandbox container expects plugins mapped to /app/plugins
+    # Load plugins and skills from ~/.claude/ using setting_sources
+    # Get model from environment variable
+    model = os.getenv("ANTHROPIC_DEFAULT_SONNET_MODEL", "claude-sonnet-4-20250514")
+
+    # Callback to capture stderr from SDK CLI
+    def stderr_callback(message: str) -> None:
+        """Log stderr output from Claude CLI."""
+        logger.warning(f"SDK CLI stderr: {message}")
+
+    # Explicitly load plugins from ~/.claude/plugins/
+    # setting_sources alone doesn't load plugins, we need to pass them explicitly
+    plugins_dir = os.path.expanduser("~/.claude/plugins")
+    plugins = []
+    if os.path.exists(plugins_dir):
+        for plugin_name in os.listdir(plugins_dir):
+            plugin_path = os.path.join(plugins_dir, plugin_name)
+            if os.path.isdir(plugin_path) and not plugin_name.startswith("."):
+                plugins.append({"type": "local", "path": plugin_path})
+                logger.info(f"Loading plugin: {plugin_name} from {plugin_path}")
+
     options = ClaudeAgentOptions(
+        model=model,  # Specify the model to use
         allowed_tools=[
             "Task",
+            "Skill",
             "Bash",
             "Read",
             "Write",
@@ -141,31 +170,78 @@ async def execute_sandbox_request(
         permission_mode="acceptEdits",
         mcp_servers=mcp_servers,  # type: ignore[arg-type]
         agents=AGENTS,
-        plugins=[
-            {"type": "local", "path": "/app/plugins/pr-review-toolkit"},
-            {"type": "local", "path": "/app/plugins/ci-failure-toolkit"},
-        ],
+        setting_sources=[
+            "user",
+            "project",
+            "local",
+        ],  # Load skills and config from ~/.claude/
+        plugins=plugins,  # Explicitly pass plugins
         hooks=hooks,
-        max_turns=50,
         cwd=working_dir,  # Set working directory for SDK operations
+        stderr=stderr_callback,  # Capture stderr output for debugging
     )
 
     # 3. Execute
     logger.info("Starting sandbox SDK execution...")
+
+    # Only show detailed info if SDK_DEBUG is enabled
+    sdk_debug = os.getenv("SDK_DEBUG", "false").lower() == "true"
+    if sdk_debug:
+        logger.info(f"Model: {model}")
+        logger.info(f"Prompt length: {len(prompt)} characters")
+        logger.info(f"Prompt preview: {prompt[:200]}...")
+        logger.info(f"Working directory: {working_dir}")
+        logger.info(f"Setting sources: {options.setting_sources}")
+        logger.info(f"Allowed tools: {options.allowed_tools}")
+        logger.info(f"MCP servers configured: {list(mcp_servers.keys())}")
+
+        # Verify we can access the working directory
+        try:
+            files = os.listdir(working_dir)
+            logger.info(f"Working directory contains {len(files)} items")
+            logger.debug(f"First 10 items: {files[:10]}")
+        except Exception as e:
+            logger.error(f"Cannot access working directory: {e}")
+
     response_parts = []
 
     try:
         async with asyncio.timeout(1800):  # 30 minutes
             async with ClaudeSDKClient(options=options) as client:
+                if sdk_debug:
+                    logger.info("SDK client created, sending query...")
                 await client.query(prompt)
+                if sdk_debug:
+                    logger.info("Query sent, waiting for messages...")
 
                 async for message in client.receive_messages():
+                    if sdk_debug:
+                        logger.debug(f"Received message type: {type(message).__name__}")
+
                     if isinstance(message, AssistantMessage):
                         for block in message.content:
                             if isinstance(block, TextBlock):
                                 response_parts.append(block.text)
+                                if sdk_debug:
+                                    logger.debug(
+                                        f"Collected text block: {len(block.text)} chars"
+                                    )
                     elif isinstance(message, ResultMessage):
+                        logger.info(
+                            f"SDK completed - {message.num_turns} turns, {message.duration_ms}ms"
+                        )
+                        if sdk_debug:
+                            logger.info(
+                                f"ResultMessage details: is_error={message.is_error}, subtype={message.subtype}"
+                            )
                         break
+                    elif sdk_debug:
+                        # Log any other message types only in debug mode
+                        logger.debug(
+                            f"Received other message type: {type(message).__name__}"
+                        )
+                        if hasattr(message, "__dict__"):
+                            logger.debug(f"Message content: {message.__dict__}")
 
     except TimeoutError as e:
         raise SDKTimeoutError(
@@ -175,6 +251,12 @@ async def execute_sandbox_request(
         raise SDKError(f"Failed to execute Claude Agent SDK in sandbox: {e}") from e
 
     response = "\n".join(response_parts)
+
+    if sdk_debug:
+        logger.info(
+            f"Total response parts collected: {len(response_parts)}, total length: {len(response)} chars"
+        )
+
     if not response or not response.strip():
         raise SDKError("Claude Agent SDK returned empty response in sandbox")
 

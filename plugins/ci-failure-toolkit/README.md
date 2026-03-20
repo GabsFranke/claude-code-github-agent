@@ -1,155 +1,437 @@
-# CI Failure Toolkit
+# CI Failure Toolkit Plugin
 
-Comprehensive CI/CD failure analysis and fix toolkit for GitHub Actions workflows. Automatically diagnoses and fixes build failures, test failures, linting issues, and deployment problems.
+Automated CI/CD failure analysis and fixing for GitHub Actions workflows using specialized agents with shared knowledge skills.
 
-## Features
+## Overview
 
-- **Automatic Failure Detection**: Triggered automatically when GitHub Actions workflows fail
-- **Specialized Agents**: Four specialized agents for different failure types
-- **Root Cause Analysis**: Identifies underlying issues, not just symptoms
-- **Automated Fixes**: Implements fixes and verifies them locally
-- **GitHub Integration**: Posts results and creates PRs with fixes
+This plugin provides intelligent CI failure analysis and automated fixes through a coordinated system of specialized agents. When a CI workflow fails, the toolkit analyzes logs, identifies the failure type, and delegates to expert agents who implement fixes in isolated git worktrees.
 
-## Commands
+## Architecture
 
-### `/ci-failure-toolkit:fix-ci`
-
-Analyze and fix CI/CD failures.
-
-**Usage:**
+### Three-Layer Design
 
 ```
-/ci-failure-toolkit:fix-ci [owner/repo] [run-id-or-pr-number] [failure-type]
+┌─────────────────────────────────────────────────────────┐
+│                  Command Layer                          │
+│  (Orchestration - fetches data, delegates, posts)      │
+│                   commands/fix-ci.md                    │
+└────────────────────┬────────────────────────────────────┘
+                     │ delegates to
+                     ↓
+┌─────────────────────────────────────────────────────────┐
+│                   Agent Layer                           │
+│  (Specialists - implement domain-specific fixes)        │
+│  • build-failure-analyzer                               │
+│  • test-failure-analyzer                                │
+│  • lint-failure-analyzer                                │
+└────────────────────┬────────────────────────────────────┘
+                     │ uses
+                     ↓
+┌─────────────────────────────────────────────────────────┐
+│                   Skills Layer                          │
+│  (Shared knowledge injected into agents)                │
+│  • git-worktree-workflow (git, GitHub, file ops)        │
+│  • analyze-logs (log parsing)                           │
+└─────────────────────────────────────────────────────────┘
 ```
 
-**Arguments:**
+### Command Layer (`commands/`)
 
-- `owner/repo` - Repository (required)
-- `run-id-or-pr-number` - Workflow run ID or PR number (required)
-- `failure-type` - Optional filter: build, test, lint, deploy, all
+**fix-ci.md** - Main orchestrator that:
 
-**Examples:**
+- Fetches workflow failure information from GitHub using MCP tools
+- Analyzes logs to identify failure types
+- Delegates to specialized agents via Task tool
+- Posts comprehensive results back to GitHub
+
+**Key principle:** The orchestrator does NOT implement fixes. It coordinates.
+
+### Agent Layer (`agents/`)
+
+Specialized agents that implement fixes:
+
+- **build-failure-analyzer** - Compilation errors, dependency issues, configuration problems
+- **test-failure-analyzer** - Test failures, flaky tests, assertion errors, timeouts
+- **lint-failure-analyzer** - Linting errors, type errors, formatting issues
+
+**Key principle:** Each agent has the `git-worktree-workflow` skill loaded in their frontmatter, giving them essential knowledge about their environment and workflows.
+
+### Skills Layer (`skills/`)
+
+Shared knowledge injected into agents via frontmatter:
+
+**git-worktree-workflow** - Essential knowledge about:
+
+- **Environment**: You're in a git worktree, NOT a fresh clone
+- **File operations**: How to use Read, Write, Edit, Bash tools
+- **Git workflow**: Committing, pushing to current branch with `git push origin HEAD`
+- **GitHub integration**: Using MCP tools (`mcp__github__*`), NOT `gh` CLI
+- **PR creation**: Determining target branch (never hardcode "main")
+- **Common workflows**: Fix → Test → Commit → Push → Post results
+
+**analyze-logs** - Log parsing and failure classification patterns
+
+## How It Works
+
+### 1. Orchestration Flow
 
 ```
-# Auto-triggered on workflow failure
-/ci-failure-toolkit:fix-ci owner/repo 12345
-
-# Manual trigger with PR number
-/ci-failure-toolkit:fix-ci owner/repo 456
-
-# Specific failure type
-/ci-failure-toolkit:fix-ci owner/repo 12345 test
+User/Webhook → fix-ci command
+                    ↓
+            Fetch GitHub logs (MCP)
+                    ↓
+            Analyze failure type
+                    ↓
+            Delegate to specialist agent (Task)
+                    ↓
+            Post results to GitHub (MCP)
 ```
 
-## Agents
+### 2. Agent Execution Flow
 
-### build-failure-analyzer
+```
+Agent receives task with context
+        ↓
+Loads git-worktree-workflow skill
+        ↓
+Analyzes specific failure type
+        ↓
+Implements fixes (Read/Write/Edit)
+        ↓
+Tests locally (Bash)
+        ↓
+Commits: git add . && git commit -m "..."
+        ↓
+Pushes: git push origin HEAD
+        ↓
+Returns structured results
+```
 
-Diagnoses and fixes:
+### 3. Git Worktree Environment
 
-- Compilation errors
-- Dependency conflicts
-- Missing environment variables
-- Configuration issues
+Agents operate in pre-configured worktrees:
 
-### test-failure-analyzer
+- ✅ Repository already cloned (no `git clone` needed)
+- ✅ Dedicated branch created (`fix/ci-failure-run-{id}-job-{id}`)
+- ✅ Git credentials pre-configured
+- ✅ Direct file system access
+- ✅ Isolated from other jobs
 
-Diagnoses and fixes:
+**The `git-worktree-workflow` skill ensures agents understand this environment.**
 
-- Unit test failures
-- Integration test failures
-- Flaky tests
-- Timeout issues
-
-### lint-failure-analyzer
-
-Diagnoses and fixes:
-
-- Code style violations
-- Type errors
-- Import issues
-- Formatting problems
-
-### deploy-failure-analyzer
-
-Diagnoses and fixes:
-
-- Docker build failures
-- Container startup issues
-- Health check failures
-- Resource constraints
-
-## Workflow Integration
+## Usage
 
 ### Automatic Trigger
 
-Add to your `workflows.yaml`:
+Configured via webhook to trigger on CI failures:
 
 ```yaml
-fix-ci:
-  triggers:
-    events:
-      - workflow_job.completed
-    commands:
-      - /fix-ci
-      - /fix-build
-      - /fix-tests
-  prompt:
-    template: "/ci-failure-toolkit:fix-ci {repo} {issue_number}"
-    system_context: "fix-ci.md"
-  description: "Analyze and fix CI/CD failures"
+# workflows.yaml
+- name: ci-failure-auto-fix
+  trigger:
+    event: workflow_job
+    conditions:
+      - conclusion: failure
+  action:
+    command: /ci-failure-toolkit:fix-ci
+    args: "{repo} {run_id}"
 ```
 
 ### Manual Trigger
 
-Comment on any issue or PR:
+Comment on a PR or issue:
 
 ```
-/fix-ci owner/repo 12345
+/ci-failure-toolkit:fix-ci owner/repo 12345678
+/ci-failure-toolkit:fix-ci owner/repo 12345678 test
+/ci-failure-toolkit:fix-ci owner/repo 12345678 build
 ```
 
-## How It Works
+## Key Features
 
-1. **Detect Failure**: Webhook receives `workflow_job.completed` with `conclusion=failure`
-2. **Fetch Logs**: Agent retrieves workflow run logs via GitHub MCP
-3. **Analyze**: Identifies failure type and root cause
-4. **Delegate**: Routes to specialized agent (build, test, lint, deploy)
-5. **Fix**: Agent implements targeted fixes in local worktree
-6. **Verify**: Tests fixes locally before committing
-7. **Commit**: Pushes changes with descriptive commit message
-8. **Report**: Posts summary to GitHub
+### Separation of Concerns
+
+- **Orchestrator** (fix-ci command): Fetches data, analyzes, delegates, posts results
+- **Specialists** (agents): Implement domain-specific fixes
+- **Shared Knowledge** (skills): Common workflows and patterns
+
+This prevents duplication and ensures consistency.
+
+### Skills-Based Knowledge Sharing
+
+Instead of duplicating git/GitHub instructions in every agent, we use the `git-worktree-workflow` skill:
+
+```yaml
+# In agent frontmatter
+---
+description: "Specialist in fixing build failures"
+skills:
+  - git-worktree-workflow
+---
+```
+
+The skill content is automatically injected into the agent's context.
+
+### GitHub MCP Integration
+
+All GitHub interactions use MCP tools (documented in `git-worktree-workflow` skill):
+
+- `mcp__github__list_workflow_run_jobs` - Get job details
+- `mcp__github__download_workflow_run_logs` - Fetch logs
+- `mcp__github__add_issue_comment` - Post comments
+- `mcp__github__create_pull_request` - Create PRs
+
+**The `gh` CLI is NOT available** - this is documented in the skill.
+
+### Intelligent Delegation
+
+The orchestrator analyzes logs and routes to the right specialist:
+
+```python
+if "compilation error" in logs or "build failed" in logs:
+    → build-failure-analyzer
+elif "test failed" in logs or "assertion error" in logs:
+    → test-failure-analyzer
+elif "lint error" in logs or "type error" in logs:
+    → lint-failure-analyzer
+```
+
+## Configuration
+
+### Required Environment Variables
+
+```bash
+# GitHub App credentials (for MCP)
+GITHUB_APP_ID=123456
+GITHUB_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----..."
+GITHUB_APP_INSTALLATION_ID=12345678
+
+# Anthropic API
+ANTHROPIC_API_KEY=sk-ant-...
+```
+
+### Workflow Integration
+
+Add to `workflows.yaml`:
+
+```yaml
+workflows:
+  - name: ci-failure-auto-fix
+    trigger:
+      event: workflow_job
+      conditions:
+        - conclusion: failure
+    action:
+      command: /ci-failure-toolkit:fix-ci
+      args: "{repo} {run_id}"
+```
+
+## Development
+
+### Adding New Failure Types
+
+1. Create a new agent in `agents/`:
+
+```markdown
+---
+description: "Specialist in [failure type]"
+skills:
+  - git-worktree-workflow
+---
+
+# [Failure Type] Analyzer
+
+You are a [failure type] specialist...
+
+**IMPORTANT:** You have the `git-worktree-workflow` skill loaded. This provides essential knowledge about:
+
+- Your workspace environment (you're in a git worktree, NOT a fresh clone)
+- How to use file operation tools (Read, Write, Edit, Bash)
+- Git workflow (committing, pushing to current branch)
+- GitHub integration (using MCP tools, NOT `gh` CLI)
+
+Refer to that skill for all git and GitHub operations.
+
+## Analysis Process:
+
+...
+```
+
+2. Update `fix-ci.md` to route to the new agent:
+
+```python
+elif failure_type == "new-type":
+    Task({
+        "agent": "new-type-analyzer",
+        "prompt": f"""Analyze and fix the {failure_type} failure in {repo}...
+
+Instructions:
+1. Analyze the failure
+2. Implement fixes
+3. Test locally
+4. Commit and push
+5. Return structured summary
+"""
+    })
+```
+
+### Adding New Skills
+
+Create a new skill in `skills/`:
+
+```markdown
+---
+name: "skill-name"
+description: "What this skill provides"
+---
+
+# Skill Name
+
+Knowledge and patterns for...
+
+## Key Concepts
+
+...
+
+## Common Patterns
+
+...
+
+## Examples
+
+...
+```
+
+Reference in agent frontmatter:
+
+```yaml
+skills:
+  - git-worktree-workflow
+  - skill-name
+```
+
+### Updating Existing Skills
+
+When you update a skill (e.g., `git-worktree-workflow`), all agents that reference it automatically get the updated knowledge. No need to update each agent individually.
+
+## Best Practices
+
+### For Orchestrator (fix-ci command)
+
+✅ Fetch comprehensive logs from GitHub
+✅ Provide clear context to agents
+✅ Don't implement fixes yourself - delegate
+✅ Post detailed summaries to GitHub
+
+❌ Don't duplicate agent logic
+❌ Don't include git/GitHub instructions (that's in skills)
+
+### For Agents
+
+✅ Reference `git-worktree-workflow` skill in frontmatter
+✅ Trust the skill's instructions
+✅ Test fixes locally before committing
+✅ Use descriptive commit messages
+✅ Return structured results
+
+❌ Don't duplicate git/GitHub workflows (use the skill)
+❌ Don't try to clone the repository
+❌ Don't use `gh` CLI (use MCP tools)
+❌ Don't hardcode branch names (use `HEAD`)
+
+### For Skills
+
+✅ Keep focused on specific knowledge domains
+✅ Provide clear examples
+✅ Document common patterns
+✅ Include "what NOT to do" sections
+
+❌ Don't duplicate content across skills
+❌ Don't include agent-specific logic
+
+## Troubleshooting
+
+### Agent tries to clone repository
+
+**Problem:** Agent runs `git clone`
+
+**Solution:** Ensure the agent has `git-worktree-workflow` skill in frontmatter:
+
+```yaml
+skills:
+  - git-worktree-workflow
+```
+
+The skill explicitly states: "DO NOT clone the repository! You are already in a worktree."
+
+### Agent uses `gh` CLI
+
+**Problem:** Agent tries to use `gh` command
+
+**Solution:** The `git-worktree-workflow` skill documents that only MCP tools are available. Ensure:
+
+1. Agent has the skill loaded
+2. Agent references the skill in their instructions
+
+### Commits pushed to wrong branch
+
+**Problem:** Agent pushes to `main` instead of current branch
+
+**Solution:** The `git-worktree-workflow` skill documents using `git push origin HEAD`. Check:
+
+1. Agent has the skill loaded
+2. Agent follows the skill's git workflow section
+
+### PR targets wrong base branch
+
+**Problem:** PR created targeting `main` when it should target feature branch
+
+**Solution:** The `git-worktree-workflow` skill has a section on "Determining the Target Branch for PRs" with logic to extract the source branch. Ensure agent follows this pattern.
+
+### Orchestrator implements fixes instead of delegating
+
+**Problem:** The fix-ci command tries to implement fixes itself
+
+**Solution:** The command should only:
+
+1. Fetch logs
+2. Analyze failure type
+3. Delegate to specialist agent via Task tool
+4. Post results
+
+Update the command to delegate properly.
 
 ## Output Format
 
 The agent posts a comprehensive summary:
 
 ```markdown
-# CI Failure Analysis - Run #12345
+## CI Failure Analysis - Run #12345
 
-## Failure Type
+### Failure Type
 
 Test failures
 
-## Root Cause
+### Root Cause
 
 Test expected old API response format after recent API changes
 
-## Changes Made
+### Changes Made
 
 - Updated test assertions to match new API format
 - Updated test fixtures with current response structure
 - Fixed 3 related tests in test_api.py
 
-## Files Modified
+### Files Modified
 
 - `tests/test_api.py` - Updated assertions for new API format
 - `tests/fixtures/api_responses.json` - Updated fixture data
 
-## Verification
+### Verification
 
 All tests pass after fixes (ran 10 times to check for flakiness)
 
-## Prevention
+### Prevention
 
 - Add API contract tests
 - Update fixtures when API changes
@@ -160,63 +442,33 @@ All tests pass after fixes (ran 10 times to check for flakiness)
 🤖 Analyzed and fixed by CI Failure Toolkit
 ```
 
-## Configuration
+## Why This Architecture?
 
-### Webhook Setup
+### Problem: Duplication and Inconsistency
 
-The webhook service must be configured to handle `workflow_job.completed` events:
+Previously, each agent had duplicated instructions about:
 
-```python
-# In services/webhook/main.py
-@app.post("/webhook")
-async def webhook(request: Request):
-    event_type = request.headers.get("X-GitHub-Event")
+- Git worktree environment
+- File operations
+- Git commands
+- GitHub MCP integration
+- PR creation logic
 
-    if event_type == "workflow_job":
-        payload = await request.json()
-        if payload.get("action") == "completed":
-            conclusion = payload["workflow_job"]["conclusion"]
-            if conclusion == "failure":
-                # Trigger fix-ci workflow
-                await queue.publish({
-                    "event_type": "workflow_job",
-                    "action": "completed",
-                    "repo": payload["repository"]["full_name"],
-                    "run_id": payload["workflow_job"]["run_id"],
-                    # ... other data
-                })
-```
+This led to:
 
-### Worker Configuration
+- Inconsistent behavior across agents
+- Difficult maintenance (update in 3+ places)
+- Agents not following best practices
+- Orchestrator doing agent work
 
-Add the plugin to your worker configuration:
+### Solution: Skills-Based Knowledge Sharing
 
-```python
-# In services/sandbox_executor/executor.py
-options = ClaudeAgentOptions(
-    agents=AGENTS,
-    plugins=[
-        {"type": "local", "path": "/app/plugins/pr-review-toolkit"},
-        {"type": "local", "path": "/app/plugins/ci-failure-toolkit"},
-    ],
-    allowed_tools=["Task", "Bash", "Read", "Write", "Edit", "List", "Search", "Grep", "Glob", "mcp__github__*"],
-)
-```
+Now:
 
-## Best Practices
-
-1. **Test in Sandbox**: Always test in a sandbox repository first
-2. **Review Fixes**: Review automated fixes before merging
-3. **Monitor Patterns**: Track common failure types
-4. **Improve CI**: Use prevention suggestions to improve CI pipeline
-5. **Document Issues**: Keep track of recurring problems
-
-## Limitations
-
-- Requires GitHub Actions workflow logs to be accessible
-- Cannot fix issues requiring external service changes
-- May need manual intervention for complex failures
-- Auto-commits to the same branch (configure branch protection accordingly)
+- **One source of truth**: `git-worktree-workflow` skill
+- **Automatic propagation**: Update skill → all agents get update
+- **Clear separation**: Orchestrator coordinates, agents implement, skills provide knowledge
+- **Consistency**: All agents follow same patterns
 
 ## License
 

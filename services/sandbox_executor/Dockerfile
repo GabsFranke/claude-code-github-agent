@@ -1,5 +1,8 @@
 FROM python:3.11-slim
 
+# Create non-root user early
+RUN useradd -m -u 1000 -s /bin/bash bot
+
 WORKDIR /app
 
 # Install common bash tools that agents use
@@ -32,6 +35,23 @@ RUN pip3 install uvicorn fastapi pydantic httpx langfuse
 
 # Sandbox Executor source code
 COPY services/sandbox_executor/ /app/services/sandbox_executor/
+
+# Copy plugins and skills to bot user's .claude directory
+RUN mkdir -p /home/bot/.claude/plugins /home/bot/.claude/skills
+COPY plugins/ /home/bot/.claude/plugins/
+COPY skills/ /home/bot/.claude/skills/
+
+# Create repo cache directory and set ownership to bot user
+RUN mkdir -p /var/cache/repos && chown -R bot:bot /var/cache/repos
+
+# Set ownership to bot user
+RUN chown -R bot:bot /app /home/bot/.claude
+
+# Set USER environment variable for the bot user
+ENV USER=bot
+
+# Switch to non-root user
+USER bot
 
 WORKDIR /app
 EXPOSE 8000

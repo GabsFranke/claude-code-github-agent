@@ -12,7 +12,7 @@ class TestSetupLangfuseHooks:
 
     def test_returns_empty_dict_when_no_credentials(self):
         """Test returns empty dict when Langfuse credentials not configured."""
-        from services.sandbox_executor.executor import setup_langfuse_hooks
+        from services.sandbox_executor.sdk_executor import setup_langfuse_hooks
 
         with patch.dict(os.environ, {}, clear=True):
             hooks = setup_langfuse_hooks()
@@ -20,7 +20,7 @@ class TestSetupLangfuseHooks:
 
     def test_returns_empty_dict_when_partial_credentials(self):
         """Test returns empty dict when only partial credentials provided."""
-        from services.sandbox_executor.executor import setup_langfuse_hooks
+        from services.sandbox_executor.sdk_executor import setup_langfuse_hooks
 
         with patch.dict(os.environ, {"LANGFUSE_PUBLIC_KEY": "test_key"}, clear=True):
             hooks = setup_langfuse_hooks()
@@ -28,7 +28,7 @@ class TestSetupLangfuseHooks:
 
     def test_returns_hooks_when_credentials_configured(self):
         """Test returns hooks dict when Langfuse credentials configured."""
-        from services.sandbox_executor.executor import setup_langfuse_hooks
+        from services.sandbox_executor.sdk_executor import setup_langfuse_hooks
 
         with patch.dict(
             os.environ,
@@ -47,7 +47,7 @@ class TestSetupLangfuseHooks:
     @pytest.mark.asyncio
     async def test_langfuse_hook_execution_success(self):
         """Test Langfuse hook executes successfully."""
-        from services.sandbox_executor.executor import setup_langfuse_hooks
+        from services.sandbox_executor.sdk_executor import setup_langfuse_hooks
 
         with patch.dict(
             os.environ,
@@ -73,7 +73,7 @@ class TestSetupLangfuseHooks:
     @pytest.mark.asyncio
     async def test_langfuse_hook_execution_failure(self):
         """Test Langfuse hook handles execution failure."""
-        from services.sandbox_executor.executor import setup_langfuse_hooks
+        from services.sandbox_executor.sdk_executor import setup_langfuse_hooks
 
         with patch.dict(
             os.environ,
@@ -98,7 +98,7 @@ class TestSetupLangfuseHooks:
     @pytest.mark.asyncio
     async def test_langfuse_hook_timeout(self):
         """Test Langfuse hook handles timeout."""
-        from services.sandbox_executor.executor import setup_langfuse_hooks
+        from services.sandbox_executor.sdk_executor import setup_langfuse_hooks
 
         with patch.dict(
             os.environ,
@@ -132,7 +132,7 @@ class TestExecuteSandboxRequest:
         # Mock message stream
         from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
 
-        from services.sandbox_executor.executor import execute_sandbox_request
+        from services.sandbox_executor.sdk_executor import execute_sandbox_request
 
         async def mock_receive():
             yield AssistantMessage(
@@ -157,7 +157,7 @@ class TestExecuteSandboxRequest:
         mock_client.__aexit__ = AsyncMock(return_value=None)
 
         with patch(
-            "services.sandbox_executor.executor.ClaudeSDKClient",
+            "services.sandbox_executor.sdk_executor.ClaudeSDKClient",
             return_value=mock_client,
         ):
             response = await execute_sandbox_request(
@@ -176,7 +176,7 @@ class TestExecuteSandboxRequest:
     @pytest.mark.asyncio
     async def test_multiple_text_blocks(self):
         """Test handling multiple text blocks in response."""
-        from services.sandbox_executor.executor import execute_sandbox_request
+        from services.sandbox_executor.sdk_executor import execute_sandbox_request
 
         mock_client = MagicMock()
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -205,7 +205,7 @@ class TestExecuteSandboxRequest:
         mock_client.receive_messages = mock_receive
 
         with patch(
-            "services.sandbox_executor.executor.ClaudeSDKClient",
+            "services.sandbox_executor.sdk_executor.ClaudeSDKClient",
             return_value=mock_client,
         ):
             response = await execute_sandbox_request(
@@ -225,7 +225,7 @@ class TestExecuteSandboxRequest:
         """Test empty response raises exception."""
         from claude_agent_sdk import ResultMessage
 
-        from services.sandbox_executor.executor import execute_sandbox_request
+        from services.sandbox_executor.sdk_executor import execute_sandbox_request
 
         async def mock_receive():
             yield ResultMessage(
@@ -245,7 +245,7 @@ class TestExecuteSandboxRequest:
         mock_client.__aexit__ = AsyncMock(return_value=None)
 
         with patch(
-            "services.sandbox_executor.executor.ClaudeSDKClient",
+            "services.sandbox_executor.sdk_executor.ClaudeSDKClient",
             return_value=mock_client,
         ):
             with pytest.raises(
@@ -264,7 +264,7 @@ class TestExecuteSandboxRequest:
     @pytest.mark.asyncio
     async def test_timeout_raises_exception(self):
         """Test timeout raises exception."""
-        from services.sandbox_executor.executor import execute_sandbox_request
+        from services.sandbox_executor.sdk_executor import execute_sandbox_request
 
         async def mock_receive():
             await asyncio.sleep(2000)  # Simulate long execution
@@ -278,7 +278,7 @@ class TestExecuteSandboxRequest:
 
         # Mock asyncio.timeout to trigger immediately
         with patch(
-            "services.sandbox_executor.executor.ClaudeSDKClient",
+            "services.sandbox_executor.sdk_executor.ClaudeSDKClient",
             return_value=mock_client,
         ):
             with patch("asyncio.timeout") as mock_timeout:
@@ -298,7 +298,7 @@ class TestExecuteSandboxRequest:
     @pytest.mark.asyncio
     async def test_sdk_exception_propagates(self):
         """Test SDK exceptions are properly propagated."""
-        from services.sandbox_executor.executor import execute_sandbox_request
+        from services.sandbox_executor.sdk_executor import execute_sandbox_request
 
         mock_client = MagicMock()
         mock_client.query = AsyncMock(side_effect=RuntimeError("SDK error"))
@@ -306,7 +306,7 @@ class TestExecuteSandboxRequest:
         mock_client.__aexit__ = AsyncMock(return_value=None)
 
         with patch(
-            "services.sandbox_executor.executor.ClaudeSDKClient",
+            "services.sandbox_executor.sdk_executor.ClaudeSDKClient",
             return_value=mock_client,
         ):
             with pytest.raises(Exception, match="Failed to execute Claude Agent SDK"):
@@ -325,7 +325,7 @@ class TestExecuteSandboxRequest:
         """Test MCP server is configured correctly."""
         from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
 
-        from services.sandbox_executor.executor import execute_sandbox_request
+        from services.sandbox_executor.sdk_executor import execute_sandbox_request
 
         async def mock_receive():
             yield AssistantMessage(
@@ -347,7 +347,9 @@ class TestExecuteSandboxRequest:
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=None)
 
-        with patch("services.sandbox_executor.executor.ClaudeSDKClient") as mock_sdk:
+        with patch(
+            "services.sandbox_executor.sdk_executor.ClaudeSDKClient"
+        ) as mock_sdk:
             mock_sdk.return_value = mock_client
 
             await execute_sandbox_request(

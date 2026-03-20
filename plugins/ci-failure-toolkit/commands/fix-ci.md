@@ -18,7 +18,7 @@ allowed-tools:
 
 # CI/CD Failure Analysis and Fix
 
-Analyze GitHub Actions workflow failures and implement fixes using specialized agents. Agents run in a git worktree with direct file access and use GitHub MCP to interact with GitHub.
+Analyze GitHub Actions workflow failures and coordinate specialized agents to implement fixes. You orchestrate the entire process: create the branch, delegate work, and create the PR.
 
 **Arguments:** "$ARGUMENTS"
 
@@ -26,23 +26,58 @@ Analyze GitHub Actions workflow failures and implement fixes using specialized a
 - Second argument: Workflow run ID or PR number (required)
 - Third argument: Failure type (optional: build, test, lint, deploy, all)
 
-## Workflow:
+**Context Variables Available:**
 
-### IMPORTANT: GitHub Interactions
+You have access to these variables from your job context:
 
-**You MUST use GitHub MCP tools for all GitHub operations. The `gh` CLI is NOT available in this environment.**
+- `ref` - The git ref where the failure occurred (e.g., "refs/heads/feature-branch" or "main")
+- `event_data` - Full event data including run_id, workflow_name, job_name, conclusion
+- `repo` - Repository name (owner/repo)
+- `issue_number` - PR or issue number if applicable
 
-All GitHub interactions use MCP tools with the `mcp__github__` prefix:
+**CRITICAL:** Use `ref` to determine the target branch for your PR. This is the branch where the CI failure occurred.
 
-- `mcp__github__list_workflow_run_jobs` - Get job details
-- `mcp__github__download_workflow_run_logs` - Get logs
-- `mcp__github__add_issue_comment` - Post comments
-- `mcp__github__create_branch` - Create branches
-- `mcp__github__create_pull_request` - Create PRs
+## Your Role as Orchestrator
 
-Do NOT attempt to use `gh` CLI commands. Use the MCP tools listed above.
+You are the main coordinator with these responsibilities:
 
-### 1. Parse Arguments & Gather Context
+1. **Create a meaningful branch** for the fix work
+2. Fetch workflow failure information from GitHub
+3. Analyze logs to identify failure type
+4. Delegate to specialized agents (they commit to your branch)
+5. **Create the PR** with all fixes
+6. Post comprehensive results to GitHub
+
+**Key principles:**
+
+- **YOU create the branch** - Use meaningful names like `fix/ci-failure-run-{run_id}`
+- **YOU create the PR** - After all fixes are committed
+- **Subagents implement fixes** - They work in your branch and commit their changes
+- **YOU post the final summary** - Comprehensive results to GitHub
+
+## Workflow
+
+### Step 0: Create a Branch for This Work
+
+**CRITICAL: Do this FIRST before any other work!**
+
+```bash
+# Create a meaningful branch name
+git checkout -b fix/ci-failure-run-{run_id}
+
+# Verify branch created
+git branch --show-current
+# Output: fix/ci-failure-run-12345
+```
+
+**Why this matters:**
+
+- All subagents you invoke will work in this same worktree
+- They will see your branch and commit to it
+- This keeps all fixes organized in one branch
+- You'll create a single PR from this branch at the end
+
+### Step 1: Parse Arguments & Gather Context
 
 Extract from $ARGUMENTS:
 
@@ -50,33 +85,21 @@ Extract from $ARGUMENTS:
 - Run ID or PR number
 - Failure type filter (optional)
 
-### 2. Fetch Workflow Failure Information
+### Step 2: Fetch Workflow Failure Information
 
-You already have the run_id from the Workflow Failure Context injected into your prompt.
+**Use GitHub MCP tools, NOT `gh` CLI (not available)**
 
-Use GitHub MCP tools to get detailed failure information:
-
-**Get job details and identify which step failed:**
+Get job details and identify which step failed:
 
 ```python
 mcp__github__list_workflow_run_jobs({
-    "owner": "owner-name",  # Extract from repo (before /)
-    "repo": "repo-name",    # Extract from repo (after /)
-    "run_id": 12345678      # From event_data
+    "owner": "owner-name",
+    "repo": "repo-name",
+    "run_id": 12345678
 })
 ```
 
-Returns:
-
-- jobs: Array of job objects
-  - name: Job name
-  - conclusion: success/failure/cancelled
-  - steps: Array of step objects
-    - name: Step name
-    - conclusion: success/failure
-    - number: Step number
-
-**Download complete logs with error messages:**
+Download complete logs:
 
 ```python
 mcp__github__download_workflow_run_logs({
@@ -86,201 +109,323 @@ mcp__github__download_workflow_run_logs({
 })
 ```
 
-Returns: Full log output as text with all error messages and stack traces.
-
-Parse the logs to identify:
-
-- Which job failed
-- Which step in that job failed
-- The actual error message
-- Stack traces if available
-
-### 3. Analyze Failure Logs
+### Step 3: Analyze Failure Type
 
 Parse logs to identify:
 
 - **Failure type**: build, test, lint, type-check, deploy
-- **Error messages**: Extract key error text
+- **Error messages**: Key error text
 - **Failed step**: Which CI step failed
 - **Stack traces**: Full error context
-- **Exit codes**: Process exit status
 
-### 4. Analyze and Implement Fixes
+**Failure Type Detection:**
 
-Based on the failure type, implement appropriate fixes:
+**Build failures:**
+
+- Keywords: "compilation error", "build failed", "cannot find module"
+- Failed steps: "build", "compile", "install"
+
+**Test failures:**
+
+- Keywords: "test failed", "assertion error", "expected", "actual"
+- Failed steps: "test", "pytest", "jest", "mocha"
+
+**Lint failures:**
+
+- Keywords: "lint error", "style violation", "formatting", "type error"
+- Failed steps: "lint", "format", "style", "type-check", "mypy"
+
+**Deploy failures:**
+
+- Keywords: "deployment failed", "docker build", "container"
+- Failed steps: "deploy", "docker", "push"
+
+### Step 4: Delegate to Specialized Agent
+
+**Use the Task tool to delegate to the appropriate agent.**
+
+The agent will:
+
+1. See your branch (they're in the same worktree)
+2. Implement fixes
+3. Commit to your branch
+4. Push to your branch
+5. Return results to you
 
 **For Build Failures:**
 
-- Fix compilation errors, missing imports, syntax issues
-- Update dependencies in requirements.txt/package.json
-- Fix configuration files
+```python
+Task({
+    "agent": "build-failure-analyzer",
+    "prompt": f"""Analyze and fix the build failure in {repo}.
+
+Workflow Run ID: {run_id}
+Failed Job: {job_name}
+Failed Step: {step_name}
+
+Error Log:
+{error_log_excerpt}
+
+IMPORTANT: You are working in a shared worktree. The main agent has already created a branch for you:
+- Current branch: {current_branch}
+- DO NOT create a new branch
+- Commit your fixes to this branch
+- Push when done: git push origin HEAD
+
+Instructions:
+1. Verify you're on the correct branch: git branch --show-current
+2. Analyze the build failure
+3. Implement fixes using Read/Write/Edit tools
+4. Test locally with Bash
+5. Commit changes: git add . && git commit -m "fix: ..."
+6. Push: git push origin HEAD
+7. Return a structured summary of your fixes
+"""
+})
+```
 
 **For Test Failures:**
 
-- Fix test logic errors and assertions
-- Update test expectations if API/behavior changed
-- Fix flaky tests (race conditions, timeouts)
-- Run tests locally to verify: `pytest tests/` or `npm test`
+```python
+Task({
+    "agent": "test-failure-analyzer",
+    "prompt": f"""Analyze and fix the test failures in {repo}.
+
+Workflow Run ID: {run_id}
+Failed Tests: {failed_test_names}
+
+Error Log:
+{error_log_excerpt}
+
+IMPORTANT: You are working in a shared worktree. The main agent has already created a branch for you:
+- Current branch: {current_branch}
+- DO NOT create a new branch
+- Commit your fixes to this branch
+- Push when done: git push origin HEAD
+
+Instructions:
+1. Verify you're on the correct branch: git branch --show-current
+2. Analyze the test failures
+3. Implement fixes using Read/Write/Edit tools
+4. Run tests locally to verify
+5. Commit changes: git add . && git commit -m "fix: ..."
+6. Push: git push origin HEAD
+7. Return a structured summary of your fixes
+"""
+})
+```
 
 **For Lint/Type Failures:**
 
-- Use auto-fixers first: `black .`, `isort .`, `ruff check --fix .`
-- Add missing type annotations
-- Fix import order and unused imports
-- Run linters to verify fixes
+```python
+Task({
+    "agent": "lint-failure-analyzer",
+    "prompt": f"""Analyze and fix the linting/type errors in {repo}.
 
-**For Deploy Failures:**
+Workflow Run ID: {run_id}
+Linting Errors: {error_count}
 
-- Fix Dockerfile syntax and paths
-- Update docker-compose.yml environment variables
-- Fix health checks and resource limits
-- Test locally: `docker build -t test .`
+Error Log:
+{error_log_excerpt}
 
-### 5. Commit and Push Changes
+IMPORTANT: You are working in a shared worktree. The main agent has already created a branch for you:
+- Current branch: {current_branch}
+- DO NOT create a new branch
+- Commit your fixes to this branch
+- Push when done: git push origin HEAD
 
-After fixes are implemented:
-
-```bash
-# Stage changes
-git add .
-
-# Commit with descriptive message
-git commit -m "fix: resolve CI failure - [brief description]
-
-- Root cause: [explanation]
-- Changes: [what was fixed]
-- Tested: [how it was verified]
-
-Fixes workflow run #${run_id}"
-
-# Push to current branch (reuses existing branch if you're already on a fix branch)
-git push origin HEAD
+Instructions:
+1. Verify you're on the correct branch: git branch --show-current
+2. Run auto-fixers first (black, isort, ruff, etc.)
+3. Fix remaining issues manually
+4. Verify with linters
+5. Commit changes: git add . && git commit -m "fix: ..."
+6. Push: git push origin HEAD
+7. Return a structured summary of your fixes
+"""
+})
 ```
 
-**Branch Strategy:**
+### Step 5: Create Pull Request
 
-- If you're already on a branch you created (e.g., `fix/ci-failure-*`), push to that branch
-- If you're on the main branch or someone else's branch, create a new branch first:
-  ```bash
-  git checkout -b fix/ci-failure-${run_id}
-  git push origin fix/ci-failure-${run_id}
-  ```
+**After the specialized agent completes and pushes their fixes, YOU create the PR.**
 
-### 6. Post Results to GitHub
+First, determine the target branch (where the failure occurred):
 
-Use GitHub MCP to communicate results:
+```bash
+# The ref is provided in your job context - this is the branch where the failure occurred
+# Extract it from the event data or job context
 
-**Option A: Comment on PR**
+# Option 1: From job_data.ref (preferred - this is what the worktree was created from)
+# The ref format is like "refs/heads/feature-branch" or just "feature-branch"
+target_branch="${ref}"
 
-Use GitHub MCP (NOT gh CLI):
+# Clean up the ref format if needed
+if [[ "$target_branch" == refs/heads/* ]]; then
+    target_branch="${target_branch#refs/heads/}"
+fi
+
+# Option 2: From event_data if available
+if [ -z "$target_branch" ]; then
+    target_branch=$(echo "$event_data" | jq -r '.head_branch // .ref' | sed 's|refs/heads/||')
+fi
+
+# Option 3: Fallback to main only if nothing else works
+if [ -z "$target_branch" ] || [ "$target_branch" == "null" ]; then
+    target_branch="main"
+fi
+
+echo "Target branch for PR: $target_branch"
+```
+
+**CRITICAL:** The `ref` variable in your context tells you which branch the worktree was created from. This is the branch where the CI failure occurred, and it's where your PR should target.
+
+Then create the PR using GitHub MCP:
+
+```python
+current_branch = bash("git branch --show-current").strip()
+
+# Use the ref from job context - this is the branch where the failure occurred
+target_branch = ref.replace("refs/heads/", "") if ref else "main"
+
+mcp__github__create_pull_request({
+    "owner": owner,
+    "repo": repo,
+    "title": f"Fix CI failure from run #{run_id}",
+    "body": f"""## CI Failure Analysis - Run #{run_id}
+
+### Failure Type
+{failure_type}
+
+### Root Cause
+{agent_result.root_cause}
+
+### Changes Made
+{format_changes_list(agent_result.fixes_applied)}
+
+### Files Modified
+{format_files_list(agent_result.fixes_applied)}
+
+### Verification
+{agent_result.verification}
+
+### Prevention Recommendations
+{format_prevention_list(agent_result.prevention)}
+
+---
+🤖 Automated fix by CI Failure Toolkit
+
+**Workflow Run:** https://github.com/{owner}/{repo}/actions/runs/{run_id}
+**Fixed by:** {agent_name}
+**Target Branch:** {target_branch}
+""",
+    "head": current_branch,
+    "base": target_branch  # Use the ref from context, not hardcoded "main"
+})
+```
+
+````
+
+### Step 6: Post Summary Comment
+
+After creating the PR, post a summary comment:
 
 ```python
 mcp__github__add_issue_comment({
     "owner": owner,
     "repo": repo,
     "issue_number": pr_number,
-    "body": summary_comment
+    "body": f"""## ✅ CI Failure Fixed
+
+The CI failure from run #{run_id} has been analyzed and fixed.
+
+### Summary
+- **Failure Type:** {failure_type}
+- **Root Cause:** {agent_result.root_cause}
+- **Files Modified:** {len(agent_result.fixes_applied)}
+- **Branch:** `{current_branch}`
+
+See the PR description for full details.
+
+---
+🤖 CI Failure Toolkit
+"""
+})
+````
+
+## Available Specialized Agents
+
+- **build-failure-analyzer** - Compilation errors, dependencies, configuration
+- **test-failure-analyzer** - Test failures, flaky tests, assertions
+- **lint-failure-analyzer** - Linting, formatting, type errors
+
+All agents have the `git-worktree-workflow` skill and know how to:
+
+- Work in a shared worktree
+- Commit to the branch you created
+- Push their changes
+- Return structured results
+
+## Key GitHub MCP Tools
+
+- `list_workflow_run_jobs` - Get job details
+- `download_workflow_run_logs` - Fetch logs
+- `create_pull_request` - Create PR (YOU do this)
+- `add_issue_comment` - Post comments
+
+## Important Notes
+
+- **You create the branch first** - Before delegating to agents
+- **Agents commit to your branch** - They work in the same worktree
+- **You create the PR** - After all fixes are done
+- **GitHub MCP only** - Use `mcp__github__*` tools, NOT `gh` CLI
+- **Delegate with context** - Provide error logs and clear instructions
+- **Trust the agents** - They have the `git-worktree-workflow` skill
+
+## Complete Example Flow
+
+```bash
+# 0. Check context variables
+echo "Working on ref: $ref"
+echo "Repository: $repo"
+
+# 1. Create branch
+git checkout -b fix/ci-failure-run-12345
+
+# 2. Fetch logs from GitHub (MCP)
+logs = mcp__github__download_workflow_run_logs(...)
+
+# 3. Analyze failure type
+failure_type = analyze_logs(logs)  # "test"
+
+# 4. Delegate to specialist
+result = Task({
+    "agent": "test-failure-analyzer",
+    "prompt": f"Fix test failures. Branch: {current_branch}. Logs: {logs}"
+})
+
+# 5. Agent commits and pushes to your branch
+# (happens automatically in the agent)
+
+# 6. Determine target branch from context
+target_branch = ref.replace("refs/heads/", "") if ref else "main"
+
+# 7. Create PR
+pr = mcp__github__create_pull_request({
+    "head": "fix/ci-failure-run-12345",
+    "base": target_branch,  # Use ref from context, NOT hardcoded "main"
+    "title": "Fix CI failure from run #12345",
+    "body": result.summary
+})
+
+# 8. Post summary
+mcp__github__add_issue_comment({
+    "issue_number": pr.number,
+    "body": "✅ CI failure fixed!"
 })
 ```
 
-**Option B: Create new PR with fixes (only if not already on a fix branch)**
-
-If you created a new branch, open a PR. If you're already on an existing fix branch, skip this step (the PR already exists).
-
-Use GitHub MCP tools (NOT gh CLI):
-
-```python
-# Check current branch first
-current_branch = bash("git branch --show-current")
-
-# Only create PR if this is a new branch (not already a PR)
-if current_branch.startswith("fix/ci-failure-"):
-    # Check if PR already exists for this branch
-    # If not, create one:
-    mcp__github__create_pull_request({
-        "owner": owner,
-        "repo": repo,
-        "title": f"Fix CI failure from run #{run_id}",
-        "body": detailed_description,
-        "head": current_branch,
-        "base": "main"
-    })
-```
-
-### 7. Summary Format
-
-Post a comprehensive summary:
-
-```markdown
-# CI Failure Analysis - Run #${run_id}
-
-## Failure Type
-
-${failure_type}
-
-## Root Cause
-
-${root_cause_explanation}
-
-## Changes Made
-
-- ${change_1}
-- ${change_2}
-- ${change_3}
-
-## Files Modified
-
-- `${file_1}` - ${description}
-- `${file_2}` - ${description}
-
-## Verification
-
-${how_fix_was_tested}
-
-## Prevention
-
-${recommendations_to_prevent_recurrence}
-
----
-
-🤖 Analyzed and fixed by CI Failure Toolkit
-```
-
-## Failure Type Detection
-
-Auto-detect failure type from logs:
-
-**Build failures:**
-
-- Keywords: "compilation error", "build failed", "cannot find module"
-- Exit codes: 1, 2
-- Failed steps: "build", "compile", "install"
-
-**Test failures:**
-
-- Keywords: "test failed", "assertion error", "expected", "actual"
-- Exit codes: 1
-- Failed steps: "test", "pytest", "jest", "mocha"
-
-**Lint failures:**
-
-- Keywords: "lint error", "style violation", "formatting"
-- Exit codes: 1
-- Failed steps: "lint", "format", "style"
-
-**Type failures:**
-
-- Keywords: "type error", "mypy", "typescript error"
-- Exit codes: 1
-- Failed steps: "type-check", "mypy", "tsc"
-
-**Deploy failures:**
-
-- Keywords: "deployment failed", "docker build", "container"
-- Exit codes: 1, 125, 126, 127
-- Failed steps: "deploy", "docker", "push"
-
-## Usage Examples:
+## Usage Examples
 
 **Auto-triggered on workflow failure:**
 
@@ -289,73 +434,23 @@ Auto-detect failure type from logs:
 # Automatically triggers: /ci-failure-toolkit:fix-ci owner/repo 12345
 ```
 
-**Manual trigger with run ID:**
-
-```
-/ci-failure-toolkit:fix-ci owner/repo 12345
-# Analyzes workflow run #12345 and fixes issues
-```
-
-**Manual trigger with PR number:**
-
-```
-/ci-failure-toolkit:fix-ci owner/repo 456
-# Finds failed workflow runs for PR #456 and fixes
-```
-
-**Specific failure type:**
-
-```
-/ci-failure-toolkit:fix-ci owner/repo 12345 test
-# Only analyzes test failures
-
-/ci-failure-toolkit:fix-ci owner/repo 12345 build
-# Only analyzes build failures
-```
-
-## Key GitHub MCP Tools:
-
-- `list_workflow_run_jobs` - Get job details and identify failed steps
-- `download_workflow_run_logs` - Fetch complete error logs
-- `add_issue_comment` - Post analysis results to PR/issue
-- `create_branch` - Create fix branch (if needed)
-- `create_pull_request` - Open PR with fixes (if needed)
-
-## Tips:
-
-- **GitHub MCP only**: Use `mcp__github__*` tools, NOT `gh` CLI (not available)
-- **Auto-triggered**: Runs automatically on CI failures
-- **Root cause focus**: Fix underlying issues, not symptoms
-- **Test locally**: Verify fixes before pushing
-- **Clear commits**: Descriptive commit messages with context
-- **Prevention**: Suggest improvements to prevent recurrence
-
-## Workflow Integration:
-
-**Automatic trigger:**
-
-```
-1. CI workflow fails
-2. GitHub sends workflow_job.completed webhook
-3. Agent analyzes logs and identifies failure
-4. Specialized agent implements fix
-5. Changes committed and pushed
-6. Summary posted to PR/issue
-```
-
 **Manual trigger:**
 
 ```
-1. Developer comments: /fix-ci owner/repo 12345
-2. Agent fetches workflow logs
-3. Analyzes failure and implements fix
-4. Posts results to GitHub
+/ci-failure-toolkit:fix-ci owner/repo 12345
+/ci-failure-toolkit:fix-ci owner/repo 12345 test
 ```
 
-## Notes:
+## Summary
 
-- Agents run in git worktree with direct file system access
-- Each agent specializes in specific failure types
-- Fixes are tested locally before committing
-- GitHub MCP handles all GitHub interactions
-- All agents available in `/agents` list
+Your workflow as orchestrator:
+
+1. ✅ Create branch: `git checkout -b fix/ci-failure-run-{run_id}`
+2. ✅ Fetch logs from GitHub
+3. ✅ Analyze failure type
+4. ✅ Delegate to specialist agent
+5. ✅ Agent commits to your branch
+6. ✅ Create PR: `mcp__github__create_pull_request`
+7. ✅ Post summary comment
+
+Remember: You coordinate, agents implement, you create the PR!

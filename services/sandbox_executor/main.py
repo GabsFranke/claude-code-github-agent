@@ -6,7 +6,7 @@ from pydantic import BaseModel
 
 from shared.logging_utils import setup_logging
 
-from .executor import execute_sandbox_request
+from .sdk_executor import execute_sandbox_request
 
 setup_logging(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
@@ -32,6 +32,9 @@ async def execute(request: ExecutionRequest):
     )
 
     try:
+        # For HTTP endpoint, use current directory as workspace
+        workspace = os.getcwd()
+
         response = await execute_sandbox_request(
             prompt=request.prompt,
             github_token=request.github_token,
@@ -40,6 +43,7 @@ async def execute(request: ExecutionRequest):
             user=request.user,
             auto_review=request.auto_review,
             auto_triage=request.auto_triage,
+            workspace=workspace,
         )
         return {"response": response, "status": "success"}
     except Exception as e:
