@@ -202,58 +202,6 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
             if code != 0:
                 raise WorktreeCreationError(f"Failed to create worktree: {err}")
 
-        # Ensure workspace has correct permissions for bot user
-        # Git worktree may create files with different permissions
-        import subprocess
-
-        try:
-            # First check current permissions
-            ls_result = subprocess.run(
-                ["ls", "-la", workspace],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            logger.info(f"Workspace permissions before chmod:\n{ls_result.stdout}")
-
-            subprocess.run(
-                ["chmod", "-R", "u+rwX", workspace], check=True, capture_output=True
-            )
-
-            # Verify permissions after chmod
-            ls_result_after = subprocess.run(
-                ["ls", "-la", workspace],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            logger.info(f"Workspace permissions after chmod:\n{ls_result_after.stdout}")
-
-            # Test if we can actually read files
-            test_result = subprocess.run(
-                ["find", workspace, "-type", "f", "-print", "-quit"],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if test_result.stdout:
-                test_file = test_result.stdout.strip()
-                read_test = subprocess.run(
-                    ["cat", test_file],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                if read_test.returncode == 0:
-                    logger.info(f"Successfully read test file: {test_file}")
-                else:
-                    logger.error(
-                        f"Failed to read test file {test_file}: {read_test.stderr}"
-                    )
-
-        except subprocess.CalledProcessError as e:
-            logger.warning(f"Failed to set workspace permissions: {e.stderr.decode()}")
-
         # Inject git credentials into the workspace
         # Configure git to use credential helper
         config_code, _, config_err = await execute_git_command(

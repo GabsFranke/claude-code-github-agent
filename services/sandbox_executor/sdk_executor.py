@@ -183,22 +183,22 @@ async def execute_sandbox_request(
 
     # 3. Execute
     logger.info("Starting sandbox SDK execution...")
+    logger.info(f"Model: {model}")
+    logger.info(f"Prompt length: {len(prompt)} characters")
 
     # Only show detailed info if SDK_DEBUG is enabled
     sdk_debug = os.getenv("SDK_DEBUG", "false").lower() == "true"
     if sdk_debug:
-        logger.info(f"Model: {model}")
-        logger.info(f"Prompt length: {len(prompt)} characters")
-        logger.info(f"Prompt preview: {prompt[:200]}...")
-        logger.info(f"Working directory: {working_dir}")
-        logger.info(f"Setting sources: {options.setting_sources}")
-        logger.info(f"Allowed tools: {options.allowed_tools}")
-        logger.info(f"MCP servers configured: {list(mcp_servers.keys())}")
+        logger.debug(f"Prompt preview: {prompt[:200]}...")
+        logger.debug(f"Working directory: {working_dir}")
+        logger.debug(f"Setting sources: {options.setting_sources}")
+        logger.debug(f"Allowed tools: {options.allowed_tools}")
+        logger.debug(f"MCP servers configured: {list(mcp_servers.keys())}")
 
         # Verify we can access the working directory
         try:
             files = os.listdir(working_dir)
-            logger.info(f"Working directory contains {len(files)} items")
+            logger.debug(f"Working directory contains {len(files)} items")
             logger.debug(f"First 10 items: {files[:10]}")
         except Exception as e:
             logger.error(f"Cannot access working directory: {e}")
@@ -208,30 +208,31 @@ async def execute_sandbox_request(
     try:
         async with asyncio.timeout(1800):  # 30 minutes
             async with ClaudeSDKClient(options=options) as client:
-                if sdk_debug:
-                    logger.info("SDK client created, sending query...")
+                logger.info("SDK client created, sending query...")
                 await client.query(prompt)
-                if sdk_debug:
-                    logger.info("Query sent, waiting for messages...")
+                logger.info("Waiting for SDK response...")
 
                 async for message in client.receive_messages():
                     if sdk_debug:
                         logger.debug(f"Received message type: {type(message).__name__}")
 
                     if isinstance(message, AssistantMessage):
+                        logger.info(
+                            f"Received response with {len(message.content)} blocks"
+                        )
                         for block in message.content:
                             if isinstance(block, TextBlock):
                                 response_parts.append(block.text)
                                 if sdk_debug:
                                     logger.debug(
-                                        f"Collected text block: {len(block.text)} chars"
+                                        f"Text block content: {block.text[:200]}..."
                                     )
                     elif isinstance(message, ResultMessage):
                         logger.info(
                             f"SDK completed - {message.num_turns} turns, {message.duration_ms}ms"
                         )
                         if sdk_debug:
-                            logger.info(
+                            logger.debug(
                                 f"ResultMessage details: is_error={message.is_error}, subtype={message.subtype}"
                             )
                         break
@@ -251,11 +252,9 @@ async def execute_sandbox_request(
         raise SDKError(f"Failed to execute Claude Agent SDK in sandbox: {e}") from e
 
     response = "\n".join(response_parts)
-
-    if sdk_debug:
-        logger.info(
-            f"Total response parts collected: {len(response_parts)}, total length: {len(response)} chars"
-        )
+    logger.info(
+        f"Collected {len(response_parts)} response parts, total length: {len(response)} chars"
+    )
 
     if not response or not response.strip():
         raise SDKError("Claude Agent SDK returned empty response in sandbox")
