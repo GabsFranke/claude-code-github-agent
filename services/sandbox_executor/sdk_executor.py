@@ -121,14 +121,45 @@ async def execute_sandbox_request(
     os.environ["CLAUDE_TEMP_DIR"] = working_dir
     os.environ["TMPDIR"] = working_dir
 
+    # Inject GitHub token for tools/plugins to use
+    # The token is passed via execute_sandbox_request parameter and set here
+    # It's also needed by MCP servers defined in plugins
+    os.environ["GITHUB_TOKEN"] = github_token
+
+    # Log token availability for debugging (first/last chars only)
+    if github_token:
+        logger.info(
+            f"GitHub token available: {github_token[:10]}...{github_token[-10:]}"
+        )
+    else:
+        logger.warning("No GitHub token provided to sandbox executor")
+
     # 2. Build Options (Equivalent of MCPConfigurationBuilder)
     mcp_servers = {
         "github": {
             "type": "http",
             "url": "https://api.githubcopilot.com/mcp",
             "headers": {"Authorization": f"Bearer {github_token}"},
-        }
+        },
+        "github-actions": {
+            "type": "stdio",
+            "command": "python",
+            "args": [
+                os.path.expanduser(
+                    "~/.claude/plugins/ci-failure-toolkit/servers/github_actions_server.py"
+                )
+            ],
+            "env": {
+                "PYTHONPATH": os.path.expanduser(
+                    "~/.claude/plugins/ci-failure-toolkit"
+                ),
+                "GITHUB_TOKEN": github_token,
+            },
+        },
     }
+
+    # Plugin MCP servers are auto-discovered from ~/.claude/plugins/*/.mcp.json
+    # via setting_sources=["user", "project", "local"]
 
     hooks = setup_langfuse_hooks()
 
@@ -166,6 +197,7 @@ async def execute_sandbox_request(
             "Grep",
             "Glob",
             "mcp__github__*",
+            "mcp__github-actions__*",  # Allow GitHub Actions tools
         ],
         permission_mode="acceptEdits",
         mcp_servers=mcp_servers,  # type: ignore[arg-type]

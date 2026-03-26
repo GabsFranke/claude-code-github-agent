@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "github-actions": {
+      "command": "python",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/servers/github_actions_server.py"],
+      "env": {
+        "PYTHONPATH": "${CLAUDE_PLUGIN_ROOT}",
+        "GITHUB_TOKEN": "${GITHUB_TOKEN}"
+      }
+    }
+  }
+}

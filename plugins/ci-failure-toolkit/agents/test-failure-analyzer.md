@@ -2,6 +2,7 @@
 description: "Specialist in diagnosing and fixing test failures, flaky tests, assertion errors, and test timeout issues. Use proactively when CI tests fail."
 skills:
   - git-worktree-workflow
+  - python-code-quality
 ---
 
 # Test Failure Analyzer

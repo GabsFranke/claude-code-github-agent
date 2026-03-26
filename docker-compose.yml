@@ -90,6 +90,8 @@ services:
       - REDIS_URL=redis://redis:6379
       - REDIS_PASSWORD=${REDIS_PASSWORD:-myredissecret}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - SDK_DEBUG=${SDK_DEBUG:-false}
     depends_on:
       redis:
         condition: service_healthy

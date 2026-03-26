@@ -13,6 +13,7 @@ allowed-tools:
     "List",
     "Search",
     "mcp__github__*",
+    "mcp__github-actions__*",
   ]
 ---
 
@@ -61,21 +62,37 @@ You are the main coordinator with these responsibilities:
 
 **CRITICAL: Do this FIRST before any other work!**
 
-```bash
-# Create a meaningful branch name
-git checkout -b fix/ci-failure-run-{run_id}
+The worktree starts in detached HEAD state (not on any branch). You must create a branch first.
 
-# Verify branch created
-git branch --show-current
-# Output: fix/ci-failure-run-12345
+```bash
+# Create a unique branch name (use timestamp to avoid conflicts with existing worktrees)
+timestamp=$(date +%s)
+branch_name="fix/ci-failure-run-${run_id}-${timestamp}"
+
+git checkout -b "$branch_name"
+
+# Verify branch created (this will now show the branch name)
+current_branch=$(git branch --show-current)
+echo "Created branch: $current_branch"
 ```
 
 **Why this matters:**
 
+- The worktree starts in detached HEAD (no branch)
+- `git checkout -b` creates a new branch from current HEAD
+- Using timestamp ensures unique branch names (avoids conflicts with existing worktrees)
+- Each job gets its own independent branch
 - All subagents you invoke will work in this same worktree
 - They will see your branch and commit to it
 - This keeps all fixes organized in one branch
 - You'll create a single PR from this branch at the end
+
+**If you get "already used by worktree" error:**
+
+- The branch name is already in use by another worktree
+- This means another job is still running with that branch
+- The timestamp suffix should prevent this, but if it happens, the job will fail
+- This is expected behavior - each job should have a unique branch
 
 ### Step 1: Parse Arguments & Gather Context
 
@@ -87,27 +104,87 @@ Extract from $ARGUMENTS:
 
 ### Step 2: Fetch Workflow Failure Information
 
-**Use GitHub MCP tools, NOT `gh` CLI (not available)**
+**Use the GitHub Actions MCP tools for efficient log access:**
 
-Get job details and identify which step failed:
+The tools are available as MCP tools with the prefix `mcp__github-actions__`:
+
+- `mcp__github-actions__get_workflow_run_summary`
+- `mcp__github-actions__get_failed_steps`
+- `mcp__github-actions__get_job_logs`
+- `mcp__github-actions__search_job_logs`
+
+**Step 2a: Get High-Level Summary (Always start here)**
+
+Use the MCP tool to get workflow summary:
 
 ```python
-mcp__github__list_workflow_run_jobs({
-    "owner": "owner-name",
-    "repo": "repo-name",
-    "run_id": 12345678
-})
+from tools.github_actions import get_workflow_run_summary
+
+summary = await get_workflow_run_summary(
+    owner="owner-name",
+    repo="repo-name",
+    run_id="12345678"
+)
+
+# Returns: run metadata + job list with status (NO logs)
+# Identify which jobs failed: look for conclusion="failure"
 ```
 
-Download complete logs:
+**Step 2b: Get Failed Steps (Most efficient for diagnosis)**
 
 ```python
-mcp__github__download_workflow_run_logs({
-    "owner": "owner-name",
-    "repo": "repo-name",
-    "run_id": 12345678
-})
+from tools.github_actions import get_failed_steps
+
+failed = await get_failed_steps(
+    owner="owner-name",
+    repo="repo-name",
+    job_id="failed_job_id_from_summary",
+    log_lines_per_step=100  # Last 100 lines per failed step
+)
+
+# Returns: Only failed steps with log excerpts
+# This is usually enough to diagnose the issue
 ```
+
+**Step 2c: Get Full Job Logs (Only if needed)**
+
+```python
+from tools.github_actions import get_job_logs
+
+logs = await get_job_logs(
+    owner="owner-name",
+    repo="repo-name",
+    job_id="failed_job_id",
+    max_lines=500  # Optional: limit to last 500 lines
+)
+
+# Returns: Complete job logs
+# Use only if failed steps aren't enough
+```
+
+**Step 2d: Search Logs (For specific errors)**
+
+```python
+from tools.github_actions import search_job_logs
+
+matches = await search_job_logs(
+    owner="owner-name",
+    repo="repo-name",
+    job_id="failed_job_id",
+    pattern="error|exception|failed",  # Regex pattern
+    context_lines=5  # Lines before/after match
+)
+
+# Returns: Only matching lines with context
+# Useful for finding specific errors in long logs
+```
+
+**Recommended Flow:**
+
+1. Start with `get_workflow_run_summary` - identify failed jobs
+2. Use `get_failed_steps` - get failed step logs (usually sufficient)
+3. Only use `get_job_logs` if you need more context
+4. Use `search_job_logs` to find specific error patterns
 
 ### Step 3: Analyze Failure Type
 
@@ -166,14 +243,15 @@ Failed Step: {step_name}
 Error Log:
 {error_log_excerpt}
 
-IMPORTANT: You are working in a shared worktree. The main agent has already created a branch for you:
+IMPORTANT: You are working in a shared worktree. The main agent has already created a branch for you.
 - Current branch: {current_branch}
 - DO NOT create a new branch
+- Verify you're on the correct branch: git branch --show-current
 - Commit your fixes to this branch
 - Push when done: git push origin HEAD
 
 Instructions:
-1. Verify you're on the correct branch: git branch --show-current
+1. Verify you're on the correct branch: git branch --show-current (should show {current_branch})
 2. Analyze the build failure
 3. Implement fixes using Read/Write/Edit tools
 4. Test locally with Bash
@@ -197,14 +275,15 @@ Failed Tests: {failed_test_names}
 Error Log:
 {error_log_excerpt}
 
-IMPORTANT: You are working in a shared worktree. The main agent has already created a branch for you:
+IMPORTANT: You are working in a shared worktree. The main agent has already created a branch for you.
 - Current branch: {current_branch}
 - DO NOT create a new branch
+- Verify you're on the correct branch: git branch --show-current
 - Commit your fixes to this branch
 - Push when done: git push origin HEAD
 
 Instructions:
-1. Verify you're on the correct branch: git branch --show-current
+1. Verify you're on the correct branch: git branch --show-current (should show {current_branch})
 2. Analyze the test failures
 3. Implement fixes using Read/Write/Edit tools
 4. Run tests locally to verify
@@ -228,14 +307,15 @@ Linting Errors: {error_count}
 Error Log:
 {error_log_excerpt}
 
-IMPORTANT: You are working in a shared worktree. The main agent has already created a branch for you:
+IMPORTANT: You are working in a shared worktree. The main agent has already created a branch for you.
 - Current branch: {current_branch}
 - DO NOT create a new branch
+- Verify you're on the correct branch: git branch --show-current
 - Commit your fixes to this branch
 - Push when done: git push origin HEAD
 
 Instructions:
-1. Verify you're on the correct branch: git branch --show-current
+1. Verify you're on the correct branch: git branch --show-current (should show {current_branch})
 2. Run auto-fixers first (black, isort, ruff, etc.)
 3. Fix remaining issues manually
 4. Verify with linters
@@ -366,10 +446,32 @@ All agents have the `git-worktree-workflow` skill and know how to:
 - Push their changes
 - Return structured results
 
-## Key GitHub MCP Tools
+## Key Tools Available
 
-- `list_workflow_run_jobs` - Get job details
-- `download_workflow_run_logs` - Fetch logs
+### GitHub Actions Tools (Progressive Access)
+
+1. **get_workflow_run_summary(owner, repo, run_id)**
+   - High-level overview with job list (no logs)
+   - Use FIRST to identify failed jobs
+   - Fast and token-efficient
+
+2. **get_failed_steps(owner, repo, job_id, log_lines_per_step=100)**
+   - Only failed steps with log excerpts
+   - Most efficient for diagnosis
+   - Usually sufficient to fix issues
+
+3. **get_job_logs(owner, repo, job_id, max_lines=None)**
+   - Full logs for specific job
+   - Use if failed steps aren't enough
+   - Can limit to last N lines
+
+4. **search_job_logs(owner, repo, job_id, pattern, context_lines=5)**
+   - Find specific patterns in logs
+   - Returns matches with context
+   - Useful for long logs
+
+### GitHub MCP Tools
+
 - `create_pull_request` - Create PR (YOU do this)
 - `add_issue_comment` - Post comments
 
@@ -384,41 +486,82 @@ All agents have the `git-worktree-workflow` skill and know how to:
 
 ## Complete Example Flow
 
-```bash
+```python
+from tools.github_actions import (
+    get_workflow_run_summary,
+    get_failed_steps,
+    get_job_logs,
+    search_job_logs
+)
+
 # 0. Check context variables
 echo "Working on ref: $ref"
 echo "Repository: $repo"
 
-# 1. Create branch
-git checkout -b fix/ci-failure-run-12345
+# 1. Create unique branch from detached HEAD (use timestamp to avoid conflicts)
+timestamp=$(date +%s)
+branch_name="fix/ci-failure-run-${run_id}-${timestamp}"
+git checkout -b "$branch_name"
+current_branch=$(git branch --show-current)
+echo "Created branch: $current_branch"
 
-# 2. Fetch logs from GitHub (MCP)
-logs = mcp__github__download_workflow_run_logs(...)
+# 2. Fetch workflow summary (fast, no logs)
+summary = await get_workflow_run_summary(owner, repo, run_id)
 
-# 3. Analyze failure type
-failure_type = analyze_logs(logs)  # "test"
+# 3. Identify failed jobs
+failed_jobs = [j for j in summary["jobs"] if j["conclusion"] == "failure"]
+print(f"Found {len(failed_jobs)} failed jobs")
 
-# 4. Delegate to specialist
+# 4. Get failed steps for first failed job (efficient)
+failed_steps = await get_failed_steps(owner, repo, failed_jobs[0]["id"])
+
+# 5. Analyze failure type from failed steps
+failure_type = analyze_failure_type(failed_steps)  # "test"
+
+# 6. Delegate to specialist with failed step logs
 result = Task({
     "agent": "test-failure-analyzer",
-    "prompt": f"Fix test failures. Branch: {current_branch}. Logs: {logs}"
+    "prompt": f"""Fix test failures in {repo}.
+
+Branch: {current_branch}
+Failed Steps: {failed_steps}
+
+Instructions:
+1. Verify branch: git branch --show-current
+2. Implement fixes
+3. Commit: git add . && git commit -m "fix: ..."
+4. Push: git push origin HEAD
+"""
 })
 
-# 5. Agent commits and pushes to your branch
+# 7. Agent commits and pushes to your branch
 # (happens automatically in the agent)
 
-# 6. Determine target branch from context
+# 8. Determine target branch from context
 target_branch = ref.replace("refs/heads/", "") if ref else "main"
 
-# 7. Create PR
+# 9. Create PR
 pr = mcp__github__create_pull_request({
-    "head": "fix/ci-failure-run-12345",
-    "base": target_branch,  # Use ref from context, NOT hardcoded "main"
-    "title": "Fix CI failure from run #12345",
-    "body": result.summary
+    "head": current_branch,
+    "base": target_branch,
+    "title": f"Fix CI failure from run #{run_id}",
+    "body": f"""## CI Failure Analysis - Run #{run_id}
+
+### Failure Type
+{failure_type}
+
+### Root Cause
+{result.root_cause}
+
+### Changes Made
+{result.fixes_applied}
+
+---
+🤖 Automated fix by CI Failure Toolkit
+"""
 })
 
-# 8. Post summary
+# 10. Post summary
 mcp__github__add_issue_comment({
     "issue_number": pr.number,
     "body": "✅ CI failure fixed!"

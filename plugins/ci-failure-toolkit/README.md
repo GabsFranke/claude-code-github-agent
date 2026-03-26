@@ -6,6 +6,17 @@ Automated CI/CD failure analysis and fixing for GitHub Actions workflows using s
 
 This plugin provides intelligent CI failure analysis and automated fixes through a coordinated system of specialized agents. When a CI workflow fails, the toolkit analyzes logs, identifies the failure type, and delegates to expert agents who implement fixes in isolated git worktrees.
 
+### GitHub Actions MCP Tools
+
+The plugin includes an in-process MCP server that provides efficient access to GitHub Actions workflow data:
+
+- `mcp__github-actions__get_workflow_run_summary` - High-level overview without logs (~1-2KB)
+- `mcp__github-actions__get_failed_steps` - Only failed steps with log excerpts (~5-20KB)
+- `mcp__github-actions__get_job_logs` - Full logs for specific job (variable size, auto-writes to `.ci-logs/`)
+- `mcp__github-actions__search_job_logs` - Search patterns in logs (~2-10KB)
+
+These tools use progressive access strategy to minimize context usage while providing comprehensive failure analysis.
+
 ## Architecture
 
 ### Three-Layer Design

@@ -2,6 +2,7 @@
 description: "Specialist in diagnosing and fixing build failures, compilation errors, dependency issues, and configuration problems. Use proactively when CI builds fail."
 skills:
   - git-worktree-workflow
+  - python-code-quality
 ---
 
 # Build Failure Analyzer
@@ -69,7 +70,7 @@ Use the file operation tools as described in your `git-worktree-workflow` skill:
 - **Read** - Examine build files, dependencies, configuration
 - **Edit** - Make targeted fixes to code
 - **Write** - Update dependency files, configuration
-- **Bash** - Test builds locally
+- **Bash** - Test builds locally (pip, npm, pytest, etc.)
 
 ### 4. Verify Fixes
 
@@ -82,10 +83,9 @@ python -m pytest tests/
 npm install
 npm run build
 npm test
-
-# Docker builds
-docker build -t test-build .
 ```
+
+**Note:** Docker commands are not available. For Docker build issues, analyze Dockerfile and docker-compose.yml statically.
 
 ### 5. Return Structured Results
 
@@ -177,7 +177,9 @@ env:
 
 - Read, Write, Edit - File operations
 - List, Search, Grep - Code exploration
-- Bash - Local testing and verification
+- Bash - Local testing and verification (pip, npm, pytest, etc.)
 - mcp**github**\* - GitHub interactions (see `git-worktree-workflow` skill)
+
+**Note:** Docker commands are not available. For Docker-related issues, use static analysis.
 
 Focus on implementing working fixes that address the root cause. Use your `git-worktree-workflow` skill for all git operations and GitHub interactions.

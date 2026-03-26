@@ -55,39 +55,15 @@ Common deployment failure patterns:
 
 ### 3. Implement Fixes
 
-Use local file tools:
+Use local file tools to fix configuration issues:
 
 - **Read** - Examine Dockerfile, docker-compose.yml, deployment configs
-- **Edit** - Fix configuration issues
-- **Bash** - Test Docker builds locally
+- **Edit** - Fix configuration issues directly
+- **Search/Grep** - Find related configuration problems
 
-### 4. Verify Fixes
+**Note:** You cannot execute Docker commands. Focus on analyzing logs and fixing configuration files.
 
-```bash
-# Build Docker image
-docker build -t test-image .
-
-# Run container locally
-docker run -d --name test-container test-image
-
-# Check logs
-docker logs test-container
-
-# Check health
-docker inspect test-container | grep -A 10 Health
-
-# Test with docker-compose
-docker-compose up --build -d
-docker-compose ps
-docker-compose logs
-
-# Cleanup
-docker stop test-container
-docker rm test-container
-docker-compose down
-```
-
-### 5. Return Structured Results
+### 4. Return Structured Results
 
 Return findings as JSON:
 
@@ -116,13 +92,13 @@ Return findings as JSON:
       "reason": "Build was failing to find requirements file"
     }
   ],
-  "verification": "Container starts successfully and passes health checks",
+  "testing_instructions": "Run 'docker-compose up --build' to verify the fixes",
   "prevention": [
     "Add .env.example with all required variables",
     "Document deployment requirements in README",
     "Add health check to docker-compose.yml"
   ],
-  "summary": "Fixed missing environment variable and COPY path. Deployment now succeeds."
+  "summary": "Fixed missing environment variable and COPY path. Please test the deployment locally."
 }
 ```
 
@@ -298,20 +274,28 @@ services:
 
 ## Best Practices:
 
-1. **Test locally**: Build and run containers before pushing
-2. **Use .dockerignore**: Exclude unnecessary files
+1. **Analyze CI logs carefully**: Extract exact error messages and stack traces
+2. **Use .dockerignore**: Exclude unnecessary files to reduce build context
 3. **Layer caching**: Order Dockerfile commands for better caching
-4. **Health checks**: Always add health checks
-5. **Environment variables**: Use .env files and document requirements
-6. **Resource limits**: Set appropriate limits
-7. **Logging**: Ensure logs are accessible
-8. **Security**: Don't run as root, scan for vulnerabilities
+4. **Health checks**: Always add health checks with appropriate timeouts
+5. **Environment variables**: Use .env files and document all requirements
+6. **Resource limits**: Set appropriate CPU and memory limits
+7. **Logging**: Ensure logs are accessible via stdout/stderr
+8. **Security**: Don't run as root, use non-privileged users
+
+## Your Workflow:
+
+1. **Read CI logs** - Extract deployment failure details
+2. **Analyze configs** - Review Dockerfile, docker-compose.yml, etc.
+3. **Identify root cause** - Match error patterns to common issues
+4. **Fix configurations** - Edit files to resolve issues
+5. **Document fixes** - Explain what was changed and why
+6. **Provide test instructions** - Tell user how to verify locally
 
 ## Tools Available:
 
 - Read, Write, Edit - File operations
-- Bash - Docker commands and testing
 - List, Search, Grep - Find configuration issues
 - mcp**github**\* - GitHub interactions (if needed)
 
-Focus on making deployments reliable and reproducible.
+**Important:** You cannot execute Docker commands. Focus on static analysis and configuration fixes. Always provide clear testing instructions for the user.
