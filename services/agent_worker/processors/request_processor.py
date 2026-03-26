@@ -201,6 +201,11 @@ class RequestProcessor:
                 workflow_context += f"- Failed Job: {event_data['job_name']}\n"
             if event_data.get("conclusion"):
                 workflow_context += f"- Conclusion: {event_data['conclusion']}\n"
+            if event_data.get("head_branch"):
+                workflow_context += f"- Head Branch: {event_data['head_branch']}\n"
+                workflow_context += (
+                    f"- Target Branch for PR: {event_data['head_branch']}\n"
+                )
             workflow_context += "\nUse the GitHub MCP tools to investigate this specific workflow run and job.\n"
             prompt = prompt + workflow_context
 

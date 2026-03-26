@@ -29,14 +29,14 @@ Analyze GitHub Actions workflow failures and coordinate specialized agents to im
 
 **Context Variables Available:**
 
-You have access to these variables from your job context:
+Your prompt includes a `## Workflow Failure Context` section with:
 
-- `ref` - The git ref where the failure occurred (e.g., "refs/heads/feature-branch" or "main")
-- `event_data` - Full event data including run_id, workflow_name, job_name, conclusion
-- `repo` - Repository name (owner/repo)
-- `issue_number` - PR or issue number if applicable
+- `Run ID` - The workflow run ID to analyze
+- `Head Branch` - The branch where the failure occurred (e.g., `feat/ci-fix`)
+- `Target Branch for PR` - **Use this as the `base` when creating your PR**
+- `Workflow Name`, `Failed Job`, `Conclusion` - Additional failure metadata
 
-**CRITICAL:** Use `ref` to determine the target branch for your PR. This is the branch where the CI failure occurred.
+**CRITICAL:** The `Target Branch for PR` field in your context tells you exactly which branch to target with your fix PR. This is the branch where the CI failure occurred. Always use it — never default to `main` or `develop` unless it explicitly says so.
 
 ## Your Role as Orchestrator
 
@@ -330,43 +330,26 @@ Instructions:
 
 **After the specialized agent completes and pushes their fixes, YOU create the PR.**
 
-First, determine the target branch (where the failure occurred):
+First, determine the target branch from the `## Workflow Failure Context` section in your prompt:
 
-```bash
-# The ref is provided in your job context - this is the branch where the failure occurred
-# Extract it from the event data or job context
+```
+## Workflow Failure Context
 
-# Option 1: From job_data.ref (preferred - this is what the worktree was created from)
-# The ref format is like "refs/heads/feature-branch" or just "feature-branch"
-target_branch="${ref}"
-
-# Clean up the ref format if needed
-if [[ "$target_branch" == refs/heads/* ]]; then
-    target_branch="${target_branch#refs/heads/}"
-fi
-
-# Option 2: From event_data if available
-if [ -z "$target_branch" ]; then
-    target_branch=$(echo "$event_data" | jq -r '.head_branch // .ref' | sed 's|refs/heads/||')
-fi
-
-# Option 3: Fallback to main only if nothing else works
-if [ -z "$target_branch" ] || [ "$target_branch" == "null" ]; then
-    target_branch="main"
-fi
-
-echo "Target branch for PR: $target_branch"
+- Run ID: 12345678
+- Head Branch: feat/ci-fix          <-- the branch where CI failed
+- Target Branch for PR: feat/ci-fix  <-- use this as `base` in create_pull_request
 ```
 
-**CRITICAL:** The `ref` variable in your context tells you which branch the worktree was created from. This is the branch where the CI failure occurred, and it's where your PR should target.
+Read the `Target Branch for PR` value directly from that section. Do not guess, do not default to `main` or `develop` unless the field explicitly says so.
 
 Then create the PR using GitHub MCP:
 
 ```python
 current_branch = bash("git branch --show-current").strip()
 
-# Use the ref from job context - this is the branch where the failure occurred
-target_branch = ref.replace("refs/heads/", "") if ref else "main"
+# Read target branch from the "Workflow Failure Context" section injected into your prompt.
+# It appears as: "- Target Branch for PR: feat/ci-fix"
+# Parse it from the context — never default to "main" or "develop" unless stated explicitly.
 
 mcp__github__create_pull_request({
     "owner": owner,
@@ -494,8 +477,8 @@ from tools.github_actions import (
     search_job_logs
 )
 
-# 0. Check context variables
-echo "Working on ref: $ref"
+# 0. Read target branch from the "Workflow Failure Context" section in your prompt
+# Look for: "- Target Branch for PR: <branch>"
 echo "Repository: $repo"
 
 # 1. Create unique branch from detached HEAD (use timestamp to avoid conflicts)
@@ -537,8 +520,8 @@ Instructions:
 # 7. Agent commits and pushes to your branch
 # (happens automatically in the agent)
 
-# 8. Determine target branch from context
-target_branch = ref.replace("refs/heads/", "") if ref else "main"
+# 8. Determine target branch from the "Workflow Failure Context" in the prompt
+# Read "- Target Branch for PR: <branch>" — do NOT default to main/develop
 
 # 9. Create PR
 pr = mcp__github__create_pull_request({
