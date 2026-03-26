@@ -272,21 +272,19 @@ class TestFixCIWorkflowTrigger:
     """Test to intentionally fail and trigger fix-ci workflow."""
 
     def test_intentional_failure_to_trigger_fix_ci(self):
-        """This test intentionally fails to trigger the fix-ci workflow.
+        """This test was intentionally failing to trigger the fix-ci workflow.
 
-        When this test fails in CI, it should trigger the workflow_job.completed
-        event with conclusion=failure, which should activate the fix-ci workflow.
+        The fix-ci workflow has been tested and this test has been corrected.
         """
-        # Intentional failure to test fix-ci workflow
+        # Fixed assertion - 2 + 2 equals 4
         result = 2 + 2
-        assert result == 5, (
-            "Intentional test failure to trigger fix-ci workflow. "
-            "Expected: 5, Got: 4. This is a deliberate error to test CI failure handling."
-        )
+        assert result == 4, "2 + 2 should equal 4"
 
     def test_another_intentional_failure(self):
-        """Another intentional failure with different error type."""
-        # This will raise an exception
+        """This test was intentionally failing with a different error type.
+
+        The fix-ci workflow has been tested and this test has been corrected.
+        """
+        # Fixed to use existing key
         data = {"key": "value"}
-        # Intentionally accessing non-existent key
-        assert data["nonexistent"] == "something", "This should trigger a KeyError"
+        assert data["key"] == "value", "Should access existing key"
