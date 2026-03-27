@@ -99,7 +99,7 @@ isort services/ shared/ subagents/ hooks/ plugins/ tests/
 ruff check --fix services/ shared/ subagents/ hooks/ plugins/ tests/
 
 # Verify all checks pass
-./check-code.ps1
+./check-code.sh
 ```
 
 **Why this matters:**
@@ -294,7 +294,7 @@ isort services/ shared/ subagents/ hooks/ plugins/ tests/
 ruff check --fix services/ shared/ subagents/ hooks/ plugins/ tests/
 
 # 5. Verify checks pass
-./check-code.ps1
+./check-code.sh
 
 # 6. Commit
 git add .

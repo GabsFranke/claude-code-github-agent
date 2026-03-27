@@ -9,7 +9,7 @@ It's automatically discovered and loaded by the Claude Agent SDK plugin system.
 import asyncio
 import json
 import sys
-from typing import Any, Dict
+from typing import Any
 
 from tools.github_actions import (
     get_failed_steps,
@@ -19,7 +19,7 @@ from tools.github_actions import (
 )
 
 
-async def handle_request(request: Dict[str, Any]) -> Dict[str, Any]:
+async def handle_request(request: dict[str, Any]) -> dict[str, Any]:
     """Handle MCP tool requests."""
     method = request.get("method")
     params = request.get("params", {})
@@ -318,7 +318,7 @@ async def main():
             response = await handle_request(request)
 
             # Build proper JSON-RPC 2.0 response
-            output: Dict[str, Any] = {"jsonrpc": "2.0", "id": request.get("id")}
+            output: dict[str, Any] = {"jsonrpc": "2.0", "id": request.get("id")}
             if "error" in response:
                 output["error"] = response["error"]
             else:

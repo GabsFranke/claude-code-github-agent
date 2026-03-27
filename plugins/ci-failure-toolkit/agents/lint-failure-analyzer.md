@@ -85,7 +85,7 @@ isort services/ shared/ subagents/ hooks/ plugins/ tests/
 ruff check --fix services/ shared/ subagents/ hooks/ plugins/ tests/
 
 # 4. Verify all checks pass
-./check-code.ps1
+./check-code.sh
 ```
 
 **CRITICAL:** Always run these commands in this exact order. See the `python-code-quality` skill for details.
@@ -284,7 +284,7 @@ cat Makefile | grep -E "^lint|^format"
 # Run project-specific commands
 npm run lint:fix
 make format
-./check-code.ps1 -Fix
+./check-code.sh --fix
 ```
 
 ## Best Practices:

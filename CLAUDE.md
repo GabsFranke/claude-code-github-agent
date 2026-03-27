@@ -66,13 +66,13 @@ When making changes to this codebase:
 
 ```bash
 # Run all checks (formatting, linting, type checking)
-./check-code.ps1
+./check-code.sh
 
 # Auto-fix formatting and imports
-./check-code.ps1 -Fix
+./check-code.sh --fix
 
 # Fast mode (skip mypy)
-./check-code.ps1 -Fast
+./check-code.sh --fast
 ```
 
 ## Project Structure
@@ -191,7 +191,6 @@ Key environment variables available to you:
 - `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` - Observability (optional)
 - `CLAUDE_TEMP_DIR` - Set to your workspace directory
 - `TMPDIR` - Set to your workspace directory
-
 
 ## Security Considerations
 

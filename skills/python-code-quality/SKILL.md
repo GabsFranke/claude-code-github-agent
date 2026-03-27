@@ -21,26 +21,26 @@ All code must pass these checks before being committed.
 
 ## Quick Fix Command
 
-The project has a PowerShell script for code quality checks:
+The project has a bash script for code quality checks:
 
 ```bash
 # Check code quality (read-only)
-./check-code.ps1
+./check-code.sh
 
 # Auto-fix formatting and imports
-./check-code.ps1 -Fix
+./check-code.sh --fix
 
 # Fast mode (skip mypy)
-./check-code.ps1 -Fast
+./check-code.sh --fast
 
 # Skip type checking
-./check-code.ps1 -SkipMypy
+./check-code.sh --skip-mypy
 
 # Verbose output
-./check-code.ps1 -Verbose
+./check-code.sh --verbose
 ```
 
-**For CI fixes, always run with `-Fix` to auto-fix issues before committing.**
+**For CI fixes, always run with `--fix` to auto-fix issues before committing.**
 
 ## Automated Fixing
 
@@ -67,7 +67,7 @@ After auto-fixing, verify all checks pass:
 
 ```bash
 # Run all checks
-./check-code.ps1
+./check-code.sh
 
 # Or manually:
 black --check services/ shared/ subagents/ hooks/ plugins/ tests/
@@ -222,7 +222,7 @@ When fixing CI lint failures:
 2. **Verify fixes:**
 
    ```bash
-   ./check-code.ps1
+   ./check-code.sh
    ```
 
 3. **Fix remaining issues manually** (if any)
@@ -250,7 +250,8 @@ The project uses these configuration files:
 
 - **pyproject.toml** - Black, isort, mypy, pytest, ruff configuration
 - **.flake8** - Flake8 configuration
-- **check-code.ps1** - Automated quality check script
+- **check-code.sh** - Automated quality check script (bash)
+- **check-code.ps1** - Automated quality check script (PowerShell, for Windows)
 
 **Do not modify these files** unless you're updating project-wide standards.
 
@@ -316,7 +317,7 @@ def process(data: Any) -> Any:
 ## Best Practices
 
 1. **Always run auto-fixers first** - Don't manually format code
-2. **Use the check-code.ps1 script** - It runs all checks in the right order
+2. **Use the check-code.sh script** - It runs all checks in the right order
 3. **Fix issues before committing** - Don't push code that fails checks
 4. **Add type hints** - Help mypy catch errors early
 5. **Follow async patterns** - Use async/await for I/O operations
@@ -334,7 +335,7 @@ isort services/ shared/ subagents/ hooks/ plugins/ tests/
 ruff check --fix services/ shared/ subagents/ hooks/ plugins/ tests/
 
 # 2. Verify
-./check-code.ps1
+./check-code.sh
 
 # 3. Commit and push
 git add .
