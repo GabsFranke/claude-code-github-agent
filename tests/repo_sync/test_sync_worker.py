@@ -182,11 +182,26 @@ class TestProcessSyncRequest:
 
                 await process_sync_request(message, mock_redis)
 
-                # Verify clone was attempted
-                mock_git.assert_called_once()
-                call_args = mock_git.call_args[0][0]
-                assert "git clone --bare" in call_args
-                assert "owner/repo.git" in call_args
+                # Verify 3 git commands were called for new repo clone:
+                # 1. git clone --bare
+                # 2. git config remote.origin.fetch
+                # 3. git fetch origin (all refs)
+                assert mock_git.call_count == 3
+
+                # First call: clone
+                first_call_args = mock_git.call_args_list[0][0][0]
+                assert "git clone --bare" in first_call_args
+                assert "owner/repo.git" in first_call_args
+
+                # Second call: configure fetch refspec
+                second_call_args = mock_git.call_args_list[1][0][0]
+                assert "git --git-dir=" in second_call_args
+                assert "config remote.origin.fetch" in second_call_args
+
+                # Third call: fetch all refs
+                third_call_args = mock_git.call_args_list[2][0][0]
+                assert "git --git-dir=" in third_call_args
+                assert "fetch origin" in third_call_args
 
                 # Verify completion signal was set
                 mock_redis.set.assert_called_once()
@@ -332,12 +347,27 @@ class TestProcessSyncRequest:
 
             await process_sync_request(message, mock_redis)
 
-            # Verify clone was attempted without token
-            mock_git.assert_called_once()
-            call_args = mock_git.call_args[0][0]
-            assert "git clone --bare" in call_args
-            assert "https://github.com/owner/repo.git" in call_args
-            assert "x-access-token" not in call_args
+            # Verify 3 git commands were called for new repo clone:
+            # 1. git clone --bare (without token)
+            # 2. git config remote.origin.fetch
+            # 3. git fetch origin (all refs)
+            assert mock_git.call_count == 3
+
+            # First call: clone without token
+            first_call_args = mock_git.call_args_list[0][0][0]
+            assert "git clone --bare" in first_call_args
+            assert "https://github.com/owner/repo.git" in first_call_args
+            assert "x-access-token" not in first_call_args
+
+            # Second call: configure fetch refspec
+            second_call_args = mock_git.call_args_list[1][0][0]
+            assert "git --git-dir=" in second_call_args
+            assert "config remote.origin.fetch" in second_call_args
+
+            # Third call: fetch all refs
+            third_call_args = mock_git.call_args_list[2][0][0]
+            assert "git --git-dir=" in third_call_args
+            assert "fetch origin" in third_call_args
 
     @pytest.mark.asyncio
     async def test_exception_handling(self):
