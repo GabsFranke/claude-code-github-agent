@@ -182,7 +182,7 @@ class RequestProcessor:
         await sync_queue.publish({"repo": repo, "ref": ref or "main"})
 
         # Build prompt using workflow engine
-        prompt = self.workflow_engine.build_prompt(
+        prompt, system_context = self.workflow_engine.build_prompt(
             workflow_name=workflow_name,
             repo=repo,
             issue_number=issue_number,
@@ -237,6 +237,7 @@ class RequestProcessor:
                 "issue_number": issue_number,
                 "ref": final_ref,
                 "prompt": prompt,
+                "system_context": system_context,
                 "github_token": github_token,
                 "user": user,
                 "workflow_name": workflow_name,

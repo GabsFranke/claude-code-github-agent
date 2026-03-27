@@ -72,7 +72,7 @@ class TestFixCIWorkflow:
 
     def test_fix_ci_build_prompt(self, engine):
         """Test building prompt for fix-ci workflow."""
-        prompt = engine.build_prompt(
+        prompt, system_context = engine.build_prompt(
             workflow_name="fix-ci",
             repo="owner/test-repo",
             issue_number=12345,
@@ -82,6 +82,8 @@ class TestFixCIWorkflow:
         assert "/ci-failure-toolkit:fix-ci" in prompt
         assert "owner/test-repo" in prompt
         assert "12345" in prompt
+        assert system_context is not None
+        assert "CI/CD" in system_context
 
     def test_fix_ci_workflow_description(self, engine):
         """Test that fix-ci has a proper description."""
@@ -181,7 +183,7 @@ class TestFixCIPromptGeneration:
 
     def test_fix_ci_prompt_with_run_id(self, engine):
         """Test prompt generation with workflow run ID."""
-        prompt = engine.build_prompt(
+        prompt, system_context = engine.build_prompt(
             workflow_name="fix-ci",
             repo="owner/repo",
             issue_number=67890,  # This would be the run_id
@@ -190,10 +192,11 @@ class TestFixCIPromptGeneration:
         assert "/ci-failure-toolkit:fix-ci" in prompt
         assert "owner/repo" in prompt
         assert "67890" in prompt
+        assert system_context is not None
 
     def test_fix_ci_prompt_with_pr_number(self, engine):
         """Test prompt generation with PR number."""
-        prompt = engine.build_prompt(
+        prompt, system_context = engine.build_prompt(
             workflow_name="fix-ci",
             repo="owner/repo",
             issue_number=123,  # This would be the PR number
@@ -201,11 +204,12 @@ class TestFixCIPromptGeneration:
 
         assert "/ci-failure-toolkit:fix-ci" in prompt
         assert "owner/repo" in prompt
+        assert system_context is not None
         assert "123" in prompt
 
     def test_fix_ci_prompt_includes_system_context(self, engine):
         """Test that fix-ci prompt includes system context from file."""
-        prompt = engine.build_prompt(
+        prompt, system_context = engine.build_prompt(
             workflow_name="fix-ci",
             repo="test/repo",
             issue_number=999,
@@ -214,6 +218,9 @@ class TestFixCIPromptGeneration:
         # The prompt should include content from prompts/fix-ci.md
         # This will depend on whether the file exists
         assert len(prompt) > 0
+        assert "/ci-failure-toolkit:fix-ci" in prompt
+        assert system_context is not None
+        assert "CI/CD" in system_context
         assert "/ci-failure-toolkit:fix-ci" in prompt
 
 

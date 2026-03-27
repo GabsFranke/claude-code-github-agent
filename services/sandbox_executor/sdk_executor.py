@@ -109,6 +109,7 @@ async def execute_sandbox_request(
     auto_review: bool,
     auto_triage: bool,
     workspace: str,  # Add workspace parameter
+    system_context: str | None = None,  # Add system context parameter
 ) -> str:
     """Execute the Claude Agent SDK inside the sandbox"""
 
@@ -211,6 +212,7 @@ async def execute_sandbox_request(
         hooks=hooks,
         cwd=working_dir,  # Set working directory for SDK operations
         stderr=stderr_callback,  # Capture stderr output for debugging
+        system_prompt=system_context,  # Add system context as system prompt
     )
 
     # 3. Execute

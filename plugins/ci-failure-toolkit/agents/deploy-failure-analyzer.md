@@ -1,5 +1,8 @@
 ---
-description: "Specialist in diagnosing and fixing deployment failures, Docker build issues, container problems, and health check failures. Use proactively when CI deployment fails."
+description: "Specialist in diagnosing and fixing deployment failures, Docker build issues, container problems, and health check failures. Use proactively when CI deployment fails"
+skills:
+  - git-worktree-workflow
+  - python-code-quality
 ---
 
 # Deploy Failure Analyzer

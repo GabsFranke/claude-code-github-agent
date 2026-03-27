@@ -271,7 +271,7 @@ class WorkflowEngine:
         issue_number: int | None = None,
         user_query: str = "",
         **kwargs: Any,
-    ) -> str:
+    ) -> tuple[str, str | None]:
         """Build the final prompt for Claude Agent SDK.
 
         Args:
@@ -282,7 +282,7 @@ class WorkflowEngine:
             **kwargs: Additional template variables
 
         Returns:
-            Complete prompt string for client.query()
+            Tuple of (user_prompt, system_context) for client.query()
         """
         if workflow_name not in self.workflows:
             raise ValueError(f"Unknown workflow: {workflow_name}")
@@ -329,8 +329,10 @@ class WorkflowEngine:
                 f"Invalid template in workflow '{workflow_name}': {e}"
             ) from e
 
-        # Add system context if defined
+        # Load system context if defined
         system_context = workflow.prompt.system_context
+        final_system_context = None
+
         if system_context:
             # Check if it's a file reference (ends with .md)
             if system_context.endswith(".md"):
@@ -372,7 +374,7 @@ class WorkflowEngine:
             # Fill system context with variables if it's not empty
             if system_context:
                 try:
-                    system_context = system_context.format(
+                    final_system_context = system_context.format(
                         repo=repo,
                         issue_number=issue_number or "",
                         **kwargs,
@@ -382,14 +384,16 @@ class WorkflowEngine:
                         f"Error formatting system context in workflow '{workflow_name}': {e}"
                     )
                     # Continue without formatted system context
-                    pass
+                    final_system_context = None
 
-                # Combine: prompt + system_context + user_query
-                if user_query:
-                    return f"{prompt} {system_context}. {user_query}"
-                return f"{prompt} {system_context}"
+        # Combine prompt with user_query if provided and not already in template
+        # Only append user_query if the template doesn't use it
+        if user_query and "{user_query}" not in workflow.prompt.template:
+            final_prompt = f"{prompt}. {user_query}"
+        else:
+            final_prompt = prompt
 
-        return str(prompt)
+        return (final_prompt, final_system_context)
 
     def list_workflows(self) -> dict[str, str]:
         """List all available workflows.

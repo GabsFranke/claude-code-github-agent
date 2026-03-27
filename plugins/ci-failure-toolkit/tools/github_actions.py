@@ -6,49 +6,13 @@ Provides progressive access to workflow run data:
 2. Job logs - Full logs for specific job
 3. Search - Find specific patterns in logs
 4. Failed steps - Extract only failed step logs
-
-For large outputs, automatically writes to temporary files.
 """
 
 import os
 import re
-from pathlib import Path
 from typing import Any
 
 import httpx
-
-# Threshold for writing to file (characters)
-MAX_INLINE_SIZE = 10000  # ~10KB
-
-
-def _maybe_write_to_file(content: str, prefix: str) -> dict[str, Any]:
-    """
-    Write content to file if it exceeds size threshold.
-
-    Returns dict with either inline content or file path.
-    """
-    if len(content) <= MAX_INLINE_SIZE:
-        return {"content": content, "truncated": False}
-
-    # Write to temporary file in workspace
-    workspace = os.getcwd()
-    temp_dir = Path(workspace) / ".ci-logs"
-    temp_dir.mkdir(exist_ok=True)
-
-    # Create file with descriptive name
-    temp_file = temp_dir / f"{prefix}_{os.getpid()}.log"
-    temp_file.write_text(content, encoding="utf-8")
-
-    # Return file path and preview
-    preview = content[:1000] + "\n\n... (content too large, written to file) ..."
-
-    return {
-        "content": preview,
-        "file_path": str(temp_file),
-        "full_size": len(content),
-        "truncated": True,
-        "note": f"Full content written to {temp_file} ({len(content)} chars)",
-    }
 
 
 async def get_workflow_run_summary(
@@ -164,7 +128,6 @@ async def get_job_logs(
         logs_text = logs_resp.text
 
         # Optionally limit to last N lines
-        original_size = len(logs_text)
         if max_lines:
             lines = logs_text.split("\n")
             if len(lines) > max_lines:
@@ -174,19 +137,12 @@ async def get_job_logs(
                     + logs_text
                 )
 
-        # Write to file if too large
-        logs_result = _maybe_write_to_file(logs_text, f"job_{job_id}_logs")
-
         return {
             "job_id": job_data["id"],
             "job_name": job_data["name"],
             "status": job_data["status"],
             "conclusion": job_data.get("conclusion"),
-            "logs": logs_result["content"],
-            "logs_file": logs_result.get("file_path"),
-            "logs_truncated": logs_result["truncated"]
-            or (max_lines is not None and original_size > len(logs_text)),
-            "original_size": original_size,
+            "logs": logs_text,
         }
 
 

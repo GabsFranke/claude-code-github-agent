@@ -90,7 +90,9 @@ class TestRequestProcessorExecution:
                 mock_get_queue.return_value = mock_sync_queue
 
                 mock_engine = MagicMock()
-                mock_engine.build_prompt = MagicMock(return_value="Review PR prompt")
+                mock_engine.build_prompt = MagicMock(
+                    return_value=("Review PR prompt", None)
+                )
                 mock_engine.workflows = {
                     "review-pr": MagicMock()
                 }  # Add workflow to dict
@@ -131,7 +133,9 @@ class TestRequestProcessorExecution:
                 mock_get_queue.return_value = mock_sync_queue
 
                 mock_engine = MagicMock()
-                mock_engine.build_prompt = MagicMock(return_value="Generic prompt")
+                mock_engine.build_prompt = MagicMock(
+                    return_value=("Generic prompt", None)
+                )
                 mock_engine.workflows = {"generic": MagicMock()}  # Add workflow to dict
                 mock_engine_class.return_value = mock_engine
 
@@ -167,7 +171,7 @@ class TestRequestProcessorExecution:
                 mock_get_queue.return_value = mock_sync_queue
 
                 mock_engine = MagicMock()
-                mock_engine.build_prompt = MagicMock(return_value="Test prompt")
+                mock_engine.build_prompt = MagicMock(return_value=("Test prompt", None))
                 mock_engine.workflows = {"generic": MagicMock()}  # Add workflow to dict
                 mock_engine_class.return_value = mock_engine
 
@@ -236,7 +240,7 @@ class TestRequestProcessorExecution:
                 mock_get_queue.return_value = mock_sync_queue
 
                 mock_engine = MagicMock()
-                mock_engine.build_prompt = MagicMock(return_value="Test prompt")
+                mock_engine.build_prompt = MagicMock(return_value=("Test prompt", None))
                 mock_engine.workflows = {"generic": MagicMock()}  # Add workflow to dict
                 mock_engine_class.return_value = mock_engine
 
@@ -282,7 +286,7 @@ class TestRequestProcessorExecution:
                 mock_get_queue.return_value = mock_sync_queue
 
                 mock_engine = MagicMock()
-                mock_engine.build_prompt = MagicMock(return_value="Test prompt")
+                mock_engine.build_prompt = MagicMock(return_value=("Test prompt", None))
                 mock_engine.workflows = {"generic": MagicMock()}  # Add workflow to dict
                 mock_engine_class.return_value = mock_engine
 

@@ -1,4 +1,4 @@
-Analyze the issue and add appropriate labels (bug, enhancement, documentation, question, etc.).
+Analyze issue #{issue_number} in {repo} and add appropriate labels (bug, enhancement, documentation, question, etc.).
 
 Assess:
 

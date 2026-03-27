@@ -244,6 +244,7 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
                 auto_review=job_data.get("auto_review", False),
                 auto_triage=job_data.get("auto_triage", False),
                 workspace=workspace,  # Pass workspace explicitly
+                system_context=job_data.get("system_context"),  # Pass system context
             )
         finally:
             # Restore original directory
