@@ -3,7 +3,7 @@
 import os
 import sys
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 import pytest
@@ -88,15 +88,15 @@ class TestGetWorkflowRunSummary:
             mock_instance = AsyncMock()
             mock_client.return_value.__aenter__.return_value = mock_instance
 
-            # Mock run response
-            mock_run_resp = AsyncMock()
-            mock_run_resp.json.return_value = mock_run_data
-            mock_run_resp.raise_for_status = AsyncMock()
+            # Mock run response - use Mock for .json() and .raise_for_status() since they're sync
+            mock_run_resp = Mock()
+            mock_run_resp.json = Mock(return_value=mock_run_data)
+            mock_run_resp.raise_for_status = Mock()
 
-            # Mock jobs response
-            mock_jobs_resp = AsyncMock()
-            mock_jobs_resp.json.return_value = mock_jobs_data
-            mock_jobs_resp.raise_for_status = AsyncMock()
+            # Mock jobs response - use Mock for .json() and .raise_for_status() since they're sync
+            mock_jobs_resp = Mock()
+            mock_jobs_resp.json = Mock(return_value=mock_jobs_data)
+            mock_jobs_resp.raise_for_status = Mock()
 
             mock_instance.get.side_effect = [mock_run_resp, mock_jobs_resp]
 
@@ -117,11 +117,11 @@ class TestGetWorkflowRunSummary:
             mock_instance = AsyncMock()
             mock_client.return_value.__aenter__.return_value = mock_instance
 
-            mock_resp = AsyncMock()
+            mock_resp = Mock()
             mock_resp.raise_for_status.side_effect = httpx.HTTPStatusError(
                 "404 Not Found",
-                request=AsyncMock(),
-                response=AsyncMock(status_code=404),
+                request=Mock(),
+                response=Mock(status_code=404),
             )
             mock_instance.get.return_value = mock_resp
 
@@ -149,9 +149,9 @@ class TestGetJobLogsRaw:
             mock_instance = AsyncMock()
             mock_client.return_value.__aenter__.return_value = mock_instance
 
-            mock_resp = AsyncMock()
-            mock_resp.text = mock_logs
-            mock_resp.raise_for_status = AsyncMock()
+            mock_resp = Mock()
+            type(mock_resp).text = mock_logs
+            mock_resp.raise_for_status = Mock()
             mock_instance.get.return_value = mock_resp
 
             # Get first 500 lines
@@ -186,9 +186,9 @@ class TestGetJobLogsRaw:
             mock_instance = AsyncMock()
             mock_client.return_value.__aenter__.return_value = mock_instance
 
-            mock_resp = AsyncMock()
-            mock_resp.text = mock_logs
-            mock_resp.raise_for_status = AsyncMock()
+            mock_resp = Mock()
+            type(mock_resp).text = mock_logs
+            mock_resp.raise_for_status = Mock()
             mock_instance.get.return_value = mock_resp
 
             result = await get_job_logs_raw("owner", "repo", "123")
@@ -216,9 +216,9 @@ class TestSearchJobLogs:
             mock_instance = AsyncMock()
             mock_client.return_value.__aenter__.return_value = mock_instance
 
-            mock_resp = AsyncMock()
-            mock_resp.text = mock_logs
-            mock_resp.raise_for_status = AsyncMock()
+            mock_resp = Mock()
+            type(mock_resp).text = mock_logs
+            mock_resp.raise_for_status = Mock()
             mock_instance.get.return_value = mock_resp
 
             result = await search_job_logs(
@@ -240,9 +240,9 @@ class TestSearchJobLogs:
             mock_instance = AsyncMock()
             mock_client.return_value.__aenter__.return_value = mock_instance
 
-            mock_resp = AsyncMock()
-            mock_resp.text = mock_logs
-            mock_resp.raise_for_status = AsyncMock()
+            mock_resp = Mock()
+            type(mock_resp).text = mock_logs
+            mock_resp.raise_for_status = Mock()
             mock_instance.get.return_value = mock_resp
 
             result = await search_job_logs(
@@ -261,9 +261,9 @@ class TestSearchJobLogs:
             mock_instance = AsyncMock()
             mock_client.return_value.__aenter__.return_value = mock_instance
 
-            mock_resp = AsyncMock()
-            mock_resp.text = mock_logs
-            mock_resp.raise_for_status = AsyncMock()
+            mock_resp = Mock()
+            type(mock_resp).text = mock_logs
+            mock_resp.raise_for_status = Mock()
             mock_instance.get.return_value = mock_resp
 
             result = await search_job_logs(
@@ -287,9 +287,9 @@ class TestSearchJobLogs:
             mock_instance = AsyncMock()
             mock_client.return_value.__aenter__.return_value = mock_instance
 
-            mock_resp = AsyncMock()
-            mock_resp.text = mock_logs
-            mock_resp.raise_for_status = AsyncMock()
+            mock_resp = Mock()
+            type(mock_resp).text = mock_logs
+            mock_resp.raise_for_status = Mock()
             mock_instance.get.return_value = mock_resp
 
             result = await search_job_logs("owner", "repo", "123", "ERROR")
@@ -349,15 +349,15 @@ class TestGetFailedSteps:
             mock_instance = AsyncMock()
             mock_client.return_value.__aenter__.return_value = mock_instance
 
-            # Mock job response
-            mock_job_resp = AsyncMock()
-            mock_job_resp.json.return_value = mock_job_data
-            mock_job_resp.raise_for_status = AsyncMock()
+            # Mock job response - use Mock for .json() and .raise_for_status() since they're sync
+            mock_job_resp = Mock()
+            mock_job_resp.json = Mock(return_value=mock_job_data)
+            mock_job_resp.raise_for_status = Mock()
 
-            # Mock logs response
-            mock_logs_resp = AsyncMock()
-            mock_logs_resp.text = mock_logs
-            mock_logs_resp.raise_for_status = AsyncMock()
+            # Mock logs response - use type() for .text property and Mock for .raise_for_status()
+            mock_logs_resp = Mock()
+            type(mock_logs_resp).text = mock_logs
+            mock_logs_resp.raise_for_status = Mock()
 
             mock_instance.get.side_effect = [mock_job_resp, mock_logs_resp]
 
@@ -398,13 +398,13 @@ class TestGetFailedSteps:
             mock_instance = AsyncMock()
             mock_client.return_value.__aenter__.return_value = mock_instance
 
-            mock_job_resp = AsyncMock()
-            mock_job_resp.json.return_value = mock_job_data
-            mock_job_resp.raise_for_status = AsyncMock()
+            mock_job_resp = Mock()
+            mock_job_resp.json = Mock(return_value=mock_job_data)
+            mock_job_resp.raise_for_status = Mock()
 
-            mock_logs_resp = AsyncMock()
-            mock_logs_resp.text = mock_logs
-            mock_logs_resp.raise_for_status = AsyncMock()
+            mock_logs_resp = Mock()
+            type(mock_logs_resp).text = mock_logs
+            mock_logs_resp.raise_for_status = Mock()
 
             mock_instance.get.side_effect = [mock_job_resp, mock_logs_resp]
 
