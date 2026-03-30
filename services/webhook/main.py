@@ -260,23 +260,21 @@ async def webhook(request: Request):
             user = data.get("issue", {}).get("user", {}).get("login", "unknown")
 
         # Check if we should skip events from the bot itself
-        if workflow_engine.should_skip_self(workflow_name):
-            # Check various sources for the actor/sender
-            sender = data.get("sender", {}).get("login", "")
-            pr_user = data.get("pull_request", {}).get("user", {}).get("login", "")
-            issue_user = data.get("issue", {}).get("user", {}).get("login", "")
+        # The 'sender' field in GitHub webhooks is always the user who triggered the event
+        event_actor = data.get("sender", {}).get("login", "")
+        bot_username = config.webhook_bot_username
 
-            # Check if any of these match the bot username
-            bot_username = config.webhook_bot_username
-            if bot_username and bot_username in [sender, pr_user, issue_user, user]:
-                logger.info(
-                    f"Skipping workflow '{workflow_name}' - event triggered by bot itself "
-                    f"(user: {user}, sender: {sender}, skip_self: true)"
-                )
-                return {
-                    "status": "ignored",
-                    "message": f"Skipping event from bot itself (skip_self enabled for workflow '{workflow_name}')",
-                }
+        if bot_username and workflow_engine.should_skip_self(
+            workflow_name, event_actor, bot_username
+        ):
+            logger.info(
+                f"Skipping workflow '{workflow_name}' - event triggered by bot itself "
+                f"(actor: {event_actor}, skip_self: true)"
+            )
+            return {
+                "status": "ignored",
+                "message": f"Skipping event from bot itself (skip_self enabled for workflow '{workflow_name}')",
+            }
 
         # Queue agent job with event data
         job = {

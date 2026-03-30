@@ -239,19 +239,26 @@ class WorkflowEngine:
 
         return None
 
-    def should_skip_self(self, workflow_name: str) -> bool:
+    def should_skip_self(
+        self, workflow_name: str, event_actor: str, bot_username: str
+    ) -> bool:
         """Check if workflow should skip events from the bot itself.
 
         Args:
             workflow_name: Name of the workflow
+            event_actor: GitHub username who triggered the event (from webhook sender)
+            bot_username: The bot's GitHub username
 
         Returns:
-            True if events from bot should be skipped, False otherwise
+            True if event should be skipped (actor is bot and skip_self=true), False otherwise
         """
         if workflow_name not in self.workflows:
             return True  # Default to skipping if workflow not found
 
-        return self.workflows[workflow_name].skip_self
+        workflow = self.workflows[workflow_name]
+
+        # Skip only if skip_self is enabled AND the event actor is the bot
+        return workflow.skip_self and event_actor == bot_username
 
     def get_workflow_for_command(self, command: str) -> str | None:
         """Get workflow name for a user command.

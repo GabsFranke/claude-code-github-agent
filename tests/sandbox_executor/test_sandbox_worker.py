@@ -326,7 +326,7 @@ class TestMainLoop:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                raise Exception("Queue error")
+                raise RuntimeError("Queue error")
             else:
                 await asyncio.sleep(0.1)
                 shutdown_event.set()

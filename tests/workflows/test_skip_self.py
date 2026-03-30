@@ -47,27 +47,56 @@ class TestSkipSelfFeature:
         """Test workflow with skip_self explicitly set to True."""
         engine = WorkflowEngine(temp_workflow_file_with_skip_self)
 
-        assert engine.should_skip_self("skip-true-explicit") is True
+        # Bot triggers event - should skip
+        assert (
+            engine.should_skip_self("skip-true-explicit", "bot-user", "bot-user")
+            is True
+        )
+        # Human triggers event - should not skip
+        assert (
+            engine.should_skip_self("skip-true-explicit", "human-user", "bot-user")
+            is False
+        )
 
     def test_skip_self_explicit_false(self, temp_workflow_file_with_skip_self):
         """Test workflow with skip_self explicitly set to False."""
         engine = WorkflowEngine(temp_workflow_file_with_skip_self)
 
-        assert engine.should_skip_self("skip-false-explicit") is False
+        # Even if bot triggers event, skip_self=False means don't skip
+        assert (
+            engine.should_skip_self("skip-false-explicit", "bot-user", "bot-user")
+            is False
+        )
+        assert (
+            engine.should_skip_self("skip-false-explicit", "human-user", "bot-user")
+            is False
+        )
 
     def test_skip_self_default_value(self, temp_workflow_file_with_skip_self):
         """Test workflow with skip_self omitted defaults to True."""
         engine = WorkflowEngine(temp_workflow_file_with_skip_self)
 
         # When skip_self is omitted, it should default to True
-        assert engine.should_skip_self("skip-default") is True
+        # Bot triggers event - should skip
+        assert engine.should_skip_self("skip-default", "bot-user", "bot-user") is True
+        # Human triggers event - should not skip
+        assert (
+            engine.should_skip_self("skip-default", "human-user", "bot-user") is False
+        )
 
     def test_skip_self_unknown_workflow(self, temp_workflow_file_with_skip_self):
         """Test should_skip_self with unknown workflow defaults to True."""
         engine = WorkflowEngine(temp_workflow_file_with_skip_self)
 
         # Unknown workflows should default to True (safe default)
-        assert engine.should_skip_self("nonexistent-workflow") is True
+        assert (
+            engine.should_skip_self("nonexistent-workflow", "bot-user", "bot-user")
+            is True
+        )
+        assert (
+            engine.should_skip_self("nonexistent-workflow", "human-user", "bot-user")
+            is True
+        )
 
     def test_skip_self_workflow_config_access(self, temp_workflow_file_with_skip_self):
         """Test accessing skip_self directly from workflow config."""
@@ -91,12 +120,16 @@ class TestSkipSelfFeature:
 
         # Test that real workflows have skip_self configured
         if "review-pr" in engine.workflows:
-            # review-pr should skip self (default or explicit)
-            assert engine.should_skip_self("review-pr") is True
+            # review-pr should skip self when bot is actor
+            assert engine.should_skip_self("review-pr", "bot-user", "bot-user") is True
+            # review-pr should not skip when human is actor
+            assert (
+                engine.should_skip_self("review-pr", "human-user", "bot-user") is False
+            )
 
         if "generic" in engine.workflows:
             # generic might allow self-interaction
-            skip_self = engine.should_skip_self("generic")
+            skip_self = engine.should_skip_self("generic", "bot-user", "bot-user")
             assert isinstance(skip_self, bool)
 
     def test_skip_self_all_workflows_have_value(
@@ -162,10 +195,19 @@ class TestSkipSelfFeature:
 
         engine = WorkflowEngine(workflow_file)
 
-        assert engine.should_skip_self("workflow-1") is True
-        assert engine.should_skip_self("workflow-2") is False
-        assert engine.should_skip_self("workflow-3") is True  # Default
-        assert engine.should_skip_self("workflow-4") is True
+        # Test with bot as actor
+        assert engine.should_skip_self("workflow-1", "bot-user", "bot-user") is True
+        assert engine.should_skip_self("workflow-2", "bot-user", "bot-user") is False
+        assert (
+            engine.should_skip_self("workflow-3", "bot-user", "bot-user") is True
+        )  # Default
+        assert engine.should_skip_self("workflow-4", "bot-user", "bot-user") is True
+
+        # Test with human as actor
+        assert engine.should_skip_self("workflow-1", "human-user", "bot-user") is False
+        assert engine.should_skip_self("workflow-2", "human-user", "bot-user") is False
+        assert engine.should_skip_self("workflow-3", "human-user", "bot-user") is False
+        assert engine.should_skip_self("workflow-4", "human-user", "bot-user") is False
 
 
 class TestSkipSelfIntegration:
@@ -182,11 +224,11 @@ class TestSkipSelfIntegration:
 
         engine = WorkflowEngine(workflow_path)
 
-        # Simulate bot creating PR
+        # Simulate bot creating PR (bot is the actor)
         workflow_name = engine.get_workflow_for_event("pull_request", "opened")
 
         if workflow_name:
-            should_skip = engine.should_skip_self(workflow_name)
+            should_skip = engine.should_skip_self(workflow_name, "bot-user", "bot-user")
             # Bot's own PRs should be skipped by default
             assert should_skip is True
 
@@ -201,17 +243,18 @@ class TestSkipSelfIntegration:
 
         engine = WorkflowEngine(workflow_path)
 
-        # Simulate human creating PR
+        # Simulate human creating PR (human is the actor)
         workflow_name = engine.get_workflow_for_event("pull_request", "opened")
 
         if workflow_name:
-            should_skip = engine.should_skip_self(workflow_name)
-            # Workflow says to skip self, but webhook will check if user == bot
-            # This test just verifies the workflow config
-            assert isinstance(should_skip, bool)
+            should_skip = engine.should_skip_self(
+                workflow_name, "human-user", "bot-user"
+            )
+            # Human PRs should not be skipped
+            assert should_skip is False
 
     def test_skip_self_scenario_bot_uses_agent_command(self):
-        """Test scenario: bot uses /agent command."""
+        """Test scenario: bot uses /agent command, should skip."""
         from pathlib import Path
 
         workflow_path = Path(__file__).parent.parent.parent / "workflows.yaml"
@@ -221,13 +264,21 @@ class TestSkipSelfIntegration:
 
         engine = WorkflowEngine(workflow_path)
 
-        # Simulate /agent command
+        # Simulate bot using /agent command (bot is the actor)
         workflow_name = engine.get_workflow_for_command("/agent")
 
         if workflow_name:
-            should_skip = engine.should_skip_self(workflow_name)
-            # Generic workflow might allow self-interaction
-            assert isinstance(should_skip, bool)
+            # Bot commenting should be skipped if skip_self=true
+            should_skip_bot = engine.should_skip_self(
+                workflow_name, "bot-user", "bot-user"
+            )
+            # Human commenting should not be skipped
+            should_skip_human = engine.should_skip_self(
+                workflow_name, "human-user", "bot-user"
+            )
+
+            assert isinstance(should_skip_bot, bool)
+            assert should_skip_human is False  # Human commands always work
 
     def test_skip_self_scenario_ci_failure_on_bot_pr(self):
         """Test scenario: CI fails on bot's PR."""
@@ -240,12 +291,12 @@ class TestSkipSelfIntegration:
 
         engine = WorkflowEngine(workflow_path)
 
-        # Simulate workflow_job.completed event
+        # Simulate workflow_job.completed event triggered by bot
         workflow_name = engine.get_workflow_for_event("workflow_job", "completed")
 
         if workflow_name:
-            should_skip = engine.should_skip_self(workflow_name)
-            # CI failures on bot PRs should be skipped by default
+            should_skip = engine.should_skip_self(workflow_name, "bot-user", "bot-user")
+            # CI failures triggered by bot should be skipped by default
             # (use /fix-ci command to manually trigger)
             assert should_skip is True
 
@@ -285,7 +336,7 @@ class TestSkipSelfEdgeCases:
 
         # Should handle empty workflows gracefully
         assert len(engine.workflows) == 0
-        assert engine.should_skip_self("any-workflow") is True
+        assert engine.should_skip_self("any-workflow", "bot-user", "bot-user") is True
 
     def test_skip_self_consistency_across_calls(self, tmp_path):
         """Test that skip_self returns consistent values."""
@@ -306,9 +357,9 @@ class TestSkipSelfEdgeCases:
         engine = WorkflowEngine(workflow_file)
 
         # Call multiple times, should return same value
-        result1 = engine.should_skip_self("test-workflow")
-        result2 = engine.should_skip_self("test-workflow")
-        result3 = engine.should_skip_self("test-workflow")
+        result1 = engine.should_skip_self("test-workflow", "bot-user", "bot-user")
+        result2 = engine.should_skip_self("test-workflow", "bot-user", "bot-user")
+        result3 = engine.should_skip_self("test-workflow", "bot-user", "bot-user")
 
         assert result1 == result2 == result3 is True
 
@@ -330,7 +381,14 @@ class TestSkipSelfEdgeCases:
 
         engine = WorkflowEngine(workflow_file)
 
-        assert engine.should_skip_self("test-workflow-123") is False
+        assert (
+            engine.should_skip_self("test-workflow-123", "bot-user", "bot-user")
+            is False
+        )
+        assert (
+            engine.should_skip_self("test-workflow-123", "human-user", "bot-user")
+            is False
+        )
 
     def test_skip_self_documentation_examples(self, tmp_path):
         """Test examples from documentation work correctly."""
@@ -362,5 +420,10 @@ class TestSkipSelfEdgeCases:
         engine = WorkflowEngine(workflow_file)
 
         # Verify documentation examples work as described
-        assert engine.should_skip_self("review-pr") is True  # Default
-        assert engine.should_skip_self("generic") is False  # Explicit
+        # review-pr: skip_self defaults to True
+        assert engine.should_skip_self("review-pr", "bot-user", "bot-user") is True
+        assert engine.should_skip_self("review-pr", "human-user", "bot-user") is False
+
+        # generic: skip_self explicitly False
+        assert engine.should_skip_self("generic", "bot-user", "bot-user") is False
+        assert engine.should_skip_self("generic", "human-user", "bot-user") is False
