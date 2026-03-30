@@ -1,0 +1,131 @@
+# Repository Setup Configuration Example
+# Copy this file to repo-setup.yaml and customize for your repositories
+#
+# Each list item is one "step" with its own result and log entry.
+# Use a plain string for a single command, or a | block for a multi-line
+# shell script that runs in one bash session (environment is shared within
+# the block — useful for `source`, `export`, venv activation, etc.).
+
+repositories:
+  # Python project with venv (recommended — isolated per job)
+  myorg/python-api:
+    setup_commands:
+      - "python -m venv .venv"
+      - |
+        .venv/bin/pip install -r requirements.txt
+        .venv/bin/pip install -r requirements-dev.txt
+    timeout: 300 # 5 minutes
+    env:
+      PYTHONPATH: "/workspace/src"
+      ENVIRONMENT: "test"
+
+  # Node.js project
+  myorg/frontend:
+    setup_commands:
+      - |
+        sudo apt-get update
+        sudo apt-get install -y nodejs npm
+      - "npm ci"
+      - "npm run build:dev"
+    timeout: 300 # Includes time for Node.js installation
+
+  # Ruby project
+  myorg/rails-app:
+    setup_commands:
+      - |
+        sudo apt-get update
+        sudo apt-get install -y ruby-full
+      - "bundle install --jobs=4"
+      - "bundle exec rails db:setup"
+    timeout: 600 # 10 minutes
+    env:
+      RAILS_ENV: "test"
+
+  # Go project
+  myorg/go-service:
+    setup_commands:
+      - |
+        sudo apt-get update
+        sudo apt-get install -y golang-go
+      - "go mod download"
+      - "go build ./..."
+    timeout: 300
+
+  # Rust project — rustup install and cargo must share the same shell
+  # so that `source` takes effect before cargo runs
+  myorg/rust-cli:
+    setup_commands:
+      - |
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+        source $HOME/.cargo/env
+        cargo fetch
+        cargo build --release
+    timeout: 900 # 15 minutes for Rust builds
+
+  # Monorepo (Node.js with multiple workspaces)
+  myorg/monorepo:
+    setup_commands:
+      - |
+        sudo apt-get update
+        sudo apt-get install -y nodejs npm
+        sudo npm install -g yarn
+      - "yarn install --frozen-lockfile"
+      - |
+        yarn workspace @myorg/api build
+        yarn workspace @myorg/web build
+    timeout: 600
+
+  # Java/Maven project
+  myorg/java-service:
+    setup_commands:
+      - |
+        sudo apt-get update
+        sudo apt-get install -y default-jdk maven
+      - "mvn dependency:resolve"
+      - "mvn compile -DskipTests"
+    timeout: 600
+
+  # Fullstack (Python backend + Node.js frontend)
+  myorg/fullstack:
+    setup_commands:
+      - "python -m venv .venv"
+      - ".venv/bin/pip install -r backend/requirements.txt"
+      - |
+        sudo apt-get update
+        sudo apt-get install -y nodejs npm
+      - "npm ci --prefix frontend"
+      - "npm run build --prefix frontend"
+    timeout: 400
+
+  # Simple Python project (no venv needed for throwaway workspaces)
+  myorg/simple-python:
+    setup_commands:
+      - "pip install -r requirements.txt"
+    timeout: 180
+
+  # Example with stop_on_failure disabled — all steps run even if one fails
+  myorg/best-effort-setup:
+    setup_commands:
+      - "pip install -r requirements.txt"
+      - "pre-commit install"  # non-fatal if it fails
+    timeout: 300
+    stop_on_failure: false
+
+# Default configuration for repositories not explicitly listed
+default:
+  enabled: false # Set to true to enable setup for all repos by default
+  setup_commands: []
+  timeout: 300
+
+# Notes:
+# - Commands run in the workspace directory (git worktree root)
+# - Each list item is one step with its own result logged separately
+# - Use a plain string for a single command
+# - Use | (block scalar) for multi-line scripts that need a shared shell
+#   environment (source, export, venv activation, rustup, etc.)
+# - stop_on_failure: true (default) — stops at first failed step
+# - stop_on_failure: false — runs all steps regardless of failures
+# - Job continues even if setup fails (agent can still work with source code)
+# - Timeout is a shared budget across all steps
+# - Use -y flag with apt-get to avoid interactive prompts
+# - Environment variables in `env:` are merged with the system environment

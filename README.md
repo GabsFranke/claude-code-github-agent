@@ -228,6 +228,7 @@ GitHub Event → Webhook → Redis Queues → Worker (Workflow Engine) → Job Q
 - [Getting Started](docs/GETTING_STARTED.md) - Installation and setup
 - [Architecture](docs/ARCHITECTURE.md) - System design and components
 - [Workflows](docs/WORKFLOWS.md) - Creating and managing workflows
+- [Repository Setup](docs/REPO_SETUP.md) - Configuring dependency installation
 - [Configuration](docs/CONFIGURATION.md) - Environment variables
 - [Development](docs/DEVELOPMENT.md) - Testing and contributing
 - [Langfuse Setup](docs/LANGFUSE_SETUP.md) - Observability

@@ -7,30 +7,19 @@ import os
 import shutil
 import sys
 import tempfile
-import time
 import uuid
 
-from claude_agent_sdk import (
-    AssistantMessage,
-    ClaudeAgentOptions,
-    ClaudeSDKClient,
-    HookMatcher,
-    ResultMessage,
-    TextBlock,
-    ToolUseBlock,
-)
-
-from shared import (
+from repo_setup import RepoSetupEngine  # noqa: E402
+from shared import (  # noqa: E402
     JobQueue,
     RepositorySyncError,
-    SDKError,
-    SDKTimeoutError,
     WorktreeCreationError,
     execute_git_command,
     setup_graceful_shutdown,
 )
-from shared.logging_utils import setup_logging
-from subagents import AGENTS
+from shared.logging_utils import setup_logging  # noqa: E402
+
+from .sdk_executor import execute_sandbox_request  # noqa: E402
 
 # Configure logging
 setup_logging(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -41,84 +30,6 @@ logging.getLogger("claude_agent_sdk").setLevel(os.getenv("LOG_LEVEL", "INFO"))
 
 # Global state
 shutdown_event = asyncio.Event()
-
-
-def setup_langfuse_hooks() -> dict:
-    """Setup Langfuse observability hooks if configured."""
-    span_id = os.getenv("CURRENT_SPAN_ID")
-    langfuse_public_key = os.getenv("LANGFUSE_PUBLIC_KEY")
-    langfuse_secret_key = os.getenv("LANGFUSE_SECRET_KEY")
-
-    if not (langfuse_public_key and langfuse_secret_key):
-        return {}
-
-    async def langfuse_stop_hook_async(input_data, _tool_use_id, _context):
-        error_msg = None
-        process = None
-        try:
-            hook_payload = json.dumps(input_data)
-            process = await asyncio.create_subprocess_exec(
-                "python3",
-                "/app/hooks/langfuse_hook.py",
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env={
-                    "TRACE_TO_LANGFUSE": "true",
-                    "LANGFUSE_PUBLIC_KEY": langfuse_public_key,
-                    "LANGFUSE_SECRET_KEY": langfuse_secret_key,
-                    "LANGFUSE_HOST": os.getenv("LANGFUSE_HOST", "http://langfuse:3000"),
-                    "LANGFUSE_BASE_URL": os.getenv(
-                        "LANGFUSE_HOST", "http://langfuse:3000"
-                    ),
-                    "CC_LANGFUSE_DEBUG": "true",
-                    "PARENT_SPAN_ID": span_id or "",
-                    "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-                    "HOME": os.environ.get("HOME", "/root"),
-                },
-            )
-
-            try:
-                stdout, stderr = await asyncio.wait_for(
-                    process.communicate(input=hook_payload.encode()), timeout=30.0
-                )
-                if process.returncode != 0:
-                    logger.warning(
-                        f"Langfuse hook failed: {stderr.decode()}\nOutput: {stdout.decode()}"
-                    )
-                else:
-                    logger.debug(f"Langfuse hook succeeded: {stdout.decode()}")
-                    return {"success": True}
-            except TimeoutError:
-                logger.warning("Langfuse hook timed out after 30s")
-                process.kill()
-                await process.wait()
-
-        except Exception as e:
-            logger.warning(f"Error running Langfuse hook: {e}")
-            error_msg = str(e)
-        finally:
-            # Ensure process is cleaned up if it exists and hasn't been waited on
-            if process and process.returncode is None:
-                try:
-                    process.kill()
-                    await process.wait()
-                except ProcessLookupError:
-                    pass  # Expected - process already terminated
-                except OSError as e:
-                    logger.warning(f"Failed to cleanup Langfuse hook process: {e}")
-                except Exception as e:
-                    logger.error(
-                        f"Unexpected error cleaning up Langfuse hook process: {e}",
-                        exc_info=True,
-                    )
-
-        return {"success": False, "error": error_msg}
-
-    return {
-        "Stop": [HookMatcher(matcher="*", hooks=[langfuse_stop_hook_async])],
-        "SubagentStop": [HookMatcher(matcher="*", hooks=[langfuse_stop_hook_async])],
-    }
 
 
 async def ensure_repo_synced(
@@ -182,116 +93,6 @@ async def ensure_repo_synced(
         await pubsub.close()
 
 
-async def execute_in_workspace(workspace: str, job_data: dict) -> str:
-    """Execute Claude Agent SDK in isolated workspace.
-
-    Args:
-        workspace: Path to isolated workspace directory
-        job_data: Job data containing prompt, github_token, etc.
-
-    Returns:
-        Agent response text
-
-    Raises:
-        SDKTimeoutError: If execution exceeds timeout
-        SDKError: If SDK execution fails
-    """
-    original_cwd = os.getcwd()
-
-    try:
-        # Change to isolated workspace
-        os.chdir(workspace)
-        logger.info(f"Executing in workspace: {workspace}")
-
-        # Set Claude temp directory to workspace to keep all files accessible
-        os.environ["CLAUDE_TEMP_DIR"] = workspace
-        os.environ["TMPDIR"] = workspace  # Fallback for general temp operations
-
-        # Build MCP server configuration
-        mcp_servers = {
-            "github": {
-                "type": "http",
-                "url": "https://api.githubcopilot.com/mcp",
-                "headers": {"Authorization": f"Bearer {job_data['github_token']}"},
-            }
-        }
-
-        # Setup hooks
-        hooks = setup_langfuse_hooks()
-
-        # Build Claude Agent options
-        options = ClaudeAgentOptions(
-            allowed_tools=[
-                "Task",
-                "Bash",
-                "Read",
-                "Write",
-                "Edit",
-                "List",
-                "Search",
-                "mcp__github__*",
-            ],
-            permission_mode="acceptEdits",
-            mcp_servers=mcp_servers,  # type: ignore[arg-type]
-            agents=AGENTS,
-            plugins=[{"type": "local", "path": "/app/plugins/pr-review-toolkit"}],
-            hooks=hooks,
-            max_turns=50,
-            cwd=workspace,  # Set working directory to isolated workspace
-        )
-
-        # Execute SDK
-        logger.info("Starting Claude Agent SDK execution...")
-        response_parts = []
-
-        async with asyncio.timeout(1800):  # 30 minutes
-            async with ClaudeSDKClient(options=options) as client:
-                await client.query(job_data["prompt"])
-
-                async for message in client.receive_messages():
-                    # Check for shutdown
-                    if shutdown_event.is_set():
-                        logger.warning("Shutdown requested, stopping SDK execution")
-                        break
-
-                    if isinstance(message, AssistantMessage):
-                        for block in message.content:
-                            if isinstance(block, TextBlock):
-                                response_parts.append(block.text)
-                                logger.debug(
-                                    f"Received text block: {block.text[:100]}..."
-                                )
-                            elif isinstance(block, ToolUseBlock):
-                                logger.info(f"Tool use: {block.name}")
-
-                    elif isinstance(message, ResultMessage):
-                        logger.info(
-                            f"SDK completed - {message.num_turns} turns, "
-                            f"{message.duration_ms}ms"
-                        )
-                        if message.total_cost_usd:
-                            logger.info(f"Cost: ${message.total_cost_usd:.4f}")
-                        break
-
-        response = "\n".join(response_parts)
-
-        if not response or not response.strip():
-            raise SDKError("Claude Agent SDK returned empty response")
-
-        logger.info("SDK execution completed successfully")
-        return response
-
-    except TimeoutError as e:
-        raise SDKTimeoutError(
-            "Claude Agent SDK execution timed out after 30 minutes"
-        ) from e
-    except Exception as e:
-        raise SDKError(f"Failed to execute Claude Agent SDK: {e}") from e
-    finally:
-        # Always restore original working directory
-        os.chdir(original_cwd)
-
-
 async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
     """Process a single job in an isolated workspace.
 
@@ -332,8 +133,7 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
             repo, ref, job_queue.redis, job_data["github_token"]
         )
 
-        # Create isolated workspace in tmpfs mount for automatic cleanup
-        # /tmp is intentional - mounted as tmpfs in Docker for security
+        # Create isolated workspace under /tmp — cleaned up explicitly after job
         workspace_base = tempfile.mkdtemp(
             prefix=f"job_{job_id[:8]}_",
             dir="/tmp",  # nosec B108
@@ -342,7 +142,8 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
         workspace = workspace_base
         logger.info(f"Created workspace for job {job_id}: {workspace}")
 
-        # Create worktree with unique branch name
+        # Create worktree without creating a new branch
+        # The agent will create branches as needed using git commands
         # Handle different ref formats:
         # - refs/heads/main -> refs/remotes/origin/main (regular branch)
         # - refs/pull/30/head -> refs/pull/30/head (PR ref, keep as-is)
@@ -362,12 +163,10 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
             )
             bare_ref = f"refs/remotes/origin/{base_ref}"
 
-        # Generate unique branch name with timestamp to avoid collisions
-        timestamp = int(time.time() * 1000) % 1000000  # Last 6 digits of milliseconds
-        branch_name = f"job-{job_id[:8]}-{timestamp}"
-
-        # First, try to create worktree with new branch from the specified ref
-        wt_cmd = f"git --git-dir={repo_dir} worktree add -b {branch_name} {workspace} {bare_ref}"
+        # Create worktree in detached HEAD state - agent will create branches as needed
+        wt_cmd = (
+            f"git --git-dir={repo_dir} worktree add --detach {workspace} {bare_ref}"
+        )
         code, _out, err = await execute_git_command(wt_cmd)
 
         if code != 0:
@@ -397,20 +196,11 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
                     f"Could not list branches: {list_err}. Using fallback: {default_branch}"
                 )
 
-            # Try with detected default branch
-            wt_cmd_fallback = f"git --git-dir={repo_dir} worktree add -b {branch_name} {workspace} {default_branch}"
+            # Try with detected default branch in detached HEAD state
+            wt_cmd_fallback = f"git --git-dir={repo_dir} worktree add --detach {workspace} {default_branch}"
             code, _out, err = await execute_git_command(wt_cmd_fallback)
             if code != 0:
-                # If still failing, try without creating new branch (detached HEAD)
-                logger.warning(
-                    f"Worktree with new branch failed: {err}. Trying detached HEAD"
-                )
-                wt_cmd_detached = f"git --git-dir={repo_dir} worktree add --detach {workspace} {default_branch}"
-                code, _out, err = await execute_git_command(wt_cmd_detached)
-                if code != 0:
-                    raise WorktreeCreationError(
-                        f"Failed to create worktree after all attempts: {err}"
-                    )
+                raise WorktreeCreationError(f"Failed to create worktree: {err}")
 
         # Inject git credentials into the workspace
         # Configure git to use credential helper
@@ -429,8 +219,76 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
         with open(credentials_file, "w", encoding="utf-8") as f:
             f.write(f"https://x-access-token:{job_data['github_token']}@github.com\n")
 
-        # Execute in isolated workspace
-        response = await execute_in_workspace(workspace, job_data)
+        # Configure git user for commits (required for git commit to work)
+        bot_username = os.getenv("BOT_USERNAME", "Claude Code Agent")
+        bot_email = os.getenv(
+            "BOT_USER_EMAIL", "claude-code-agent[bot]@users.noreply.github.com"
+        )
+        await execute_git_command(
+            f'git config user.name "{bot_username}"', cwd=workspace
+        )
+        await execute_git_command(f'git config user.email "{bot_email}"', cwd=workspace)
+
+        # Run repository setup commands if configured
+        try:
+            setup_engine = RepoSetupEngine()
+            setup_config = setup_engine.get_setup_config(repo)
+
+            if setup_config:
+                logger.info(f"Found setup configuration for {repo}")
+                setup_result = await setup_engine.run_setup(
+                    workspace, repo, setup_config
+                )
+
+                if not setup_result["all_successful"]:
+                    logger.warning(
+                        f"Some setup commands failed for {repo}, continuing anyway..."
+                    )
+                    # Log failed commands for debugging
+                    for result in setup_result["results"]:
+                        if not result.get("success"):
+                            # Handle both old (command) and new (commands) structure
+                            cmd_info = result.get(
+                                "commands", result.get("command", "unknown")
+                            )
+                            if isinstance(cmd_info, list):
+                                cmd_info = " && ".join(cmd_info)
+                            logger.warning(
+                                f"Failed command(s): {cmd_info} - {result.get('error', 'unknown error')}"
+                            )
+                else:
+                    logger.info(
+                        f"Setup completed successfully for {repo} in {setup_result['elapsed_seconds']:.1f}s"
+                    )
+            # If no setup config, silently skip (this is normal)
+
+        except Exception as e:
+            logger.warning(
+                f"Error during repository setup for {repo}: {e}. Continuing with job execution...",
+                exc_info=True,
+            )
+            # Don't fail the job if setup fails - agent can still work with source code
+
+        # Change to workspace directory before executing
+        original_cwd = os.getcwd()
+        os.chdir(workspace)
+
+        try:
+            # Execute using shared executor function
+            response = await execute_sandbox_request(
+                prompt=job_data["prompt"],
+                github_token=job_data["github_token"],
+                repo=job_data["repo"],
+                issue_number=job_data["issue_number"],
+                user=job_data["user"],
+                auto_review=job_data.get("auto_review", False),
+                auto_triage=job_data.get("auto_triage", False),
+                workspace=workspace,  # Pass workspace explicitly
+                system_context=job_data.get("system_context"),  # Pass system context
+            )
+        finally:
+            # Restore original directory
+            os.chdir(original_cwd)
 
         # Mark job as complete (agent already posted to GitHub via MCP)
         await job_queue.complete_job(

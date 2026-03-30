@@ -46,6 +46,7 @@ class TestExecuteEndpoint:
                     "user": "testuser",
                     "auto_review": False,
                     "auto_triage": False,
+                    "workspace": "/tmp/test",
                 },
             )
 
@@ -55,15 +56,17 @@ class TestExecuteEndpoint:
                 "status": "success",
             }
 
-            mock_execute.assert_called_once_with(
-                prompt="Test prompt",
-                github_token="test_token",
-                repo="owner/repo",
-                issue_number=123,
-                user="testuser",
-                auto_review=False,
-                auto_triage=False,
-            )
+            mock_execute.assert_called_once()
+            call_kwargs = mock_execute.call_args.kwargs
+            assert call_kwargs["prompt"] == "Test prompt"
+            assert call_kwargs["github_token"] == "test_token"
+            assert call_kwargs["repo"] == "owner/repo"
+            assert call_kwargs["issue_number"] == 123
+            assert call_kwargs["user"] == "testuser"
+            assert call_kwargs["auto_review"] is False
+            assert call_kwargs["auto_triage"] is False
+            # workspace is set to current directory by main.py, not the input value
+            assert "workspace" in call_kwargs
 
     @pytest.mark.asyncio
     async def test_execution_with_auto_review(self):

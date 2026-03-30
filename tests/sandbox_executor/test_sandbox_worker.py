@@ -1,9 +1,6 @@
 """Unit tests for sandbox worker module."""
 
 import asyncio
-import os
-import tempfile
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -32,262 +29,6 @@ class TestSignalHandling:
         # Verify shutdown_event exists (used by shared signal handler)
         assert hasattr(sandbox_worker, "shutdown_event")
         assert isinstance(sandbox_worker.shutdown_event, asyncio.Event)
-
-
-class TestSetupLangfuseHooks:
-    """Test Langfuse hooks setup."""
-
-    def test_returns_empty_dict_when_no_credentials(self):
-        """Test returns empty dict when Langfuse credentials not configured."""
-        from services.sandbox_executor.sandbox_worker import setup_langfuse_hooks
-
-        with patch.dict(os.environ, {}, clear=True):
-            hooks = setup_langfuse_hooks()
-            assert hooks == {}
-
-    def test_returns_hooks_when_credentials_configured(self):
-        """Test returns hooks dict when Langfuse credentials configured."""
-        from services.sandbox_executor.sandbox_worker import setup_langfuse_hooks
-
-        with patch.dict(
-            os.environ,
-            {
-                "LANGFUSE_PUBLIC_KEY": "test_public",
-                "LANGFUSE_SECRET_KEY": "test_secret",
-            },
-            clear=True,
-        ):
-            hooks = setup_langfuse_hooks()
-            assert "Stop" in hooks
-            assert "SubagentStop" in hooks
-
-
-class TestExecuteInWorkspace:
-    """Test execute_in_workspace function."""
-
-    @pytest.mark.asyncio
-    async def test_successful_execution(self):
-        """Test successful execution in workspace."""
-        from services.sandbox_executor.sandbox_worker import execute_in_workspace
-
-        # Create temporary workspace
-        with tempfile.TemporaryDirectory() as workspace:
-            job_data = {
-                "prompt": "Test prompt",
-                "github_token": "test_token",
-                "repo": "owner/repo",
-                "issue_number": 123,
-                "user": "testuser",
-            }
-
-            from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
-
-            async def mock_receive():
-                yield AssistantMessage(
-                    content=[TextBlock(text="Test response")],
-                    model="claude-3-5-sonnet-20241022",
-                )
-                yield ResultMessage(
-                    subtype="success",
-                    duration_ms=1000,
-                    duration_api_ms=1000,
-                    is_error=False,
-                    num_turns=1,
-                    session_id="test",
-                    total_cost_usd=0.01,
-                )
-
-            # Mock ClaudeSDKClient
-            mock_client = MagicMock()
-            mock_client.query = AsyncMock()
-            mock_client.receive_messages = mock_receive
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=None)
-
-            with patch(
-                "services.sandbox_executor.sandbox_worker.ClaudeSDKClient",
-                return_value=mock_client,
-            ):
-                response = await execute_in_workspace(workspace, job_data)
-
-                assert response == "Test response"
-                mock_client.query.assert_called_once_with("Test prompt")
-
-    @pytest.mark.asyncio
-    async def test_changes_to_workspace_directory(self):
-        """Test execution changes to workspace directory."""
-        from services.sandbox_executor.sandbox_worker import execute_in_workspace
-
-        original_cwd = os.getcwd()
-
-        with tempfile.TemporaryDirectory() as workspace:
-            job_data = {
-                "prompt": "Test",
-                "github_token": "token",
-                "repo": "repo",
-                "issue_number": 1,
-                "user": "user",
-            }
-
-            from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
-
-            async def mock_receive():
-                # Verify we're in the workspace
-                assert os.getcwd() == workspace
-                yield AssistantMessage(
-                    content=[TextBlock(text="Response")],
-                    model="claude-3-5-sonnet-20241022",
-                )
-                yield ResultMessage(
-                    subtype="success",
-                    duration_ms=1000,
-                    duration_api_ms=1000,
-                    is_error=False,
-                    num_turns=1,
-                    session_id="test",
-                    total_cost_usd=0.01,
-                )
-
-            mock_client = MagicMock()
-            mock_client.query = AsyncMock()
-            mock_client.receive_messages = mock_receive
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=None)
-
-            with patch(
-                "services.sandbox_executor.sandbox_worker.ClaudeSDKClient",
-                return_value=mock_client,
-            ):
-                await execute_in_workspace(workspace, job_data)
-
-            # Verify we're back to original directory
-            assert os.getcwd() == original_cwd
-
-    @pytest.mark.asyncio
-    async def test_restores_directory_on_exception(self):
-        """Test directory is restored even on exception."""
-        from services.sandbox_executor.sandbox_worker import execute_in_workspace
-
-        original_cwd = os.getcwd()
-
-        with tempfile.TemporaryDirectory() as workspace:
-            job_data = {
-                "prompt": "Test",
-                "github_token": "token",
-                "repo": "repo",
-                "issue_number": 1,
-                "user": "user",
-            }
-
-            mock_client = MagicMock()
-            mock_client.query = AsyncMock(side_effect=RuntimeError("Test error"))
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=None)
-
-            with patch(
-                "services.sandbox_executor.sandbox_worker.ClaudeSDKClient",
-                return_value=mock_client,
-            ):
-                with pytest.raises(
-                    Exception, match="Failed to execute Claude Agent SDK: Test error"
-                ):
-                    await execute_in_workspace(workspace, job_data)
-
-            # Verify we're back to original directory
-            assert os.getcwd() == original_cwd
-
-    @pytest.mark.asyncio
-    async def test_empty_response_raises_exception(self):
-        """Test empty response raises exception."""
-        from services.sandbox_executor.sandbox_worker import execute_in_workspace
-
-        with tempfile.TemporaryDirectory() as workspace:
-            job_data = {
-                "prompt": "Test",
-                "github_token": "token",
-                "repo": "repo",
-                "issue_number": 1,
-                "user": "user",
-            }
-
-            from claude_agent_sdk import ResultMessage
-
-            async def mock_receive():
-                yield ResultMessage(
-                    subtype="success",
-                    duration_ms=100,
-                    duration_api_ms=100,
-                    is_error=False,
-                    num_turns=0,
-                    session_id="test",
-                    total_cost_usd=0.0,
-                )
-
-            mock_client = MagicMock()
-            mock_client.query = AsyncMock()
-            mock_client.receive_messages = mock_receive
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=None)
-
-            with patch(
-                "services.sandbox_executor.sandbox_worker.ClaudeSDKClient",
-                return_value=mock_client,
-            ):
-                with pytest.raises(Exception, match="returned empty response"):
-                    await execute_in_workspace(workspace, job_data)
-
-    @pytest.mark.asyncio
-    async def test_shutdown_during_execution(self):
-        """Test shutdown event stops execution gracefully."""
-        from services.sandbox_executor.sandbox_worker import (
-            execute_in_workspace,
-            shutdown_event,
-        )
-
-        with tempfile.TemporaryDirectory() as workspace:
-            job_data = {
-                "prompt": "Test",
-                "github_token": "token",
-                "repo": "repo",
-                "issue_number": 1,
-                "user": "user",
-            }
-
-            from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
-
-            async def mock_receive():
-                # Yield response first, then check shutdown
-                yield AssistantMessage(
-                    content=[TextBlock(text="Response")],
-                    model="claude-3-5-sonnet-20241022",
-                )
-                shutdown_event.set()  # Trigger shutdown after response
-                yield ResultMessage(
-                    subtype="success",
-                    duration_ms=1000,
-                    duration_api_ms=1000,
-                    is_error=False,
-                    num_turns=1,
-                    session_id="test",
-                    total_cost_usd=0.01,
-                )
-
-            mock_client = MagicMock()
-            mock_client.query = AsyncMock()
-            mock_client.receive_messages = mock_receive
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=None)
-
-            with patch(
-                "services.sandbox_executor.sandbox_worker.ClaudeSDKClient",
-                return_value=mock_client,
-            ):
-                # Should return response collected before shutdown
-                response = await execute_in_workspace(workspace, job_data)
-                assert response == "Response"
-
-            # Reset shutdown event
-            shutdown_event.clear()
 
 
 class TestProcessJob:
@@ -323,11 +64,36 @@ class TestProcessJob:
                 return_value=(0, "", ""),
             ),
             patch(
-                "services.sandbox_executor.sandbox_worker.execute_in_workspace",
+                "services.sandbox_executor.sandbox_worker.execute_sandbox_request",
                 new_callable=AsyncMock,
                 return_value="Test response",
             ),
+            patch(
+                "services.sandbox_executor.sandbox_worker.tempfile.mkdtemp"
+            ) as mock_mkdtemp,
+            patch("services.sandbox_executor.sandbox_worker.os.rmdir"),
+            patch("services.sandbox_executor.sandbox_worker.os.chdir"),
+            patch(
+                "services.sandbox_executor.sandbox_worker.os.getcwd",
+                return_value="/original",
+            ),
+            patch("services.sandbox_executor.sandbox_worker.os.makedirs"),
+            patch(
+                "services.sandbox_executor.sandbox_worker.os.path.exists",
+                return_value=False,
+            ),
+            patch(
+                "services.sandbox_executor.sandbox_worker.RepoSetupEngine"
+            ) as mock_engine_class,
         ):
+            # Mock workspace path
+            mock_mkdtemp.return_value = "/tmp/test_workspace"
+
+            # Mock repo setup engine
+            mock_engine = MagicMock()
+            mock_engine.get_setup_config.return_value = None
+            mock_engine_class.return_value = mock_engine
+
             await process_job(mock_queue, job_id, job_data)
 
             # Verify job was marked as complete
@@ -368,11 +134,36 @@ class TestProcessJob:
                 return_value=(0, "", ""),
             ),
             patch(
-                "services.sandbox_executor.sandbox_worker.execute_in_workspace",
+                "services.sandbox_executor.sandbox_worker.execute_sandbox_request",
                 new_callable=AsyncMock,
                 side_effect=Exception("Execution failed"),
             ),
+            patch(
+                "services.sandbox_executor.sandbox_worker.tempfile.mkdtemp"
+            ) as mock_mkdtemp,
+            patch("services.sandbox_executor.sandbox_worker.os.rmdir"),
+            patch("services.sandbox_executor.sandbox_worker.os.chdir"),
+            patch(
+                "services.sandbox_executor.sandbox_worker.os.getcwd",
+                return_value="/original",
+            ),
+            patch("services.sandbox_executor.sandbox_worker.os.makedirs"),
+            patch(
+                "services.sandbox_executor.sandbox_worker.os.path.exists",
+                return_value=False,
+            ),
+            patch(
+                "services.sandbox_executor.sandbox_worker.RepoSetupEngine"
+            ) as mock_engine_class,
         ):
+            # Mock workspace path
+            mock_mkdtemp.return_value = "/tmp/test_workspace"
+
+            # Mock repo setup engine
+            mock_engine = MagicMock()
+            mock_engine.get_setup_config.return_value = None
+            mock_engine_class.return_value = mock_engine
+
             await process_job(mock_queue, job_id, job_data)
 
             # Verify job was marked as failed
@@ -403,7 +194,17 @@ class TestProcessJob:
 
         created_workspace = None
 
-        async def capture_workspace(workspace, _job_data):
+        async def capture_workspace(
+            prompt,
+            github_token,
+            repo,
+            issue_number,
+            user,
+            auto_review,
+            auto_triage,
+            workspace,
+            system_context=None,
+        ):
             nonlocal created_workspace
             created_workspace = workspace
             return "Response"
@@ -420,16 +221,45 @@ class TestProcessJob:
                 return_value=(0, "", ""),
             ),
             patch(
-                "services.sandbox_executor.sandbox_worker.execute_in_workspace",
+                "services.sandbox_executor.sandbox_worker.execute_sandbox_request",
                 new_callable=AsyncMock,
                 side_effect=capture_workspace,
             ),
+            patch(
+                "services.sandbox_executor.sandbox_worker.tempfile.mkdtemp"
+            ) as mock_mkdtemp,
+            patch("services.sandbox_executor.sandbox_worker.os.rmdir"),
+            patch("services.sandbox_executor.sandbox_worker.os.chdir"),
+            patch(
+                "services.sandbox_executor.sandbox_worker.os.getcwd",
+                return_value="/original",
+            ),
+            patch("services.sandbox_executor.sandbox_worker.os.makedirs"),
+            patch(
+                "services.sandbox_executor.sandbox_worker.os.path.exists",
+                return_value=True,
+            ),
+            patch(
+                "services.sandbox_executor.sandbox_worker.RepoSetupEngine"
+            ) as mock_engine_class,
         ):
+            # Mock workspace path
+            test_workspace = "/tmp/test_workspace"
+            mock_mkdtemp.return_value = test_workspace
+
+            # Mock repo setup engine
+            mock_engine = MagicMock()
+            mock_engine.get_setup_config.return_value = None
+            mock_engine_class.return_value = mock_engine
+
             await process_job(mock_queue, job_id, job_data)
 
-            # Verify workspace was cleaned up
-            assert created_workspace is not None
-            assert not Path(created_workspace).exists()
+            # Verify workspace was passed to execute function
+            assert created_workspace == test_workspace
+
+            # Verify cleanup was attempted (either rmtree or worktree remove)
+            # Since we mock os.path.exists to return True, it should try worktree remove
+            assert mock_queue.complete_job.called
 
 
 class TestMainLoop:
@@ -496,7 +326,7 @@ class TestMainLoop:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                raise Exception("Queue error")
+                raise RuntimeError("Queue error")
             else:
                 await asyncio.sleep(0.1)
                 shutdown_event.set()

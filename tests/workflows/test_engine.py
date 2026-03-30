@@ -162,13 +162,14 @@ class TestWorkflowEngine:
 
         engine = WorkflowEngine(workflow_file)
 
-        prompt = engine.build_prompt(
+        prompt, system_context = engine.build_prompt(
             workflow_name="simple-workflow",
             repo="owner/repo",
             issue_number=123,
         )
 
         assert prompt == "Triage issue #123 in owner/repo"
+        assert system_context is None
 
     def test_build_prompt_with_user_query(self, tmp_path):
         """Test building prompt with user query."""
@@ -189,7 +190,7 @@ class TestWorkflowEngine:
 
         engine = WorkflowEngine(workflow_file)
 
-        prompt = engine.build_prompt(
+        prompt, system_context = engine.build_prompt(
             workflow_name="query-workflow",
             repo="owner/repo",
             issue_number=456,
@@ -197,6 +198,7 @@ class TestWorkflowEngine:
         )
 
         assert prompt == "help me fix this bug"
+        assert system_context is None
 
     def test_build_prompt_with_system_context_file(
         self, temp_workflow_file, temp_prompts_dir, monkeypatch
@@ -207,14 +209,15 @@ class TestWorkflowEngine:
 
         engine = WorkflowEngine(temp_workflow_file)
 
-        prompt = engine.build_prompt(
+        prompt, system_context = engine.build_prompt(
             workflow_name="review-pr",
             repo="owner/repo",
             issue_number=789,
         )
 
         assert "/pr-review-toolkit:review-pr owner/repo 789" in prompt
-        assert "Focus on code quality" in prompt
+        assert system_context is not None
+        assert "Focus on code quality" in system_context
 
     def test_build_prompt_system_context_file_not_found(
         self, sample_workflows_yaml, tmp_path, monkeypatch
@@ -250,7 +253,7 @@ class TestWorkflowEngine:
 
         engine = WorkflowEngine(temp_workflow_file)
 
-        prompt = engine.build_prompt(
+        prompt, system_context = engine.build_prompt(
             workflow_name="generic",
             repo="test/repo",
             issue_number=1,
@@ -258,7 +261,8 @@ class TestWorkflowEngine:
         )
 
         assert "explain the code" in prompt
-        assert "helpful coding assistant" in prompt
+        assert system_context is not None
+        assert "helpful coding assistant" in system_context
 
     def test_build_prompt_unknown_workflow(self, temp_workflow_file):
         """Test building prompt for unknown workflow."""
@@ -289,7 +293,7 @@ class TestWorkflowEngine:
 
         engine = WorkflowEngine(workflow_file)
 
-        prompt = engine.build_prompt(
+        prompt, system_context = engine.build_prompt(
             workflow_name="kwargs-workflow",
             repo="owner/repo",
             issue_number=999,
@@ -297,6 +301,7 @@ class TestWorkflowEngine:
         )
 
         assert "owner/repo" in prompt
+        assert system_context is None
         assert "999" in prompt
 
     def test_list_workflows(self, temp_workflow_file):
@@ -349,16 +354,22 @@ class TestWorkflowEngine:
 
         engine = WorkflowEngine(temp_workflow_file)
 
-        prompt = engine.build_prompt(
+        prompt, system_context = engine.build_prompt(
             workflow_name="triage-issue",
             repo="test/project",
             issue_number=42,
         )
 
+        # Verify prompt is generated
+        assert prompt == "Triage issue #42 in test/project"
+
         # System context should have variables filled
-        assert "issue #42" in prompt
-        assert "test/project" in prompt  # Template uses {repo}
-        assert "add labels" in prompt.lower()
+        assert system_context is not None
+        assert "issue #42" in system_context
+        assert "test/project" in system_context  # Template uses {repo}
+        assert (
+            "add labels" in system_context.lower()
+        )  # Check system context, not prompt
 
     def test_empty_issue_number(self, tmp_path):
         """Test building prompt with None issue_number."""
@@ -379,7 +390,7 @@ class TestWorkflowEngine:
 
         engine = WorkflowEngine(workflow_file)
 
-        prompt = engine.build_prompt(
+        prompt, system_context = engine.build_prompt(
             workflow_name="empty-issue-workflow",
             repo="owner/repo",
             issue_number=None,
@@ -387,6 +398,7 @@ class TestWorkflowEngine:
 
         assert "owner/repo" in prompt
         assert "#" in prompt  # Empty issue number becomes empty string
+        assert system_context is None
 
 
 class TestWorkflowEngineIntegration:
