@@ -132,6 +132,9 @@ class RepoSetupEngine:
     ) -> dict[str, Any]:
         """Execute setup commands in workspace.
 
+        All commands run in a single shell session, joined with &&.
+        This allows commands to share environment (PATH, variables, etc.).
+
         Args:
             workspace: Path to workspace directory
             repo: Repository name (for logging)
@@ -154,7 +157,6 @@ class RepoSetupEngine:
             f"(timeout: {config.timeout}s)"
         )
 
-        results = []
         start_time = asyncio.get_event_loop().time()
 
         # Prepare environment
@@ -163,89 +165,81 @@ class RepoSetupEngine:
             env.update(config.env)
             logger.debug(f"Added custom env vars: {list(config.env.keys())}")
 
-        for idx, cmd in enumerate(config.setup_commands, 1):
-            logger.info(f"[{idx}/{len(config.setup_commands)}] Running: {cmd}")
+        # Join all commands with && to run in single shell
+        # This allows commands to share environment (PATH, etc.)
+        combined_command = " && ".join(config.setup_commands)
 
+        logger.debug(f"Combined command: {combined_command}")
+
+        try:
+            # Create subprocess for combined command
+            process = await asyncio.create_subprocess_shell(
+                combined_command,
+                cwd=workspace,
+                env=env,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+
+            # Wait with timeout
             try:
-                # Create subprocess
-                process = await asyncio.create_subprocess_shell(
-                    cmd,
-                    cwd=workspace,
-                    env=env,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(), timeout=config.timeout
                 )
 
-                # Wait with timeout
+                stdout_str = stdout.decode("utf-8", errors="replace")
+                stderr_str = stderr.decode("utf-8", errors="replace")
+
+                success = process.returncode == 0
+
+                if success:
+                    logger.info("✓ All commands completed successfully")
+                else:
+                    logger.warning(
+                        f"✗ Commands failed with exit code {process.returncode}"
+                    )
+                    if stderr_str:
+                        logger.warning(f"stderr: {stderr_str[:500]}")
+
+                results = [
+                    {
+                        "commands": config.setup_commands,
+                        "success": success,
+                        "exit_code": process.returncode,
+                        "stdout": stdout_str,
+                        "stderr": stderr_str,
+                    }
+                ]
+
+            except asyncio.TimeoutError:
+                logger.error(f"✗ Setup timeout after {config.timeout}s")
+                # Kill the process
                 try:
-                    stdout, stderr = await asyncio.wait_for(
-                        process.communicate(), timeout=config.timeout
-                    )
+                    process.kill()
+                    await process.wait()
+                except ProcessLookupError:
+                    pass
 
-                    stdout_str = stdout.decode("utf-8", errors="replace")
-                    stderr_str = stderr.decode("utf-8", errors="replace")
+                results = [
+                    {
+                        "commands": config.setup_commands,
+                        "success": False,
+                        "error": "timeout",
+                        "timeout": config.timeout,
+                    }
+                ]
+                success = False
 
-                    success = process.returncode == 0
-
-                    if success:
-                        logger.info(f"[{idx}/{len(config.setup_commands)}] ✓ Success")
-                    else:
-                        logger.warning(
-                            f"[{idx}/{len(config.setup_commands)}] ✗ Failed with code {process.returncode}"
-                        )
-                        if stderr_str:
-                            logger.warning(f"stderr: {stderr_str[:500]}")
-
-                    results.append(
-                        {
-                            "command": cmd,
-                            "success": success,
-                            "exit_code": process.returncode,
-                            "stdout": stdout_str,
-                            "stderr": stderr_str,
-                        }
-                    )
-
-                    # Stop on first failure
-                    if not success:
-                        logger.warning(
-                            f"Setup command failed, skipping remaining commands for {repo}"
-                        )
-                        break
-
-                except asyncio.TimeoutError:
-                    logger.error(
-                        f"[{idx}/{len(config.setup_commands)}] ✗ Timeout after {config.timeout}s"
-                    )
-                    # Kill the process
-                    try:
-                        process.kill()
-                        await process.wait()
-                    except ProcessLookupError:
-                        pass
-
-                    results.append(
-                        {
-                            "command": cmd,
-                            "success": False,
-                            "error": "timeout",
-                            "timeout": config.timeout,
-                        }
-                    )
-                    break  # Don't continue after timeout
-
-            except Exception as e:
-                logger.error(
-                    f"[{idx}/{len(config.setup_commands)}] ✗ Exception: {e}",
-                    exc_info=True,
-                )
-                results.append({"command": cmd, "success": False, "error": str(e)})
-                break  # Don't continue after exception
+        except Exception as e:
+            logger.error(f"✗ Setup exception: {e}", exc_info=True)
+            results = [
+                {"commands": config.setup_commands, "success": False, "error": str(e)}
+            ]
+            success = False
 
         elapsed = asyncio.get_event_loop().time() - start_time
-        all_successful = all(r.get("success", False) for r in results)
 
-        if all_successful:
+        if success:
             logger.info(f"✓ Setup completed successfully for {repo} in {elapsed:.1f}s")
         else:
             logger.warning(
@@ -255,7 +249,7 @@ class RepoSetupEngine:
         return {
             "completed": True,
             "results": results,
-            "all_successful": all_successful,
+            "all_successful": success,
             "elapsed_seconds": elapsed,
             "skipped": False,
         }

@@ -44,12 +44,11 @@ repositories:
   # Rust project example (install Rust via rustup, no sudo needed)
   myorg/rust-cli:
     setup_commands:
-      # Install Rust and build in one command to ensure cargo is in PATH
-      - 'curl --proto ''=https'' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && export PATH="$HOME/.cargo/bin:$PATH" && cargo fetch && cargo build --release'
+      - "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+      - "source $HOME/.cargo/env"
+      - "cargo fetch"
+      - "cargo build --release"
     timeout: 900 # 15 minutes for Rust builds
-    env:
-      # Note: PATH modifications in env don't work for rustup because cargo
-      # isn't installed yet. Use && to chain commands in a single shell instead.
 
   # Monorepo example (Node.js with multiple workspaces)
   myorg/monorepo:
