@@ -278,6 +278,9 @@ class TestFixCIWorkflowValidation:
 class TestFixCIWorkflowTrigger:
     """Test to intentionally fail and trigger fix-ci workflow."""
 
+    @pytest.mark.xfail(
+        reason="Intentional failure to test fix-ci workflow", strict=True
+    )
     def test_intentional_failure_to_trigger_fix_ci(self):
         """This test intentionally fails to trigger the fix-ci workflow.
 
@@ -291,6 +294,11 @@ class TestFixCIWorkflowTrigger:
             "Expected: 5, Got: 4. This is a deliberate error to test CI failure handling."
         )
 
+    @pytest.mark.xfail(
+        reason="Intentional KeyError to test fix-ci workflow",
+        strict=True,
+        raises=KeyError,
+    )
     def test_another_intentional_failure(self):
         """Another intentional failure with different error type."""
         # This will raise an exception

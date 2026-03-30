@@ -182,11 +182,15 @@ class TestProcessSyncRequest:
 
                 await process_sync_request(message, mock_redis)
 
-                # Verify clone was attempted
-                mock_git.assert_called_once()
-                call_args = mock_git.call_args[0][0]
-                assert "git clone --bare" in call_args
-                assert "owner/repo.git" in call_args
+                # Verify clone and fetch were attempted
+                # The sync worker now makes 3 calls:
+                # 1. Clone the bare repository
+                # 2. Configure fetch refspec
+                # 3. Fetch all refs (branches, tags, PRs)
+                assert mock_git.call_count == 3
+                first_call_args = mock_git.call_args_list[0][0][0]
+                assert "git clone --bare" in first_call_args
+                assert "owner/repo.git" in first_call_args
 
                 # Verify completion signal was set
                 mock_redis.set.assert_called_once()
@@ -332,12 +336,16 @@ class TestProcessSyncRequest:
 
             await process_sync_request(message, mock_redis)
 
-            # Verify clone was attempted without token
-            mock_git.assert_called_once()
-            call_args = mock_git.call_args[0][0]
-            assert "git clone --bare" in call_args
-            assert "https://github.com/owner/repo.git" in call_args
-            assert "x-access-token" not in call_args
+            # Verify clone and fetch were attempted without token
+            # The sync worker now makes 3 calls:
+            # 1. Clone the bare repository
+            # 2. Configure fetch refspec
+            # 3. Fetch all refs (branches, tags, PRs)
+            assert mock_git.call_count == 3
+            first_call_args = mock_git.call_args_list[0][0][0]
+            assert "git clone --bare" in first_call_args
+            assert "https://github.com/owner/repo.git" in first_call_args
+            assert "x-access-token" not in first_call_args
 
     @pytest.mark.asyncio
     async def test_exception_handling(self):

@@ -93,6 +93,42 @@ async def ensure_repo_synced(
         await pubsub.close()
 
 
+async def execute_in_workspace(workspace: str, job_data: dict) -> str:
+    """Execute Claude Agent SDK in a workspace directory.
+
+    This is a simple wrapper that changes to the workspace directory,
+    executes the request, and restores the original directory.
+
+    Args:
+        workspace: Path to the workspace directory
+        job_data: Job data dictionary with prompt, github_token, repo, etc.
+
+    Returns:
+        The response from execute_sandbox_request
+
+    Raises:
+        Exception: If execution fails
+    """
+    original_cwd = os.getcwd()
+    os.chdir(workspace)
+
+    try:
+        response = await execute_sandbox_request(
+            prompt=job_data["prompt"],
+            github_token=job_data["github_token"],
+            repo=job_data["repo"],
+            issue_number=job_data["issue_number"],
+            user=job_data["user"],
+            auto_review=job_data.get("auto_review", False),
+            auto_triage=job_data.get("auto_triage", False),
+            workspace=workspace,
+            system_context=job_data.get("system_context"),
+        )
+        return response
+    finally:
+        os.chdir(original_cwd)
+
+
 async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
     """Process a single job in an isolated workspace.
 
