@@ -34,7 +34,7 @@ function Install-RequiredTools {
         if (Test-Path "requirements-dev.txt") {
             python -m pip install -r requirements-dev.txt
             Write-Host ""
-            Write-Host "✓ Development dependencies installed successfully" -ForegroundColor Green
+            Write-Host "Development dependencies installed successfully" -ForegroundColor Green
             Write-Host ""
         } else {
             Write-Host "Error: requirements-dev.txt not found" -ForegroundColor Red

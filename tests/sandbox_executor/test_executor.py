@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import tempfile
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -156,9 +157,12 @@ class TestExecuteSandboxRequest:
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=None)
 
-        with patch(
-            "services.sandbox_executor.sdk_executor.ClaudeSDKClient",
-            return_value=mock_client,
+        with (
+            patch(
+                "services.sandbox_executor.sdk_executor.ClaudeSDKClient",
+                return_value=mock_client,
+            ),
+            tempfile.TemporaryDirectory() as workspace,
         ):
             response = await execute_sandbox_request(
                 prompt="Test prompt",
@@ -168,6 +172,7 @@ class TestExecuteSandboxRequest:
                 user="testuser",
                 auto_review=False,
                 auto_triage=False,
+                workspace=workspace,
             )
 
             assert response == "Test response"
@@ -204,9 +209,12 @@ class TestExecuteSandboxRequest:
 
         mock_client.receive_messages = mock_receive
 
-        with patch(
-            "services.sandbox_executor.sdk_executor.ClaudeSDKClient",
-            return_value=mock_client,
+        with (
+            patch(
+                "services.sandbox_executor.sdk_executor.ClaudeSDKClient",
+                return_value=mock_client,
+            ),
+            tempfile.TemporaryDirectory() as workspace,
         ):
             response = await execute_sandbox_request(
                 prompt="Test prompt",
@@ -216,6 +224,7 @@ class TestExecuteSandboxRequest:
                 user="testuser",
                 auto_review=False,
                 auto_triage=False,
+                workspace=workspace,
             )
 
             assert response == "Part 1\nPart 2"
@@ -244,12 +253,15 @@ class TestExecuteSandboxRequest:
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=None)
 
-        with patch(
-            "services.sandbox_executor.sdk_executor.ClaudeSDKClient",
-            return_value=mock_client,
+        with (
+            patch(
+                "services.sandbox_executor.sdk_executor.ClaudeSDKClient",
+                return_value=mock_client,
+            ),
+            tempfile.TemporaryDirectory() as workspace,
         ):
             with pytest.raises(
-                Exception, match="Claude Agent SDK returned empty response"
+                Exception, match="Claude Agent SDK returned empty response in sandbox"
             ):
                 await execute_sandbox_request(
                     prompt="Test prompt",
@@ -259,6 +271,7 @@ class TestExecuteSandboxRequest:
                     user="testuser",
                     auto_review=False,
                     auto_triage=False,
+                    workspace=workspace,
                 )
 
     @pytest.mark.asyncio
@@ -277,14 +290,19 @@ class TestExecuteSandboxRequest:
         mock_client.__aexit__ = AsyncMock(return_value=None)
 
         # Mock asyncio.timeout to trigger immediately
-        with patch(
-            "services.sandbox_executor.sdk_executor.ClaudeSDKClient",
-            return_value=mock_client,
+        with (
+            patch(
+                "services.sandbox_executor.sdk_executor.ClaudeSDKClient",
+                return_value=mock_client,
+            ),
+            tempfile.TemporaryDirectory() as workspace,
         ):
             with patch("asyncio.timeout") as mock_timeout:
                 mock_timeout.side_effect = TimeoutError()
 
-                with pytest.raises(Exception, match="timed out after 30 minutes"):
+                with pytest.raises(
+                    Exception, match="timed out after 30 minutes in sandbox"
+                ):
                     await execute_sandbox_request(
                         prompt="Test prompt",
                         github_token="test_token",
@@ -293,6 +311,7 @@ class TestExecuteSandboxRequest:
                         user="testuser",
                         auto_review=False,
                         auto_triage=False,
+                        workspace=workspace,
                     )
 
     @pytest.mark.asyncio
@@ -305,11 +324,16 @@ class TestExecuteSandboxRequest:
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=None)
 
-        with patch(
-            "services.sandbox_executor.sdk_executor.ClaudeSDKClient",
-            return_value=mock_client,
+        with (
+            patch(
+                "services.sandbox_executor.sdk_executor.ClaudeSDKClient",
+                return_value=mock_client,
+            ),
+            tempfile.TemporaryDirectory() as workspace,
         ):
-            with pytest.raises(Exception, match="Failed to execute Claude Agent SDK"):
+            with pytest.raises(
+                Exception, match="Failed to execute Claude Agent SDK in sandbox"
+            ):
                 await execute_sandbox_request(
                     prompt="Test prompt",
                     github_token="test_token",
@@ -318,6 +342,7 @@ class TestExecuteSandboxRequest:
                     user="testuser",
                     auto_review=False,
                     auto_triage=False,
+                    workspace=workspace,
                 )
 
     @pytest.mark.asyncio
@@ -347,9 +372,10 @@ class TestExecuteSandboxRequest:
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=None)
 
-        with patch(
-            "services.sandbox_executor.sdk_executor.ClaudeSDKClient"
-        ) as mock_sdk:
+        with (
+            patch("services.sandbox_executor.sdk_executor.ClaudeSDKClient") as mock_sdk,
+            tempfile.TemporaryDirectory() as workspace,
+        ):
             mock_sdk.return_value = mock_client
 
             await execute_sandbox_request(
@@ -360,6 +386,7 @@ class TestExecuteSandboxRequest:
                 user="testuser",
                 auto_review=False,
                 auto_triage=False,
+                workspace=workspace,
             )
 
             # Verify ClaudeAgentOptions was created with correct MCP config

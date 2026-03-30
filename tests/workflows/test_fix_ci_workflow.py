@@ -63,12 +63,12 @@ class TestFixCIWorkflow:
         assert "{issue_number}" in template
 
     def test_fix_ci_system_context(self, engine):
-        """Test that fix-ci has system context configured."""
+        """Test that fix-ci does not have system context configured."""
         workflow = engine.workflows["fix-ci"]
         prompt_config = workflow.prompt
 
-        assert prompt_config.system_context is not None
-        assert prompt_config.system_context == "fix-ci.md"
+        # Should NOT have system_context - the plugin provides its own context
+        assert prompt_config.system_context is None
 
     def test_fix_ci_build_prompt(self, engine):
         """Test building prompt for fix-ci workflow."""
@@ -82,8 +82,8 @@ class TestFixCIWorkflow:
         assert "/ci-failure-toolkit:fix-ci" in prompt
         assert "owner/test-repo" in prompt
         assert "12345" in prompt
-        assert system_context is not None
-        assert "CI/CD" in system_context
+        # Should NOT have system context - plugin provides its own
+        assert system_context is None
 
     def test_fix_ci_workflow_description(self, engine):
         """Test that fix-ci has a proper description."""
@@ -192,7 +192,8 @@ class TestFixCIPromptGeneration:
         assert "/ci-failure-toolkit:fix-ci" in prompt
         assert "owner/repo" in prompt
         assert "67890" in prompt
-        assert system_context is not None
+        # Plugin provides its own context
+        assert system_context is None
 
     def test_fix_ci_prompt_with_pr_number(self, engine):
         """Test prompt generation with PR number."""
@@ -204,24 +205,23 @@ class TestFixCIPromptGeneration:
 
         assert "/ci-failure-toolkit:fix-ci" in prompt
         assert "owner/repo" in prompt
-        assert system_context is not None
+        # Plugin provides its own context
+        assert system_context is None
         assert "123" in prompt
 
     def test_fix_ci_prompt_includes_system_context(self, engine):
-        """Test that fix-ci prompt includes system context from file."""
+        """Test that fix-ci prompt does not include system context from file."""
         prompt, system_context = engine.build_prompt(
             workflow_name="fix-ci",
             repo="test/repo",
             issue_number=999,
         )
 
-        # The prompt should include content from prompts/fix-ci.md
-        # This will depend on whether the file exists
+        # The prompt should NOT include content from prompts/fix-ci.md
+        # The plugin provides its own context
         assert len(prompt) > 0
         assert "/ci-failure-toolkit:fix-ci" in prompt
-        assert system_context is not None
-        assert "CI/CD" in system_context
-        assert "/ci-failure-toolkit:fix-ci" in prompt
+        assert system_context is None
 
 
 class TestFixCIWorkflowValidation:
@@ -270,30 +270,5 @@ class TestFixCIWorkflowValidation:
         assert "template" in prompt
         assert "/ci-failure-toolkit:fix-ci" in prompt["template"]
 
-        # Should have system_context
-        assert "system_context" in prompt
-        assert prompt["system_context"] == "fix-ci.md"
-
-
-class TestFixCIWorkflowTrigger:
-    """Test to intentionally fail and trigger fix-ci workflow."""
-
-    def test_intentional_failure_to_trigger_fix_ci(self):
-        """This test intentionally fails to trigger the fix-ci workflow.
-
-        When this test fails in CI, it should trigger the workflow_job.completed
-        event with conclusion=failure, which should activate the fix-ci workflow.
-        """
-        # Intentional failure to test fix-ci workflow
-        result = 2 + 2
-        assert result == 5, (
-            "Intentional test failure to trigger fix-ci workflow. "
-            "Expected: 5, Got: 4. This is a deliberate error to test CI failure handling."
-        )
-
-    def test_another_intentional_failure(self):
-        """Another intentional failure with different error type."""
-        # This will raise an exception
-        data = {"key": "value"}
-        # Intentionally accessing non-existent key
-        assert data["nonexistent"] == "something", "This should trigger a KeyError"
+        # Should NOT have system_context - plugin provides its own
+        assert "system_context" not in prompt or prompt.get("system_context") is None
