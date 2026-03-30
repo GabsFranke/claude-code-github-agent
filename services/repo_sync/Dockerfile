@@ -1,5 +1,8 @@
 FROM python:3.11-slim
 
+# Create non-root user early
+RUN useradd -m -u 1000 -s /bin/bash bot
+
 WORKDIR /app
 
 # Install git for repo syncing
@@ -15,6 +18,12 @@ COPY shared/ ./shared/
 
 # Sync worker source code
 COPY services/repo_sync/ /app/services/repo_sync/
+
+# Create repo cache directory and set ownership to bot user
+RUN mkdir -p /var/cache/repos && chown -R bot:bot /var/cache/repos /app
+
+# Switch to non-root user
+USER bot
 
 WORKDIR /app
 CMD ["python", "-m", "services.repo_sync.sync_worker"]

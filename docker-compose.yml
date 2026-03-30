@@ -64,16 +64,13 @@ services:
       dockerfile: services/sandbox_executor/Dockerfile
     command: python -m services.sandbox_executor.sandbox_worker
     env_file: .env
-    tmpfs:
-      # tmpfs for automatic workspace cleanup on restart
-      - /tmp:size=2G,mode=1777
+
     volumes:
       # Persistent cache for bare repositories across all workers
       - repo-cache:/var/cache/repos:rw
-      # Plugins (read-only) — sandbox compiles ClaudeAgentOptions
-      - ./plugins:/app/plugins:ro
       # gcloud credentials for Vertex AI — sandbox is the one calling the SDK
-      - ${APPDATA}/gcloud/application_default_credentials.json:/root/.config/gcloud/application_default_credentials.json:ro
+      # Mounted to bot user's home directory
+      - ${APPDATA}/gcloud/application_default_credentials.json:/home/bot/.config/gcloud/application_default_credentials.json:ro
     environment:
       - PYTHONPATH=/app
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
@@ -84,12 +81,15 @@ services:
       - ANTHROPIC_DEFAULT_OPUS_MODEL=${ANTHROPIC_DEFAULT_OPUS_MODEL}
       - ANTHROPIC_VERTEX_PROJECT_ID=${ANTHROPIC_VERTEX_PROJECT_ID}
       - ANTHROPIC_VERTEX_REGION=${ANTHROPIC_VERTEX_REGION}
+      - CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-1}
       - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY}
       - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY}
       - LANGFUSE_HOST=http://langfuse:3000
       - REDIS_URL=redis://redis:6379
       - REDIS_PASSWORD=${REDIS_PASSWORD:-myredissecret}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - SDK_DEBUG=${SDK_DEBUG:-false}
     depends_on:
       redis:
         condition: service_healthy
@@ -158,7 +158,7 @@ services:
 
   # Langfuse worker (processes events asynchronously)
   langfuse-worker:
-    image: langfuse/langfuse-worker:3
+    image: langfuse/langfuse-worker:3.149
     env_file: .env
     environment:
       DATABASE_URL: postgresql://langfuse:${LANGFUSE_DB_PASSWORD:-langfuse}@langfuse-db:5432/langfuse
@@ -198,7 +198,7 @@ services:
 
   # Langfuse web UI
   langfuse:
-    image: langfuse/langfuse:3
+    image: langfuse/langfuse:3.149
     env_file: .env
     ports:
       - "7500:3000"

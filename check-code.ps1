@@ -1,6 +1,51 @@
 # Quick code quality check
 param([switch]$Fix, [switch]$Fast, [switch]$Verbose, [switch]$SkipMypy)
 
+# Function to check if a command exists
+function Test-Command {
+    param($Command)
+    $null -ne (Get-Command $Command -ErrorAction SilentlyContinue)
+}
+
+# Function to check and install required tools
+function Install-RequiredTools {
+    $missingTools = @()
+
+    # Check for each required tool
+    if (-not (Test-Command "black")) { $missingTools += "black" }
+    if (-not (Test-Command "isort")) { $missingTools += "isort" }
+    if (-not (Test-Command "flake8")) { $missingTools += "flake8" }
+    if (-not (Test-Command "mypy")) { $missingTools += "mypy" }
+    if (-not (Test-Command "ruff")) { $missingTools += "ruff" }
+
+    # If any tools are missing, install them
+    if ($missingTools.Count -gt 0) {
+        Write-Host "Missing tools detected: $($missingTools -join ', ')" -ForegroundColor Yellow
+        Write-Host "Installing development dependencies..." -ForegroundColor Yellow
+        Write-Host ""
+
+        # Check if python is available
+        if (-not (Test-Command "python")) {
+            Write-Host "Error: Python is not installed. Please install Python first." -ForegroundColor Red
+            exit 1
+        }
+
+        # Install requirements-dev.txt using python -m pip
+        if (Test-Path "requirements-dev.txt") {
+            python -m pip install -r requirements-dev.txt
+            Write-Host ""
+            Write-Host "Development dependencies installed successfully" -ForegroundColor Green
+            Write-Host ""
+        } else {
+            Write-Host "Error: requirements-dev.txt not found" -ForegroundColor Red
+            exit 1
+        }
+    }
+}
+
+# Check and install tools before running checks
+Install-RequiredTools
+
 Write-Host ""
 Write-Host "========================================"
 Write-Host "  Code Quality Check"

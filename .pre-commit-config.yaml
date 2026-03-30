@@ -39,7 +39,13 @@ repos:
       - id: mypy
         additional_dependencies: [types-redis, types-requests]
         args:
-          [--ignore-missing-imports, --no-strict-optional, --allow-untyped-defs]
+          [
+            --ignore-missing-imports,
+            --no-strict-optional,
+            --allow-untyped-defs,
+            --no-warn-unused-ignores,
+            --exclude=multiprocessing,
+          ]
         files: ^(services|shared|subagents|hooks|plugins)/
         exclude: ^tests/
 

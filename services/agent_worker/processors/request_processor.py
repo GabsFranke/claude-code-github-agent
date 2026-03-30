@@ -182,12 +182,32 @@ class RequestProcessor:
         await sync_queue.publish({"repo": repo, "ref": ref or "main"})
 
         # Build prompt using workflow engine
-        prompt = self.workflow_engine.build_prompt(
+        prompt, system_context = self.workflow_engine.build_prompt(
             workflow_name=workflow_name,
             repo=repo,
             issue_number=issue_number,
             user_query=user_query,
         )
+
+        # Inject workflow context if available (for CI failures)
+        if event_data.get("run_id"):
+            workflow_context = "\n\n## Workflow Failure Context\n\n"
+            workflow_context += f"- Run ID: {event_data['run_id']}\n"
+            if event_data.get("workflow_name_gh"):
+                workflow_context += (
+                    f"- Workflow Name: {event_data['workflow_name_gh']}\n"
+                )
+            if event_data.get("job_name"):
+                workflow_context += f"- Failed Job: {event_data['job_name']}\n"
+            if event_data.get("conclusion"):
+                workflow_context += f"- Conclusion: {event_data['conclusion']}\n"
+            if event_data.get("head_branch"):
+                workflow_context += f"- Head Branch: {event_data['head_branch']}\n"
+                workflow_context += (
+                    f"- Target Branch for PR: {event_data['head_branch']}\n"
+                )
+            workflow_context += "\nUse the GitHub MCP tools to investigate this specific workflow run and job.\n"
+            prompt = prompt + workflow_context
 
         logger.info(f"Built prompt: {prompt[:150]}...")
 
@@ -217,10 +237,12 @@ class RequestProcessor:
                 "issue_number": issue_number,
                 "ref": final_ref,
                 "prompt": prompt,
+                "system_context": system_context,
                 "github_token": github_token,
                 "user": user,
                 "workflow_name": workflow_name,
                 "user_query": user_query,
+                "event_data": event_data,
             }
         )
 

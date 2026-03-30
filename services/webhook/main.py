@@ -177,6 +177,60 @@ async def webhook(request: Request):
                     "message": "Invalid issue: missing issue number",
                 }
             logger.info("Event %s.%s for issue #%s", event_type, action, issue_number)
+        elif event_type == "workflow_job" and action == "completed":
+            # For workflow job events, check if it failed
+            conclusion = data.get("workflow_job", {}).get("conclusion")
+            if conclusion != "failure":
+                logger.info(
+                    "Workflow job completed with conclusion '%s' - ignoring",
+                    conclusion,
+                )
+                return {
+                    "status": "ignored",
+                    "message": f"Workflow job conclusion is '{conclusion}', not 'failure'",
+                }
+
+            # Extract workflow run information
+            run_id = data.get("workflow_job", {}).get("run_id")
+            workflow_name_gh = data.get("workflow_job", {}).get("workflow_name")
+            job_name = data.get("workflow_job", {}).get("name")
+
+            # Extract the branch/ref where the workflow ran
+            # This is needed to target the correct branch for fixes
+            head_branch = data.get("workflow_job", {}).get("head_branch")
+            if head_branch:
+                ref = f"refs/heads/{head_branch}"
+                logger.info(f"Workflow ran on branch: {head_branch}")
+            else:
+                ref = "main"
+                logger.warning(
+                    "Could not determine branch from workflow_job, defaulting to main"
+                )
+
+            if run_id is None:
+                logger.warning("Workflow job event missing run_id")
+                return {
+                    "status": "error",
+                    "message": "Invalid workflow job: missing run_id",
+                }
+
+            # Use run_id as issue_number for routing
+            issue_number = run_id
+
+            logger.info(
+                "Workflow job failed: workflow='%s', job='%s', run_id=%s, branch=%s",
+                workflow_name_gh,
+                job_name,
+                run_id,
+                head_branch or "unknown",
+            )
+
+            # Store additional context for CI failure analysis
+            event_data["run_id"] = run_id
+            event_data["workflow_name_gh"] = workflow_name_gh
+            event_data["job_name"] = job_name
+            event_data["conclusion"] = conclusion
+            event_data["head_branch"] = head_branch
 
         # Check if we have a workflow configured for this event/command
         workflow_name = None
@@ -204,6 +258,23 @@ async def webhook(request: Request):
             user = data.get("pull_request", {}).get("user", {}).get("login", "unknown")
         elif event_type == "issues":
             user = data.get("issue", {}).get("user", {}).get("login", "unknown")
+
+        # Check if we should skip events from the bot itself
+        # The 'sender' field in GitHub webhooks is always the user who triggered the event
+        event_actor = data.get("sender", {}).get("login", "")
+        bot_username = config.webhook_bot_username
+
+        if bot_username and workflow_engine.should_skip_self(
+            workflow_name, event_actor, bot_username
+        ):
+            logger.info(
+                f"Skipping workflow '{workflow_name}' - event triggered by bot itself "
+                f"(actor: {event_actor}, skip_self: true)"
+            )
+            return {
+                "status": "ignored",
+                "message": f"Skipping event from bot itself (skip_self enabled for workflow '{workflow_name}')",
+            }
 
         # Queue agent job with event data
         job = {

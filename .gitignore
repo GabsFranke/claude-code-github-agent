@@ -69,4 +69,8 @@ private-key.pem
 # ngrok
 ngrok.yml
 
+.claude
 claude-plugins-official/
+
+# Repository setup configuration (may contain sensitive commands)
+repo-setup.yaml

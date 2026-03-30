@@ -64,7 +64,9 @@ async def process_sync_request(message: dict, redis_client):
     os.makedirs(os.path.dirname(repo_dir), exist_ok=True)
 
     # Acquire lock for this specific repo
-    lock = redis_client.lock(lock_key, timeout=300)
+    # Get lock timeout from environment (default: 5 minutes)
+    lock_timeout = int(os.getenv("REPO_SYNC_LOCK_TIMEOUT", "300"))
+    lock = redis_client.lock(lock_key, timeout=lock_timeout)
     acquired = await lock.acquire(blocking=True, blocking_timeout=10)
     if not acquired:
         logger.warning(f"Could not acquire sync lock for {repo}, already syncing?")
@@ -95,6 +97,22 @@ async def process_sync_request(message: dict, redis_client):
                 )
                 await redis_client.publish(completion_channel, error_event)
                 return
+
+            # After initial clone, configure remote and fetch all refs properly
+            # In a bare repo, we need to manually configure the fetch refspec
+            logger.info(f"Configuring fetch refspec for {repo}...")
+            config_cmd = f"git --git-dir={repo_dir} config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'"
+            code, _out, err = await execute_git_command(config_cmd)
+            if code != 0:
+                logger.warning(f"Failed to configure fetch refspec for {repo}: {err}")
+
+            # Fetch all branches, tags, and PR refs
+            logger.info(f"Fetching all refs for {repo}...")
+            cmd = f"git --git-dir={repo_dir} fetch origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '+refs/pull/*/head:refs/pull/*/head'"
+            code, _out, err = await execute_git_command(cmd)
+            if code != 0:
+                logger.warning(f"Failed to fetch all refs for {repo}: {err}")
+                # Don't fail the whole sync, just log warning
         else:
             logger.info(f"Fetching updates for {repo}...")
             # Update remote URL with authentication token for fetch

@@ -8,6 +8,7 @@ isort>=8.0.1
 mypy>=1.19.1
 ruff>=0.15.5
 pylint>=4.0.5
+pre-commit>=4.0.1
 
 # Include all service dependencies for local dev
 -r services/webhook/requirements.txt

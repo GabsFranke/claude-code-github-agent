@@ -1,0 +1,8 @@
+{
+  "name": "ci-failure-toolkit",
+  "description": "Comprehensive CI/CD failure analysis and fix toolkit with specialized agents for build failures, test failures, linting issues, and deployment problems",
+  "author": {
+    "name": "Claude Code GitHub Agent",
+    "email": "support@example.com"
+  }
+}

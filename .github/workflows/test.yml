@@ -11,9 +11,6 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.11", "3.12"]
 
     services:
       redis:
@@ -30,10 +27,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python-version }}
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.11"
           cache: "pip"
 
       - name: Install dependencies
@@ -60,7 +57,7 @@ jobs:
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4
         with:
-          name: coverage-report-${{ matrix.python-version }}
+          name: coverage-report
           path: htmlcov/
           retention-days: 30
 

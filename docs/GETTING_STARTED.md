@@ -47,7 +47,7 @@ cp .env.example .env
 Edit `.env`:
 
 ```bash
-ANTHROPIC_AUTH_TOKEN=sk-ant-...
+ANTHROPIC_API_KEY=sk-ant-...
 GITHUB_APP_ID=123456
 GITHUB_INSTALLATION_ID=789012
 GITHUB_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----"
