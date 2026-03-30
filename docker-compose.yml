@@ -64,9 +64,7 @@ services:
       dockerfile: services/sandbox_executor/Dockerfile
     command: python -m services.sandbox_executor.sandbox_worker
     env_file: .env
-    tmpfs:
-      # tmpfs for automatic workspace cleanup on restart
-      - /tmp:size=2G,mode=1777
+
     volumes:
       # Persistent cache for bare repositories across all workers
       - repo-cache:/var/cache/repos:rw

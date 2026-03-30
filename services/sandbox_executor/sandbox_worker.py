@@ -133,8 +133,7 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
             repo, ref, job_queue.redis, job_data["github_token"]
         )
 
-        # Create isolated workspace in tmpfs mount for automatic cleanup
-        # /tmp is intentional - mounted as tmpfs in Docker for security
+        # Create isolated workspace under /tmp — cleaned up explicitly after job
         workspace_base = tempfile.mkdtemp(
             prefix=f"job_{job_id[:8]}_",
             dir="/tmp",  # nosec B108
@@ -248,8 +247,14 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
                     # Log failed commands for debugging
                     for result in setup_result["results"]:
                         if not result.get("success"):
+                            # Handle both old (command) and new (commands) structure
+                            cmd_info = result.get(
+                                "commands", result.get("command", "unknown")
+                            )
+                            if isinstance(cmd_info, list):
+                                cmd_info = " && ".join(cmd_info)
                             logger.warning(
-                                f"Failed command: {result['command']} - {result.get('error', 'unknown error')}"
+                                f"Failed command(s): {cmd_info} - {result.get('error', 'unknown error')}"
                             )
                 else:
                     logger.info(

@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -18,9 +19,12 @@ class RepoConfig(BaseModel):
     setup_commands: list[str] = Field(
         default_factory=list, description="Commands to run during setup"
     )
-    timeout: int = Field(default=300, description="Timeout in seconds for all commands")
+    timeout: int = Field(default=300, description="Total timeout in seconds for all commands")
     env: dict[str, str] | None = Field(
         default=None, description="Custom environment variables"
+    )
+    stop_on_failure: bool = Field(
+        default=True, description="Stop executing commands if one fails"
     )
 
 
@@ -36,6 +40,9 @@ class DefaultConfig(BaseModel):
     timeout: int = Field(default=300, description="Default timeout in seconds")
     env: dict[str, str] | None = Field(
         default=None, description="Default environment variables"
+    )
+    stop_on_failure: bool = Field(
+        default=True, description="Stop executing commands if one fails"
     )
 
 
@@ -122,18 +129,101 @@ class RepoSetupEngine:
                 setup_commands=self.config.default.setup_commands,
                 timeout=self.config.default.timeout,
                 env=self.config.default.env,
+                stop_on_failure=self.config.default.stop_on_failure,
             )
 
         # No setup configured - this is normal, don't log
         return None
 
+    async def _run_command(
+        self,
+        cmd: str,
+        workspace: str,
+        env: dict[str, str],
+        timeout: float,
+    ) -> dict[str, Any]:
+        """Run a single command and return its result.
+
+        Args:
+            cmd: Shell command to execute
+            workspace: Working directory
+            env: Environment variables
+            timeout: Seconds before the command is killed
+
+        Returns:
+            Dict with command result
+        """
+        if sys.platform == "win32":
+            shell_cmd = ["cmd.exe", "/c", cmd]
+        else:
+            shell_cmd = ["/bin/bash", "-c", cmd]
+
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *shell_cmd,
+                cwd=workspace,
+                env=env,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(), timeout=timeout
+                )
+
+                stdout_str = stdout.decode("utf-8", errors="replace")
+                stderr_str = stderr.decode("utf-8", errors="replace")
+                success = process.returncode == 0
+
+                if success:
+                    logger.info(f"  ✓ {cmd!r}")
+                    if stdout_str:
+                        logger.debug(f"    stdout:\n{stdout_str}")
+                else:
+                    logger.warning(f"  ✗ {cmd!r} (exit {process.returncode})")
+                    if stdout_str:
+                        logger.warning(f"    stdout (last 1000): {stdout_str[-1000:]}")
+                    if stderr_str:
+                        if len(stderr_str) > 2000:
+                            logger.warning(f"    stderr (first 1000): {stderr_str[:1000]}")
+                            logger.warning(f"    stderr (last 1000): {stderr_str[-1000:]}")
+                        else:
+                            logger.warning(f"    stderr: {stderr_str}")
+
+                return {
+                    "command": cmd,
+                    "success": success,
+                    "exit_code": process.returncode,
+                    "stdout": stdout_str,
+                    "stderr": stderr_str,
+                }
+
+            except asyncio.TimeoutError:
+                logger.error(f"  ✗ {cmd!r} timed out after {timeout:.0f}s")
+                try:
+                    process.kill()
+                    await process.wait()
+                except ProcessLookupError:
+                    pass
+                return {
+                    "command": cmd,
+                    "success": False,
+                    "error": "timeout",
+                    "timeout": timeout,
+                }
+
+        except Exception as e:
+            logger.error(f"  ✗ {cmd!r} raised exception: {e}", exc_info=True)
+            return {"command": cmd, "success": False, "error": str(e)}
+
     async def run_setup(
         self, workspace: str, repo: str, config: RepoConfig
     ) -> dict[str, Any]:
-        """Execute setup commands in workspace.
+        """Execute setup commands in workspace, one command at a time.
 
-        All commands run in a single shell session, joined with &&.
-        This allows commands to share environment (PATH, variables, etc.).
+        Each command runs in its own shell process with its own result.
+        The total timeout budget is shared across all commands.
 
         Args:
             workspace: Path to workspace directory
@@ -154,102 +244,58 @@ class RepoSetupEngine:
 
         logger.info(
             f"Running {len(config.setup_commands)} setup command(s) for {repo} "
-            f"(timeout: {config.timeout}s)"
+            f"(timeout: {config.timeout}s, stop_on_failure: {config.stop_on_failure})"
         )
-
-        start_time = asyncio.get_event_loop().time()
 
         # Prepare environment
         env = os.environ.copy()
         if config.env:
-            env.update(config.env)
+            for key, value in config.env.items():
+                if key == "PATH" and "$PATH" in value:
+                    current_path = env.get("PATH", "")
+                    env[key] = value.replace("$PATH", current_path)
+                else:
+                    env[key] = value
             logger.debug(f"Added custom env vars: {list(config.env.keys())}")
 
-        # Join all commands with && to run in single shell
-        # This allows commands to share environment (PATH, etc.)
-        combined_command = " && ".join(config.setup_commands)
+        start_time = asyncio.get_event_loop().time()
+        results: list[dict[str, Any]] = []
+        all_successful = True
 
-        logger.debug(f"Combined command: {combined_command}")
+        for cmd in config.setup_commands:
+            elapsed = asyncio.get_event_loop().time() - start_time
+            remaining = config.timeout - elapsed
 
-        try:
-            # Create subprocess for combined command
-            process = await asyncio.create_subprocess_shell(
-                combined_command,
-                cwd=workspace,
-                env=env,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
+            if remaining <= 0:
+                logger.error(f"✗ Timeout budget exhausted before running: {cmd!r}")
+                results.append({"command": cmd, "success": False, "error": "timeout"})
+                all_successful = False
+                break
 
-            # Wait with timeout
-            try:
-                stdout, stderr = await asyncio.wait_for(
-                    process.communicate(), timeout=config.timeout
-                )
+            result = await self._run_command(cmd, workspace, env, remaining)
+            results.append(result)
 
-                stdout_str = stdout.decode("utf-8", errors="replace")
-                stderr_str = stderr.decode("utf-8", errors="replace")
-
-                success = process.returncode == 0
-
-                if success:
-                    logger.info("✓ All commands completed successfully")
-                else:
-                    logger.warning(
-                        f"✗ Commands failed with exit code {process.returncode}"
-                    )
-                    if stderr_str:
-                        logger.warning(f"stderr: {stderr_str[:500]}")
-
-                results = [
-                    {
-                        "commands": config.setup_commands,
-                        "success": success,
-                        "exit_code": process.returncode,
-                        "stdout": stdout_str,
-                        "stderr": stderr_str,
-                    }
-                ]
-
-            except asyncio.TimeoutError:
-                logger.error(f"✗ Setup timeout after {config.timeout}s")
-                # Kill the process
-                try:
-                    process.kill()
-                    await process.wait()
-                except ProcessLookupError:
-                    pass
-
-                results = [
-                    {
-                        "commands": config.setup_commands,
-                        "success": False,
-                        "error": "timeout",
-                        "timeout": config.timeout,
-                    }
-                ]
-                success = False
-
-        except Exception as e:
-            logger.error(f"✗ Setup exception: {e}", exc_info=True)
-            results = [
-                {"commands": config.setup_commands, "success": False, "error": str(e)}
-            ]
-            success = False
+            if not result["success"]:
+                all_successful = False
+                if config.stop_on_failure:
+                    skipped = config.setup_commands[len(results):]
+                    if skipped:
+                        logger.warning(
+                            f"Skipping {len(skipped)} remaining command(s) due to failure"
+                        )
+                    break
 
         elapsed = asyncio.get_event_loop().time() - start_time
 
-        if success:
+        if all_successful:
             logger.info(f"✓ Setup completed successfully for {repo} in {elapsed:.1f}s")
         else:
-            logger.warning(
-                f"✗ Setup completed with failures for {repo} in {elapsed:.1f}s"
-            )
+            logger.warning(f"✗ Setup completed with failures for {repo} in {elapsed:.1f}s")
 
         return {
             "completed": True,
             "results": results,
-            "all_successful": success,
+            "all_successful": all_successful,
             "elapsed_seconds": elapsed,
             "skipped": False,
         }
