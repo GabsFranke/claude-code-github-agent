@@ -168,6 +168,7 @@ class TestExecuteSandboxRequest:
                 user="testuser",
                 auto_review=False,
                 auto_triage=False,
+                workspace="/tmp/test-workspace",
             )
 
             assert response == "Test response"
@@ -216,6 +217,7 @@ class TestExecuteSandboxRequest:
                 user="testuser",
                 auto_review=False,
                 auto_triage=False,
+                workspace="/tmp/test-workspace",
             )
 
             assert response == "Part 1\nPart 2"
@@ -259,6 +261,7 @@ class TestExecuteSandboxRequest:
                     user="testuser",
                     auto_review=False,
                     auto_triage=False,
+                    workspace="/tmp/test-workspace",
                 )
 
     @pytest.mark.asyncio
@@ -293,6 +296,7 @@ class TestExecuteSandboxRequest:
                         user="testuser",
                         auto_review=False,
                         auto_triage=False,
+                        workspace="/tmp/test-workspace",
                     )
 
     @pytest.mark.asyncio
@@ -318,6 +322,7 @@ class TestExecuteSandboxRequest:
                     user="testuser",
                     auto_review=False,
                     auto_triage=False,
+                    workspace="/tmp/test-workspace",
                 )
 
     @pytest.mark.asyncio
@@ -360,6 +365,7 @@ class TestExecuteSandboxRequest:
                 user="testuser",
                 auto_review=False,
                 auto_triage=False,
+                workspace="/tmp/test-workspace",
             )
 
             # Verify ClaudeAgentOptions was created with correct MCP config

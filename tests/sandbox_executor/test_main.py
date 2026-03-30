@@ -63,6 +63,7 @@ class TestExecuteEndpoint:
                 user="testuser",
                 auto_review=False,
                 auto_triage=False,
+                workspace="/tmp/job_0dd89d59_o24mmbp1",
             )
 
     @pytest.mark.asyncio

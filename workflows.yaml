@@ -44,7 +44,7 @@ workflows:
         - /fix-tests
     prompt:
       template: "/ci-failure-toolkit:fix-ci {repo} {issue_number}"
-      # system_context: "fix-ci.md"
+      system_context: "fix-ci.md"
     description: "Analyze and fix CI/CD failures"
     skip_self: true # Explicitly set - don't auto-fix CI failures on bot's own PRs
 
