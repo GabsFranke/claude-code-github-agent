@@ -13,6 +13,8 @@ from repo_setup import RepoSetupEngine  # noqa: E402
 from shared import (  # noqa: E402
     JobQueue,
     RepositorySyncError,
+    SDKError,
+    SDKTimeoutError,
     WorktreeCreationError,
     execute_git_command,
     setup_graceful_shutdown,
@@ -305,14 +307,31 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
         logger.info(f"Job {job_id} completed successfully")
 
     except Exception as e:
+        import time
+
         logger.error(f"Job {job_id} failed: {e}", exc_info=True)
 
-        # Mark job as failed
+        # Categorize error type
+        error_type = type(e).__name__
+        error_category = "unknown"
+        if isinstance(e, (WorktreeCreationError, RepositorySyncError)):
+            error_category = "infrastructure"
+        elif isinstance(e, (SDKError, SDKTimeoutError)):
+            error_category = "sdk"
+        elif isinstance(e, TimeoutError):
+            error_category = "timeout"
+        else:
+            error_category = "execution"
+
+        # Mark job as failed with detailed context
         await job_queue.complete_job(
             job_id,
             {
                 "status": "error",
                 "error": str(e),
+                "error_type": error_type,
+                "error_category": error_category,
+                "timestamp": time.time(),
                 "repo": job_data["repo"],
                 "issue_number": job_data["issue_number"],
             },
@@ -331,17 +350,29 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
 
         # Cleanup workspace and worktree
         if workspace:
-            try:
-                if repo_dir and os.path.exists(workspace):
-                    # Remove worktree from bare repo tracking
-                    await execute_git_command(
-                        f"git --git-dir={repo_dir} worktree remove --force {workspace}"
-                    )
-                elif os.path.exists(workspace):
-                    shutil.rmtree(workspace)
-                logger.debug(f"Cleaned up workspace: {workspace}")
-            except Exception as e:
-                logger.warning(f"Failed to cleanup workspace {workspace}: {e}")
+            # Try cleanup with retry (up to 3 attempts)
+            for attempt in range(3):
+                try:
+                    if repo_dir and os.path.exists(workspace):
+                        # Remove worktree from bare repo tracking
+                        await execute_git_command(
+                            f"git --git-dir={repo_dir} worktree remove --force {workspace}"
+                        )
+                    elif os.path.exists(workspace):
+                        shutil.rmtree(workspace)
+                    logger.debug(f"Cleaned up workspace: {workspace}")
+                    break  # Success, exit retry loop
+                except Exception as e:
+                    if attempt < 2:  # Not the last attempt
+                        logger.warning(
+                            f"Failed to cleanup workspace {workspace} (attempt {attempt + 1}/3): {e}. Retrying..."
+                        )
+                        await asyncio.sleep(1)  # Wait before retry
+                    else:
+                        logger.error(
+                            f"Failed to cleanup workspace {workspace} after 3 attempts: {e}",
+                            exc_info=True,
+                        )
 
 
 async def main():

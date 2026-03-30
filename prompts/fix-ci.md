@@ -18,7 +18,7 @@ You have access to specialized tools for fetching workflow run data efficiently:
    - Usually sufficient for diagnosis (~5-20KB)
    - Recommended for most cases
 
-3. **get_job_logs(owner, repo, job_id, max_lines=None)** - When needed
+3. **get_job_logs_raw(owner, repo, job_id, max_lines=None)** - When needed
    - Full logs for specific job
    - Use if failed steps aren't enough
    - Can limit to last N lines
@@ -41,7 +41,7 @@ failed_steps = await get_failed_steps(owner, repo, failed_jobs[0]["id"])
 
 # 3. Only if needed: get full logs or search
 if need_more_context:
-    logs = await get_job_logs(owner, repo, job_id, max_lines=500)
+    logs = await get_job_logs_raw(owner, repo, job_id, max_lines=500)
     # or
     matches = await search_job_logs(owner, repo, job_id, pattern="error|exception")
 ```

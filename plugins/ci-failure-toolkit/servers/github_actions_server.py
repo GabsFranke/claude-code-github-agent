@@ -13,7 +13,7 @@ from typing import Any
 
 from tools.github_actions import (
     get_failed_steps,
-    get_job_logs,
+    get_job_logs_raw,
     get_workflow_run_summary,
     search_job_logs,
 )
@@ -84,8 +84,8 @@ async def handle_request(request: dict[str, Any]) -> dict[str, Any]:
                     },
                 },
                 {
-                    "name": "get_job_logs",
-                    "description": "Get full logs for a specific job. Use only if failed steps aren't enough. Large logs written to .ci-logs/ directory.",
+                    "name": "get_job_logs_raw",
+                    "description": "Get paginated job logs. Use start_line and num_lines to read logs in chunks (default: 500 lines per call).",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
@@ -101,9 +101,15 @@ async def handle_request(request: dict[str, Any]) -> dict[str, Any]:
                                 "type": "string",
                                 "description": "Job ID from workflow run",
                             },
-                            "max_lines": {
+                            "start_line": {
                                 "type": "integer",
-                                "description": "Optional limit to last N lines",
+                                "description": "Line number to start from (0-indexed, default: 0)",
+                                "default": 0,
+                            },
+                            "num_lines": {
+                                "type": "integer",
+                                "description": "Number of lines to return (default: 500)",
+                                "default": 500,
                             },
                         },
                         "required": ["owner", "repo", "job_id"],
@@ -222,24 +228,20 @@ Failed Steps: {result['failed_steps_count']}
                     ]
                 }
 
-            elif tool_name == "get_job_logs":
-                result = await get_job_logs(
+            elif tool_name == "get_job_logs_raw":
+                result = await get_job_logs_raw(
                     owner=arguments["owner"],
                     repo=arguments["repo"],
                     job_id=arguments["job_id"],
-                    max_lines=arguments.get("max_lines"),
+                    start_line=arguments.get("start_line", 0),
+                    num_lines=arguments.get("num_lines", 500),
                 )
 
-                response_text = f"""Job Logs: {result['job_name']}
-Status: {result['status']} / {result['conclusion']}
-Original Size: {result['original_size']} characters
-Truncated: {result['logs_truncated']}
-"""
+                response_text = f"""Job Logs (Paginated)
+Total Lines: {result['total_lines']}
+Showing: Lines {result['start_line']} to {result['end_line']} ({result['num_lines_returned']} lines)
 
-                if result.get("logs_file"):
-                    response_text += f"\nLogs written to: {result['logs_file']}\n\nPreview:\n{result['logs']}"
-                else:
-                    response_text += f"\n{result['logs']}"
+{result['lines']}"""
 
                 return {"content": [{"type": "text", "text": response_text}]}
 
@@ -291,8 +293,25 @@ Total Matches: {result['total_matches']}{truncated_note}
                 }
 
         except Exception as e:
+            import logging
+            import traceback
+
+            logger = logging.getLogger(__name__)
+            logger.error(
+                f"Tool execution failed: {tool_name}",
+                exc_info=True,
+                extra={
+                    "tool_name": tool_name,
+                    "error_type": type(e).__name__,
+                    "arguments": arguments,
+                },
+            )
             return {
-                "error": {"code": -32603, "message": f"Tool execution failed: {str(e)}"}
+                "error": {
+                    "code": -32603,
+                    "message": f"Tool execution failed: {type(e).__name__}: {str(e)}",
+                    "data": {"traceback": traceback.format_exc()},
+                }
             }
 
     else:
@@ -328,6 +347,16 @@ async def main():
             sys.stdout.flush()
 
         except json.JSONDecodeError as e:
+            import logging
+
+            logger = logging.getLogger(__name__)
+            # Log with sanitized input (first 200 chars only for security)
+            input_preview = line[:200] if line and len(line) > 200 else line
+            logger.error(
+                f"JSON parse error: {str(e)}",
+                exc_info=True,
+                extra={"input_preview": input_preview},
+            )
             error_response = {
                 "jsonrpc": "2.0",
                 "error": {"code": -32700, "message": f"Parse error: {str(e)}"},

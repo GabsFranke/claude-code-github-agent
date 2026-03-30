@@ -13,8 +13,35 @@ The plugin includes an in-process MCP server that provides efficient access to G
 - `mcp__github-actions__get_workflow_run_summary` - High-level overview without logs (~1-2KB)
 - `mcp__github-actions__get_job_logs_raw` - Paginated access to job logs (500 lines per call)
 - `mcp__github-actions__search_job_logs` - Search patterns in logs (~2-10KB)
+- `mcp__github-actions__get_failed_steps` - Extract failed steps with log excerpts (~5-20KB)
 
 These tools use progressive access strategy to minimize context usage while providing comprehensive failure analysis.
+
+#### When to Use Each Tool
+
+**Decision Matrix:**
+
+| Scenario                                  | Tool to Use                | Why                                                                     |
+| ----------------------------------------- | -------------------------- | ----------------------------------------------------------------------- |
+| Just started investigating                | `get_workflow_run_summary` | Get overview of all jobs, identify which failed (1-2KB)                 |
+| Know which job failed, need to see errors | `get_failed_steps`         | Most efficient - extracts only failed steps with relevant logs (5-20KB) |
+| Failed steps aren't enough context        | `get_job_logs_raw`         | Paginated access to full logs, read in 500-line chunks                  |
+| Looking for specific error pattern        | `search_job_logs`          | Find specific patterns without reading entire log                       |
+| Need to read very large logs              | `get_job_logs_raw`         | Paginate through logs in manageable chunks                              |
+
+**Performance Characteristics:**
+
+- `get_workflow_run_summary`: ~1-2KB, <1s response time
+- `get_failed_steps`: ~5-20KB, 1-3s response time (includes log excerpt)
+- `get_job_logs_raw`: ~10-50KB per call, 2-5s response time (depends on chunk size)
+- `search_job_logs`: ~2-10KB, 2-5s response time (depends on matches)
+
+**Recommended Workflow:**
+
+1. Start with `get_workflow_run_summary` to identify failed jobs
+2. Use `get_failed_steps` for the failed job - this gives you the error in most cases
+3. If you need more context, use `search_job_logs` to find specific patterns
+4. Only use `get_job_logs_raw` if you need to read the entire log (paginate through it)
 
 ## Architecture
 

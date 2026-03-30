@@ -324,3 +324,217 @@ async def test_custom_env_variables(tmp_path):
 
     finally:
         config_path.unlink()
+
+
+def test_invalid_yaml_syntax():
+    """Test handling of invalid YAML syntax."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        f.write("invalid: yaml: syntax: [unclosed")
+        config_path = Path(f.name)
+
+    try:
+        with pytest.raises(ValueError, match="Invalid YAML"):
+            RepoSetupEngine(config_path=config_path)
+    finally:
+        config_path.unlink()
+
+
+def test_invalid_schema_wrong_types():
+    """Test handling of invalid schema with wrong types."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        config = {
+            "repositories": {
+                "owner/repo": {
+                    "setup_commands": "not a list",  # Should be list
+                    "timeout": "not an int",  # Should be int
+                }
+            }
+        }
+        yaml.dump(config, f)
+        config_path = Path(f.name)
+
+    try:
+        with pytest.raises(ValueError, match="validation error"):
+            RepoSetupEngine(config_path=config_path)
+    finally:
+        config_path.unlink()
+
+
+def test_validation_error_formatting():
+    """Test that validation errors are properly formatted in logs."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        config = {
+            "repositories": {
+                "owner/repo": {
+                    "setup_commands": "not a list",  # Invalid: should be list
+                }
+            }
+        }
+        yaml.dump(config, f)
+        config_path = Path(f.name)
+
+    try:
+        with pytest.raises(ValueError) as exc_info:
+            RepoSetupEngine(config_path=config_path)
+
+        # Should contain validation error details
+        assert "validation error" in str(exc_info.value).lower()
+    finally:
+        config_path.unlink()
+
+
+def test_empty_yaml_file():
+    """Test handling of empty YAML file."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        f.write("")  # Empty file
+        config_path = Path(f.name)
+
+    try:
+        # Should initialize with empty config (not crash)
+        engine = RepoSetupEngine(config_path=config_path)
+        assert len(engine.config.repositories) == 0
+    finally:
+        config_path.unlink()
+
+
+@pytest.mark.asyncio
+async def test_command_subprocess_error(tmp_path):
+    """Test handling of OSError during subprocess creation."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        config = {
+            "repositories": {
+                "owner/error": {
+                    "setup_commands": ["echo test"],
+                    "timeout": 10,
+                }
+            }
+        }
+        yaml.dump(config, f)
+        config_path = Path(f.name)
+
+    try:
+        engine = RepoSetupEngine(config_path=config_path)
+        config = engine.get_setup_config("owner/error")
+
+        # Mock subprocess creation to raise OSError
+        from unittest.mock import patch
+
+        with patch("asyncio.create_subprocess_exec", side_effect=OSError("Mock error")):
+            result = await engine.run_setup(str(tmp_path), "owner/error", config)
+
+            assert result["completed"] is True
+            assert result["all_successful"] is False
+            assert len(result["results"]) == 1
+            assert result["results"][0]["success"] is False
+            assert "Mock error" in result["results"][0]["error"]
+
+    finally:
+        config_path.unlink()
+
+
+@pytest.mark.asyncio
+async def test_timeout_budget_exhaustion(tmp_path):
+    """Test that timeout budget is enforced across multiple commands."""
+    import sys
+
+    if sys.platform == "win32":
+        sleep_cmd = "ping -n 3 127.0.0.1 > nul"  # ~2 seconds
+    else:
+        sleep_cmd = "sleep 2"
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        config = {
+            "repositories": {
+                "owner/budget": {
+                    "setup_commands": [
+                        sleep_cmd,
+                        sleep_cmd,
+                        sleep_cmd,
+                    ],  # 6 seconds total
+                    "timeout": 3,  # Only 3 seconds budget
+                }
+            }
+        }
+        yaml.dump(config, f)
+        config_path = Path(f.name)
+
+    try:
+        engine = RepoSetupEngine(config_path=config_path)
+        config = engine.get_setup_config("owner/budget")
+
+        result = await engine.run_setup(str(tmp_path), "owner/budget", config)
+
+        assert result["completed"] is True
+        assert result["all_successful"] is False
+        # Should have run first command, then timed out on second
+        assert len(result["results"]) <= 2
+        # At least one should have timeout error
+        timeout_errors = [r for r in result["results"] if r.get("error") == "timeout"]
+        assert len(timeout_errors) > 0
+
+    finally:
+        config_path.unlink()
+
+
+@pytest.mark.asyncio
+async def test_path_variable_expansion(tmp_path):
+    """Test that $PATH is properly expanded in environment variables."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        config = {
+            "repositories": {
+                "owner/path-test": {
+                    "setup_commands": ["echo test"],
+                    "timeout": 10,
+                    "env": {"PATH": "/custom/bin:$PATH"},
+                }
+            }
+        }
+        yaml.dump(config, f)
+        config_path = Path(f.name)
+
+    try:
+        engine = RepoSetupEngine(config_path=config_path)
+        config = engine.get_setup_config("owner/path-test")
+
+        result = await engine.run_setup(str(tmp_path), "owner/path-test", config)
+
+        assert result["completed"] is True
+        assert result["all_successful"] is True
+
+        # Verify PATH was expanded (check in _run_command that it contains original PATH)
+        # This is tested indirectly - if PATH wasn't expanded, commands might fail
+
+    finally:
+        config_path.unlink()
+
+
+@pytest.mark.asyncio
+async def test_path_expansion_edge_cases(tmp_path):
+    """Test edge cases in PATH variable expansion."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        config = {
+            "repositories": {
+                "owner/path-edge": {
+                    "setup_commands": ["echo test"],
+                    "timeout": 10,
+                    "env": {
+                        "PATH": "/custom/bin",  # No $PATH
+                        "CUSTOM": "value_with_$PATH_in_it",  # $PATH in non-PATH var
+                    },
+                }
+            }
+        }
+        yaml.dump(config, f)
+        config_path = Path(f.name)
+
+    try:
+        engine = RepoSetupEngine(config_path=config_path)
+        config = engine.get_setup_config("owner/path-edge")
+
+        result = await engine.run_setup(str(tmp_path), "owner/path-edge", config)
+
+        assert result["completed"] is True
+        # Should succeed even with custom PATH
+
+    finally:
+        config_path.unlink()

@@ -84,7 +84,7 @@ Go to GitHub Settings → Developer settings → GitHub Apps → New GitHub App:
 cp .env.example .env
 
 # Edit .env with your credentials:
-ANTHROPIC_AUTH_TOKEN=(from Anthropic Console)
+ANTHROPIC_API_KEY=(from Anthropic Console)
 GITHUB_APP_ID=(from your GitHub App settings)
 GITHUB_INSTALLATION_ID=(from installation URL)
 GITHUB_PRIVATE_KEY=(contents of the .pem file)
@@ -242,7 +242,7 @@ GitHub Event → Webhook → Redis Queues → Worker (Workflow Engine) → Job Q
 
 **Required:**
 
-- `ANTHROPIC_AUTH_TOKEN`: Your Anthropic API key
+- `ANTHROPIC_API_KEY`: Your Anthropic API key (or `ANTHROPIC_AUTH_TOKEN` as alternative)
 - `GITHUB_WEBHOOK_SECRET`: Secret for webhook signature verification
 - `GITHUB_APP_ID`: Your GitHub App ID
 - `GITHUB_INSTALLATION_ID`: Installation ID from the app installation URL

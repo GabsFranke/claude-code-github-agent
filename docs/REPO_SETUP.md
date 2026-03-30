@@ -29,6 +29,7 @@ repositories:
       - "sudo apt-get install -y nodejs npm"
       - "npm install"
     timeout: 300 # seconds
+    stop_on_failure: true # Stop if any command fails (default)
     env: # Optional custom environment variables
       NODE_ENV: "development"
 
@@ -36,6 +37,7 @@ default:
   enabled: false # Don't run setup by default
   setup_commands: []
   timeout: 300
+  stop_on_failure: true
 ```
 
 ### Example Configurations
@@ -157,6 +159,7 @@ repositories:
 
 - **setup_commands** (required): List of shell commands to run sequentially
 - **timeout** (optional, default: 300): Timeout in seconds for all commands combined
+- **stop_on_failure** (optional, default: true): Stop executing remaining commands if one fails
 - **env** (optional): Dictionary of custom environment variables
 
 ### Default Configuration
@@ -198,9 +201,10 @@ sudo apt-get install nodejs
 
 1. Commands run **sequentially** in the order specified
 2. Commands run in the **workspace directory** (git worktree root)
-3. If a command **fails** (non-zero exit code), remaining commands are **skipped**
-4. If setup **fails**, the job **continues** anyway (agent can still work with source code)
-5. All output (stdout/stderr) is **logged** for debugging
+3. If a command **fails** (non-zero exit code) and `stop_on_failure: true` (default), remaining commands are **skipped**
+4. If `stop_on_failure: false`, all commands run regardless of failures
+5. If setup **fails**, the job **continues** anyway (agent can still work with source code)
+6. All output (stdout/stderr) is **logged** for debugging
 
 ### Timeout Behavior
 
@@ -368,6 +372,9 @@ Set timeouts generously to avoid failures on slow networks.
 
 ## Security Considerations
 
+> [!WARNING]
+> Repository setup commands have **full sudo access** and run with **no sandboxing restrictions**. They can install any system package, modify system configuration, and execute arbitrary code. Only configure setup for repositories you **fully trust**. Malicious setup commands could compromise the sandbox container or exfiltrate secrets.
+
 ### sudo Access
 
 - Container runs as non-root user with passwordless sudo
@@ -380,14 +387,16 @@ Set timeouts generously to avoid failures on slow networks.
 
 - Commands run in the **repository's worktree** with the repository's code
 - Only configure repositories you **trust**
-- Commands have **full access** to the workspace
+- Commands have **full access** to the workspace and system (via sudo)
 - Be careful with user-provided input in commands
+- **Never** use untrusted input in setup commands (e.g., branch names, PR titles)
 
 ### Secrets
 
 - Don't put secrets in `repo-setup.yaml` (it's version controlled)
 - Use environment variables for sensitive data
 - Configure secrets in `.env` file or Docker secrets
+- Setup commands have access to all environment variables (including secrets)
 
 ### Isolation
 
@@ -395,6 +404,7 @@ Set timeouts generously to avoid failures on slow networks.
 - Workspace is **deleted** after job completes
 - Setup commands **cannot** affect other jobs
 - Setup commands **cannot** access host filesystem (except mounted volumes)
+- However, setup commands **can** install system packages that persist in the container
 
 ## Troubleshooting
 

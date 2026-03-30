@@ -19,7 +19,9 @@ class RepoConfig(BaseModel):
     setup_commands: list[str] = Field(
         default_factory=list, description="Commands to run during setup"
     )
-    timeout: int = Field(default=300, description="Total timeout in seconds for all commands")
+    timeout: int = Field(
+        default=300, description="Total timeout in seconds for all commands"
+    )
     env: dict[str, str] | None = Field(
         default=None, description="Custom environment variables"
     )
@@ -186,8 +188,12 @@ class RepoSetupEngine:
                         logger.warning(f"    stdout (last 1000): {stdout_str[-1000:]}")
                     if stderr_str:
                         if len(stderr_str) > 2000:
-                            logger.warning(f"    stderr (first 1000): {stderr_str[:1000]}")
-                            logger.warning(f"    stderr (last 1000): {stderr_str[-1000:]}")
+                            logger.warning(
+                                f"    stderr (first 1000): {stderr_str[:1000]}"
+                            )
+                            logger.warning(
+                                f"    stderr (last 1000): {stderr_str[-1000:]}"
+                            )
                         else:
                             logger.warning(f"    stderr: {stderr_str}")
 
@@ -210,12 +216,40 @@ class RepoSetupEngine:
                     "command": cmd,
                     "success": False,
                     "error": "timeout",
+                    "error_category": "timeout",
                     "timeout": timeout,
                 }
 
+        except OSError as e:
+            # File system errors, permission issues, command not found
+            logger.error(f"  ✗ {cmd!r} raised OSError: {e}", exc_info=True)
+            return {
+                "command": cmd,
+                "success": False,
+                "error": str(e),
+                "error_category": "os_error",
+                "error_type": "OSError",
+            }
+        except MemoryError as e:
+            # Out of memory
+            logger.error(f"  ✗ {cmd!r} raised MemoryError: {e}", exc_info=True)
+            return {
+                "command": cmd,
+                "success": False,
+                "error": str(e),
+                "error_category": "resource_exhaustion",
+                "error_type": "MemoryError",
+            }
         except Exception as e:
+            # Catch-all for unexpected errors
             logger.error(f"  ✗ {cmd!r} raised exception: {e}", exc_info=True)
-            return {"command": cmd, "success": False, "error": str(e)}
+            return {
+                "command": cmd,
+                "success": False,
+                "error": str(e),
+                "error_category": "unknown",
+                "error_type": type(e).__name__,
+            }
 
     async def run_setup(
         self, workspace: str, repo: str, config: RepoConfig
@@ -278,7 +312,7 @@ class RepoSetupEngine:
             if not result["success"]:
                 all_successful = False
                 if config.stop_on_failure:
-                    skipped = config.setup_commands[len(results):]
+                    skipped = config.setup_commands[len(results) :]
                     if skipped:
                         logger.warning(
                             f"Skipping {len(skipped)} remaining command(s) due to failure"
@@ -290,7 +324,9 @@ class RepoSetupEngine:
         if all_successful:
             logger.info(f"✓ Setup completed successfully for {repo} in {elapsed:.1f}s")
         else:
-            logger.warning(f"✗ Setup completed with failures for {repo} in {elapsed:.1f}s")
+            logger.warning(
+                f"✗ Setup completed with failures for {repo} in {elapsed:.1f}s"
+            )
 
         return {
             "completed": True,

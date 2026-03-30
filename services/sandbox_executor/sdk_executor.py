@@ -62,7 +62,8 @@ def setup_langfuse_hooks() -> dict:
 
             try:
                 _stdout, stderr = await asyncio.wait_for(
-                    process.communicate(input=hook_payload.encode()), timeout=30.0
+                    process.communicate(input=hook_payload.encode()),
+                    timeout=float(os.getenv("LANGFUSE_HOOK_TIMEOUT", "30.0")),
                 )
                 if process.returncode != 0:
                     logger.warning(f"Langfuse hook failed: {stderr.decode()}")
@@ -240,7 +241,9 @@ async def execute_sandbox_request(
     response_parts = []
 
     try:
-        async with asyncio.timeout(1800):  # 30 minutes
+        # Get SDK timeout from environment (default: 30 minutes)
+        sdk_timeout = int(os.getenv("SDK_EXECUTION_TIMEOUT", "1800"))
+        async with asyncio.timeout(sdk_timeout):
             async with ClaudeSDKClient(options=options) as client:
                 logger.info("SDK client created, sending query...")
                 await client.query(prompt)

@@ -10,9 +10,16 @@ Provides progressive access to workflow run data:
 
 import os
 import re
+import sys
+from pathlib import Path
 from typing import Any
 
 import httpx
+
+# Add parent directory to path for shared imports
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+
+from shared.exceptions import AuthenticationError  # noqa: E402
 
 
 async def get_workflow_run_summary(
@@ -36,7 +43,7 @@ async def get_workflow_run_summary(
     """
     github_token = os.getenv("GITHUB_TOKEN")
     if not github_token:
-        raise ValueError("GITHUB_TOKEN not available in environment")
+        raise AuthenticationError("GITHUB_TOKEN not available in environment")
 
     headers = {
         "Authorization": f"token {github_token}",
@@ -125,7 +132,7 @@ async def get_job_logs_raw(
     """
     github_token = os.getenv("GITHUB_TOKEN")
     if not github_token:
-        raise ValueError("GITHUB_TOKEN not available in environment")
+        raise AuthenticationError("GITHUB_TOKEN not available in environment")
 
     headers = {
         "Authorization": f"token {github_token}",
@@ -188,7 +195,7 @@ async def search_job_logs(
     """
     github_token = os.getenv("GITHUB_TOKEN")
     if not github_token:
-        raise ValueError("GITHUB_TOKEN not available in environment")
+        raise AuthenticationError("GITHUB_TOKEN not available in environment")
 
     headers = {
         "Authorization": f"token {github_token}",
@@ -257,7 +264,7 @@ async def get_failed_steps(
     """
     github_token = os.getenv("GITHUB_TOKEN")
     if not github_token:
-        raise ValueError("GITHUB_TOKEN not available in environment")
+        raise AuthenticationError("GITHUB_TOKEN not available in environment")
 
     headers = {
         "Authorization": f"token {github_token}",

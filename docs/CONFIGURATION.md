@@ -7,7 +7,7 @@ Complete reference for all environment variables and configuration options.
 **Required**:
 
 ```bash
-ANTHROPIC_AUTH_TOKEN=sk-ant-...
+ANTHROPIC_API_KEY=sk-ant-...
 GITHUB_APP_ID=123456
 GITHUB_INSTALLATION_ID=789012
 GITHUB_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----"
@@ -49,8 +49,7 @@ GITHUB_WEBHOOK_SECRET=your-webhook-secret
 
 # Anthropic API
 ANTHROPIC_API_KEY=sk-ant-...
-# OR
-ANTHROPIC_AUTH_TOKEN=sk-ant-...
+# Note: ANTHROPIC_AUTH_TOKEN is also supported as an alternative
 ```
 
 ### Optional Settings

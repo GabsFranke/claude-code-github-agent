@@ -64,7 +64,9 @@ async def process_sync_request(message: dict, redis_client):
     os.makedirs(os.path.dirname(repo_dir), exist_ok=True)
 
     # Acquire lock for this specific repo
-    lock = redis_client.lock(lock_key, timeout=300)
+    # Get lock timeout from environment (default: 5 minutes)
+    lock_timeout = int(os.getenv("REPO_SYNC_LOCK_TIMEOUT", "300"))
+    lock = redis_client.lock(lock_key, timeout=lock_timeout)
     acquired = await lock.acquire(blocking=True, blocking_timeout=10)
     if not acquired:
         logger.warning(f"Could not acquire sync lock for {repo}, already syncing?")
