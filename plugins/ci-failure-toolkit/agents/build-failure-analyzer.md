@@ -75,9 +75,9 @@ Use the file operation tools as described in your `git-worktree-workflow` skill:
 ### 4. Verify Fixes
 
 ```bash
-# Python projects
-pip install -r requirements.txt
-python -m pytest tests/
+# Python projects (use virtual environment)
+.venv/bin/pip install -r requirements.txt
+.venv/bin/python -m pytest tests/
 
 # Node projects
 npm install

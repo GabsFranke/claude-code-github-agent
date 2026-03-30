@@ -76,16 +76,16 @@ Use the file operation tools as described in your `git-worktree-workflow` skill:
 ### 4. Verify Fixes
 
 ```bash
-# Python tests
-pytest tests/test_module.py -v
-pytest tests/test_module.py::test_specific_case
+# Python tests (use virtual environment)
+.venv/bin/python -m pytest tests/test_module.py -v
+.venv/bin/python -m pytest tests/test_module.py::test_specific_case
 
 # Node tests
 npm test -- test_module.test.js
 npm test -- --testNamePattern="specific test"
 
 # Run multiple times to check for flakiness
-for i in {1..10}; do pytest tests/test_module.py || break; done
+for i in {1..10}; do .venv/bin/python -m pytest tests/test_module.py || break; done
 ```
 
 **CRITICAL:** After tests pass, you MUST run code quality checks before committing. See the `python-code-quality` skill for the exact commands.

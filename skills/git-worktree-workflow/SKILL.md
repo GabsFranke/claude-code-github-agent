@@ -74,13 +74,13 @@ Use these tools to implement fixes:
 - **Bash** - Run commands that modify files (formatters, etc.)
 
 ```bash
-# Run auto-formatters
-black src/
-isort src/
-ruff check --fix .
+# Run auto-formatters (use virtual environment)
+.venv/bin/black src/
+.venv/bin/isort src/
+.venv/bin/ruff check --fix .
 
-# Run tests locally
-pytest tests/
+# Run tests locally (use virtual environment)
+.venv/bin/python -m pytest tests/
 npm test
 ```
 
@@ -93,10 +93,10 @@ npm test
 This project has strict code quality standards. Run these commands before every commit:
 
 ```bash
-# Auto-fix formatting and linting (run in this order)
-black services/ shared/ subagents/ hooks/ plugins/ tests/
-isort services/ shared/ subagents/ hooks/ plugins/ tests/
-ruff check --fix services/ shared/ subagents/ hooks/ plugins/ tests/
+# Auto-fix formatting and linting (run in this order, use virtual environment)
+.venv/bin/black services/ shared/ subagents/ hooks/ plugins/ tests/
+.venv/bin/isort services/ shared/ subagents/ hooks/ plugins/ tests/
+.venv/bin/ruff check --fix services/ shared/ subagents/ hooks/ plugins/ tests/
 
 # Verify all checks pass
 ./check-code.sh
@@ -199,10 +199,10 @@ mcp__github__add_issue_comment({
 Always verify fixes locally before pushing:
 
 ```bash
-# Python projects
-pytest tests/
-pytest tests/test_specific.py -v
-python -m mypy src/
+# Python projects (use virtual environment)
+.venv/bin/python -m pytest tests/
+.venv/bin/python -m pytest tests/test_specific.py -v
+.venv/bin/mypy src/
 
 # Node projects
 npm test
@@ -287,8 +287,8 @@ git branch --show-current
 # 2. Implement your fixes
 # (use Read/Write/Edit/Bash tools)
 
-# 3. Test locally
-pytest tests/
+# 3. Test locally (use virtual environment)
+.venv/bin/python -m pytest tests/
 
 # 4. Run code quality checks (see python-code-quality skill)
 
