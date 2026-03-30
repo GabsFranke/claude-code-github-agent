@@ -270,6 +270,8 @@ chmod +x directory/
 ❌ **DO NOT** push to `main` directly - push to your current branch
 ❌ **DO NOT** use `gh` CLI - use MCP tools
 ❌ **DO NOT** hardcode branch names - use `HEAD` or `$(git branch --show-current)`
+❌ **DO NOT** commit without running code quality checks - CI will fail
+❌ **DO NOT** skip `./check-code.sh` - it must pass before pushing
 
 ## Common Scenarios
 
@@ -288,10 +290,7 @@ git branch --show-current
 # 3. Test locally
 pytest tests/
 
-# 4. Run code quality checks (CRITICAL - always do this!)
-black services/ shared/ subagents/ hooks/ plugins/ tests/
-isort services/ shared/ subagents/ hooks/ plugins/ tests/
-ruff check --fix services/ shared/ subagents/ hooks/ plugins/ tests/
+# 4. Run code quality checks (see python-code-quality skill)
 
 # 5. Verify checks pass
 ./check-code.sh
@@ -314,10 +313,7 @@ For complex fixes:
 # 1. Implement first fix
 # (edit files)
 
-# 2. Run code quality checks
-black services/ shared/ subagents/ hooks/ plugins/ tests/
-isort services/ shared/ subagents/ hooks/ plugins/ tests/
-ruff check --fix services/ shared/ subagents/ hooks/ plugins/ tests/
+# 2. Run code quality checks (see python-code-quality skill)
 
 # 3. Commit first fix
 git add src/api.py
@@ -327,9 +323,6 @@ git commit -m "fix: resolve import error"
 # (edit more files)
 
 # 5. Run code quality checks again
-black services/ shared/ subagents/ hooks/ plugins/ tests/
-isort services/ shared/ subagents/ hooks/ plugins/ tests/
-ruff check --fix services/ shared/ subagents/ hooks/ plugins/ tests/
 
 # 6. Commit second fix
 git add tests/test_api.py
@@ -351,8 +344,9 @@ Your typical workflow:
 
 1. Verify you're on a branch: `git branch --show-current`
 2. Implement fixes using file tools
-3. Test locally with Bash
-4. Commit with clear messages
-5. Push to current branch: `git push origin HEAD`
+3. Test locally with Bash (pytest, npm test, etc.)
+4. Run code quality checks (see `python-code-quality` skill)
+5. Commit with clear messages
+6. Push to current branch: `git push origin HEAD`
 
 Remember: You're in a worktree, not a fresh clone. Don't clone, don't create branches (unless instructed), just work!

@@ -85,6 +85,8 @@ npm run build
 npm test
 ```
 
+**CRITICAL:** After build succeeds, you MUST run code quality checks before committing. See the `python-code-quality` skill for the exact commands.
+
 **Note:** Docker commands are not available. For Docker build issues, analyze Dockerfile and docker-compose.yml statically.
 
 ### 5. Return Structured Results

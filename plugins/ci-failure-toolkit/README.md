@@ -11,8 +11,7 @@ This plugin provides intelligent CI failure analysis and automated fixes through
 The plugin includes an in-process MCP server that provides efficient access to GitHub Actions workflow data:
 
 - `mcp__github-actions__get_workflow_run_summary` - High-level overview without logs (~1-2KB)
-- `mcp__github-actions__get_failed_steps` - Only failed steps with log excerpts (~5-20KB)
-- `mcp__github-actions__get_job_logs` - Full logs for specific job (variable size, auto-writes to `.ci-logs/`)
+- `mcp__github-actions__get_job_logs_raw` - Paginated access to job logs (500 lines per call)
 - `mcp__github-actions__search_job_logs` - Search patterns in logs (~2-10KB)
 
 These tools use progressive access strategy to minimize context usage while providing comprehensive failure analysis.

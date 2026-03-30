@@ -9,16 +9,17 @@ import sys
 import tempfile
 import uuid
 
-from shared import (
+from repo_setup import RepoSetupEngine  # noqa: E402
+from shared import (  # noqa: E402
     JobQueue,
     RepositorySyncError,
     WorktreeCreationError,
     execute_git_command,
     setup_graceful_shutdown,
 )
-from shared.logging_utils import setup_logging
+from shared.logging_utils import setup_logging  # noqa: E402
 
-from .sdk_executor import execute_sandbox_request
+from .sdk_executor import execute_sandbox_request  # noqa: E402
 
 # Configure logging
 setup_logging(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -228,6 +229,40 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
             f'git config user.name "{bot_username}"', cwd=workspace
         )
         await execute_git_command(f'git config user.email "{bot_email}"', cwd=workspace)
+
+        # Run repository setup commands if configured
+        try:
+            setup_engine = RepoSetupEngine()
+            setup_config = setup_engine.get_setup_config(repo)
+
+            if setup_config:
+                logger.info(f"Found setup configuration for {repo}")
+                setup_result = await setup_engine.run_setup(
+                    workspace, repo, setup_config
+                )
+
+                if not setup_result["all_successful"]:
+                    logger.warning(
+                        f"Some setup commands failed for {repo}, continuing anyway..."
+                    )
+                    # Log failed commands for debugging
+                    for result in setup_result["results"]:
+                        if not result.get("success"):
+                            logger.warning(
+                                f"Failed command: {result['command']} - {result.get('error', 'unknown error')}"
+                            )
+                else:
+                    logger.info(
+                        f"Setup completed successfully for {repo} in {setup_result['elapsed_seconds']:.1f}s"
+                    )
+            # If no setup config, silently skip (this is normal)
+
+        except Exception as e:
+            logger.warning(
+                f"Error during repository setup for {repo}: {e}. Continuing with job execution...",
+                exc_info=True,
+            )
+            # Don't fail the job if setup fails - agent can still work with source code
 
         # Change to workspace directory before executing
         original_cwd = os.getcwd()

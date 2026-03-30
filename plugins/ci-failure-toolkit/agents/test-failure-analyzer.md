@@ -88,6 +88,8 @@ npm test -- --testNamePattern="specific test"
 for i in {1..10}; do pytest tests/test_module.py || break; done
 ```
 
+**CRITICAL:** After tests pass, you MUST run code quality checks before committing. See the `python-code-quality` skill for the exact commands.
+
 ### 5. Return Structured Results
 
 Return findings as JSON:

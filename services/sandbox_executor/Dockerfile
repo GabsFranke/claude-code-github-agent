@@ -16,11 +16,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     unzip \
     zip \
+    sudo \
     && rm -rf /var/lib/apt/lists/*
 
 # The sandbox needs the shared agent definitions and shared utilities
 COPY subagents/ ./subagents/
 COPY shared/ ./shared/
+
+# Copy repo_setup module for dependency installation
+COPY repo_setup/ ./repo_setup/
+
+# Copy repo-setup.yaml configuration
+COPY repo-setup.yaml ./repo-setup.yaml
 
 # Hook scripts for Langfuse
 COPY hooks/langfuse_hook.py /app/hooks/langfuse_hook.py
@@ -46,6 +53,9 @@ RUN mkdir -p /var/cache/repos && chown -R bot:bot /var/cache/repos
 
 # Set ownership to bot user
 RUN chown -R bot:bot /app /home/bot/.claude
+
+# Give bot user passwordless sudo for installing language runtimes
+RUN echo "bot ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
 
 # Set USER environment variable for the bot user
 ENV USER=bot

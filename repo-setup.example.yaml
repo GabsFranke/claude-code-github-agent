@@ -1,0 +1,106 @@
+# Repository Setup Configuration Example
+# Copy this file to repo-setup.yaml and customize for your repositories
+
+repositories:
+  # Python project example (Python pre-installed, no sudo needed)
+  myorg/python-api:
+    setup_commands:
+      - "pip install -r requirements.txt"
+      - "pip install -r requirements-dev.txt"
+    timeout: 300 # 5 minutes
+    env:
+      PYTHONPATH: "/workspace/src"
+      ENVIRONMENT: "test"
+
+  # Node.js project example (install Node.js first with sudo)
+  myorg/frontend:
+    setup_commands:
+      - "sudo apt-get update"
+      - "sudo apt-get install -y nodejs npm"
+      - "npm ci" # Use ci for faster, reproducible installs
+      - "npm run build:dev"
+    timeout: 300 # Includes time for Node.js installation
+
+  # Ruby project example (install Ruby first with sudo)
+  myorg/rails-app:
+    setup_commands:
+      - "sudo apt-get update"
+      - "sudo apt-get install -y ruby-full"
+      - "bundle install --jobs=4"
+      - "bundle exec rails db:setup"
+    timeout: 600 # 10 minutes
+    env:
+      RAILS_ENV: "test"
+
+  # Go project example (install Go first with sudo)
+  myorg/go-service:
+    setup_commands:
+      - "sudo apt-get update"
+      - "sudo apt-get install -y golang-go"
+      - "go mod download"
+      - "go build ./..."
+    timeout: 300
+
+  # Rust project example (install Rust via rustup, no sudo needed)
+  myorg/rust-cli:
+    setup_commands:
+      # Install Rust and build in one command to ensure cargo is in PATH
+      - 'curl --proto ''=https'' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && export PATH="$HOME/.cargo/bin:$PATH" && cargo fetch && cargo build --release'
+    timeout: 900 # 15 minutes for Rust builds
+    env:
+      # Note: PATH modifications in env don't work for rustup because cargo
+      # isn't installed yet. Use && to chain commands in a single shell instead.
+
+  # Monorepo example (Node.js with multiple workspaces)
+  myorg/monorepo:
+    setup_commands:
+      - "sudo apt-get update"
+      - "sudo apt-get install -y nodejs npm"
+      - "sudo npm install -g yarn"
+      - "yarn install --frozen-lockfile"
+      - "yarn workspace @myorg/api build"
+      - "yarn workspace @myorg/web build"
+    timeout: 600
+
+  # Java/Maven project example
+  myorg/java-service:
+    setup_commands:
+      - "sudo apt-get update"
+      - "sudo apt-get install -y default-jdk maven"
+      - "mvn dependency:resolve"
+      - "mvn compile -DskipTests"
+    timeout: 600
+
+  # Multiple languages example (Python + Node.js)
+  myorg/fullstack:
+    setup_commands:
+      - "pip install -r backend/requirements.txt"
+      - "sudo apt-get update"
+      - "sudo apt-get install -y nodejs npm"
+      - "npm ci --prefix frontend"
+      - "npm run build --prefix frontend"
+    timeout: 400
+
+  # Python-only project (simplest case, no sudo needed)
+  myorg/simple-python:
+    setup_commands:
+      - "pip install -r requirements.txt"
+    timeout: 180
+
+# Default configuration for repositories not explicitly listed
+default:
+  enabled: false # Set to true to enable setup for all repos by default
+  setup_commands: []
+  timeout: 300
+
+# Notes:
+# - Commands run in the workspace directory (git worktree root)
+# - Commands run sequentially; if one fails, remaining commands are skipped
+# - Job continues even if setup fails (agent can still work with source code)
+# - Use sudo for installing system packages (apt-get install, etc.)
+# - Python and pip are pre-installed, no sudo needed for pip commands
+# - First-time language installation adds ~1-3 minutes to setup time
+# - Installed packages persist in container until restart (cached)
+# - Environment variables are merged with system environment
+# - Timeout applies to ALL commands combined
+# - Use -y flag with apt-get to avoid interactive prompts

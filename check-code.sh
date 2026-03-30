@@ -7,20 +7,31 @@ set -e
 check_and_install_tools() {
     local missing_tools=()
 
-    # Check for each required tool
-    if ! command -v black &> /dev/null; then
+    # Determine Python command
+    PYTHON_CMD="python"
+    if ! command -v python &> /dev/null; then
+        if command -v python3 &> /dev/null; then
+            PYTHON_CMD="python3"
+        else
+            echo "Error: Python is not installed. Please install Python first."
+            exit 1
+        fi
+    fi
+
+    # Check for each required tool using python -m
+    if ! $PYTHON_CMD -m black --version &> /dev/null; then
         missing_tools+=("black")
     fi
-    if ! command -v isort &> /dev/null; then
+    if ! $PYTHON_CMD -m isort --version &> /dev/null; then
         missing_tools+=("isort")
     fi
-    if ! command -v flake8 &> /dev/null; then
+    if ! $PYTHON_CMD -m flake8 --version &> /dev/null; then
         missing_tools+=("flake8")
     fi
-    if ! command -v mypy &> /dev/null; then
+    if ! $PYTHON_CMD -m mypy --version &> /dev/null; then
         missing_tools+=("mypy")
     fi
-    if ! command -v ruff &> /dev/null; then
+    if ! $PYTHON_CMD -m ruff --version &> /dev/null; then
         missing_tools+=("ruff")
     fi
 
@@ -29,18 +40,6 @@ check_and_install_tools() {
         echo "Missing tools detected: ${missing_tools[*]}"
         echo "Installing development dependencies..."
         echo ""
-
-        # Check if python is available
-        if ! command -v python &> /dev/null && ! command -v python3 &> /dev/null; then
-            echo "Error: Python is not installed. Please install Python first."
-            exit 1
-        fi
-
-        # Use python -m pip for better compatibility
-        PYTHON_CMD="python"
-        if ! command -v python &> /dev/null; then
-            PYTHON_CMD="python3"
-        fi
 
         # Install requirements-dev.txt
         if [ -f "requirements-dev.txt" ]; then
@@ -57,6 +56,17 @@ check_and_install_tools() {
 
 # Check and install tools before running checks
 check_and_install_tools
+
+# Determine Python command for running tools
+PYTHON_CMD="python"
+if ! command -v python &> /dev/null; then
+    if command -v python3 &> /dev/null; then
+        PYTHON_CMD="python3"
+    else
+        echo "Error: Python is not installed. Please install Python first."
+        exit 1
+    fi
+fi
 
 # Parse arguments
 FIX=false
@@ -102,10 +112,10 @@ HAS_ERRORS=false
 # Black
 echo "[1/5] Black (Formatter)"
 if [ "$FIX" = true ]; then
-    black $PATHS > /dev/null 2>&1
+    $PYTHON_CMD -m black $PATHS > /dev/null 2>&1
     echo "  ✓ OK - Formatted"
 else
-    if black --check $PATHS > /dev/null 2>&1; then
+    if $PYTHON_CMD -m black --check $PATHS > /dev/null 2>&1; then
         echo "  ✓ OK"
     else
         echo "  ✗ FAIL - Run with --fix"
@@ -116,10 +126,10 @@ fi
 # isort
 echo "[2/5] isort (Imports)"
 if [ "$FIX" = true ]; then
-    isort $PATHS > /dev/null 2>&1
+    $PYTHON_CMD -m isort $PATHS > /dev/null 2>&1
     echo "  ✓ OK - Organized"
 else
-    if isort --check-only $PATHS > /dev/null 2>&1; then
+    if $PYTHON_CMD -m isort --check-only $PATHS > /dev/null 2>&1; then
         echo "  ✓ OK"
     else
         echo "  ✗ FAIL - Run with --fix"
@@ -129,7 +139,7 @@ fi
 
 # Flake8
 echo "[3/5] Flake8 (Linter)"
-OUTPUT=$(flake8 $PATHS 2>&1) || true
+OUTPUT=$($PYTHON_CMD -m flake8 $PATHS 2>&1) || true
 if [ -z "$OUTPUT" ]; then
     echo "  ✓ OK"
 else
@@ -149,7 +159,7 @@ fi
 # Mypy
 if [ "$FAST" = false ] && [ "$SKIP_MYPY" = false ]; then
     echo "[4/5] Mypy (Types)"
-    MYPY_OUTPUT=$(mypy services/ shared/ subagents/ --ignore-missing-imports 2>&1) || true
+    MYPY_OUTPUT=$($PYTHON_CMD -m mypy services/ shared/ subagents/ --ignore-missing-imports 2>&1) || true
     if echo "$MYPY_OUTPUT" | grep -q "Success:"; then
         echo "  ✓ OK"
     else
@@ -176,10 +186,10 @@ fi
 # Ruff
 echo "[5/5] Ruff (Fast Linter)"
 if [ "$FIX" = true ]; then
-    ruff check --fix $PATHS > /dev/null 2>&1 || true
+    $PYTHON_CMD -m ruff check --fix $PATHS > /dev/null 2>&1 || true
     echo "  ✓ OK - Fixed"
 else
-    RUFF_OUTPUT=$(ruff check $PATHS 2>&1) || true
+    RUFF_OUTPUT=$($PYTHON_CMD -m ruff check $PATHS 2>&1) || true
     if echo "$RUFF_OUTPUT" | grep -q "All checks passed"; then
         echo "  ✓ OK"
     else

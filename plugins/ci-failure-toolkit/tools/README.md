@@ -11,27 +11,27 @@ Progressive tools for analyzing GitHub Actions workflow failures efficiently.
 **Returns:** Run metadata + job list with status/conclusion
 **Token cost:** Low (~1-2KB)
 
-### 2. `get_failed_steps(owner, repo, job_id, log_lines_per_step=100)`
+### 2. `get_job_logs_raw(owner, repo, job_id, start_line=0, num_lines=500)`
 
-**Purpose:** Extract only failed steps with log excerpts
-**Use when:** Diagnosing failures (most common use case)
-**Returns:** Failed steps with last N lines of logs
-**Token cost:** Medium (~5-20KB depending on failures)
+**Purpose:** Paginated access to job logs
+**Use when:** Reading logs in manageable chunks (primary method)
+**Returns:** Slice of logs with timestamps stripped
+**Token cost:** Low per call (~10-20KB for 500 lines)
+**Note:** Call repeatedly to paginate through entire log
 
-### 3. `get_job_logs(owner, repo, job_id, max_lines=None)`
-
-**Purpose:** Full logs for specific job
-**Use when:** Need complete context beyond failed steps
-**Returns:** Complete job logs (or file path if >10KB)
-**Token cost:** High (can be 100KB+)
-**Note:** Automatically writes to `.ci-logs/` directory if >10KB
-
-### 4. `search_job_logs(owner, repo, job_id, pattern, context_lines=5)`
+### 3. `search_job_logs(owner, repo, job_id, pattern, context_lines=5)`
 
 **Purpose:** Find specific patterns in logs
 **Use when:** Looking for specific errors in very long logs
 **Returns:** Matching lines with context
 **Token cost:** Low-Medium (depends on matches)
+
+### 4. `get_failed_steps(owner, repo, job_id, log_lines_per_step=100)`
+
+**Purpose:** Get metadata about which steps failed
+**Use when:** Need to know which steps failed (metadata only)
+**Returns:** Failed steps list + last N lines of full log
+**Token cost:** Medium (~5-20KB depending on failures)
 
 ## Recommended Workflow
 
@@ -42,11 +42,15 @@ summary = await get_workflow_run_summary(owner, repo, run_id)
 # 2. Identify failed jobs
 failed_jobs = [j for j in summary["jobs"] if j["conclusion"] == "failure"]
 
-# 3. Get failed steps (usually sufficient)
-failed_steps = await get_failed_steps(owner, repo, failed_jobs[0]["id"])
+# 3. Get logs with pagination (recommended)
+# First call to check size
+chunk1 = await get_job_logs_raw(owner, repo, failed_jobs[0]["id"], start_line=0, num_lines=500)
+total_lines = chunk1["total_lines"]
 
-# 4. Only if needed: get full logs or search
-# logs = await get_job_logs(owner, repo, job_id, max_lines=500)
+# Get last 500 lines (where errors usually are)
+last_chunk = await get_job_logs_raw(owner, repo, failed_jobs[0]["id"], start_line=total_lines-500, num_lines=500)
+
+# 4. Only if needed: search for specific patterns
 # matches = await search_job_logs(owner, repo, job_id, "error|exception")
 ```
 
@@ -192,62 +196,71 @@ except httpx.HTTPStatusError as e:
 ## Performance Tips
 
 1. **Always start with summary** - It's fast and identifies failed jobs
-2. **Use `get_failed_steps` first** - Usually sufficient for diagnosis
-3. **Limit `max_lines`** - When using `get_job_logs`, limit to last N lines
+2. **Use `get_job_logs_raw` with pagination** - Read logs in 500-line chunks
+3. **Start at the end** - Errors are usually in the last 500 lines
 4. **Use `search_job_logs`** - For finding specific errors in huge logs
-5. **Check file output** - Large logs are written to files automatically
 
 ## Token Efficiency
 
 | Tool                       | Typical Size | Use Case             |
 | -------------------------- | ------------ | -------------------- |
 | `get_workflow_run_summary` | 1-2KB        | Always start here    |
-| `get_failed_steps`         | 5-20KB       | Primary diagnosis    |
-| `get_job_logs` (limited)   | 10-50KB      | Need more context    |
-| `get_job_logs` (full)      | 50KB-1MB+    | Rare, writes to file |
+| `get_job_logs_raw`         | 10-20KB      | Per 500-line chunk   |
 | `search_job_logs`          | 2-10KB       | Find specific errors |
+| `get_failed_steps`         | 5-20KB       | Step metadata        |
 
 ## Examples
 
-### Example 1: Quick Diagnosis
+### Example 1: Quick Diagnosis with Pagination
 
 ```python
-# Get summary and failed steps only
+# Get summary
 summary = await get_workflow_run_summary(owner, repo, run_id)
 failed = [j for j in summary["jobs"] if j["conclusion"] == "failure"][0]
-steps = await get_failed_steps(owner, repo, failed["id"])
 
-# Analyze steps["failed_steps"] - usually enough to fix
+# Get first chunk to check size
+chunk1 = await get_job_logs_raw(owner, repo, failed["id"], start_line=0, num_lines=500)
+print(f"Total lines: {chunk1['total_lines']}")
+
+# Get last 500 lines (where errors are)
+last_chunk = await get_job_logs_raw(
+    owner, repo, failed["id"],
+    start_line=chunk1["total_lines"] - 500,
+    num_lines=500
+)
+# Analyze last_chunk["lines"]
 ```
 
-### Example 2: Deep Investigation
+### Example 2: Read Entire Log
 
 ```python
-# When failed steps aren't enough
-summary = await get_workflow_run_summary(owner, repo, run_id)
-failed = [j for j in summary["jobs"] if j["conclusion"] == "failure"][0]
+# Paginate through entire log
+job_id = failed["id"]
+start = 0
+num_lines = 500
 
-# Get last 500 lines of full logs
-logs = await get_job_logs(owner, repo, failed["id"], max_lines=500)
+while True:
+    chunk = await get_job_logs_raw(owner, repo, job_id, start_line=start, num_lines=num_lines)
+    print(chunk["lines"])
 
-# Or search for specific patterns
+    if chunk["end_line"] >= chunk["total_lines"]:
+        break
+
+    start += num_lines
+```
+
+### Example 3: Search for Specific Errors
+
+```python
+# Search for patterns
 errors = await search_job_logs(
     owner, repo, failed["id"],
-    pattern="error|exception|failed",
+    pattern="FAILED|ERROR|AssertionError",
     context_lines=10
 )
-```
 
-### Example 3: Multiple Failed Jobs
-
-```python
-summary = await get_workflow_run_summary(owner, repo, run_id)
-failed_jobs = [j for j in summary["jobs"] if j["conclusion"] == "failure"]
-
-for job in failed_jobs:
-    print(f"Analyzing {job['name']}...")
-    steps = await get_failed_steps(owner, repo, job["id"])
-    # Process each job's failures
+for match in errors["matches"]:
+    print(f"Line {match['line_number']}: {match['matched_line']}")
 ```
 
 ## Troubleshooting

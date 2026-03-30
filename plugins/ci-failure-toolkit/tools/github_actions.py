@@ -83,27 +83,45 @@ async def get_workflow_run_summary(
         }
 
 
-async def get_job_logs(
+async def get_job_logs_raw(
     owner: str,
     repo: str,
     job_id: str,
-    max_lines: int | None = None,
+    start_line: int = 0,
+    num_lines: int = 500,
 ) -> dict[str, Any]:
     """
-    Get full logs for a specific job.
+    Get a paginated slice of job logs without formatting.
 
-    Use after identifying failed job from summary.
-    Optionally limit to last N lines for very long logs.
-    Large logs are automatically written to file.
+    Returns raw log lines with timestamps stripped. Call repeatedly with
+    different start_line values to paginate through large logs.
+
+    This is the PREFERRED way to read logs - it avoids "output too large" errors
+    by letting you read logs in manageable chunks.
 
     Args:
         owner: Repository owner
         repo: Repository name
         job_id: Job ID from workflow run
-        max_lines: Optional limit to last N lines (default: all)
+        start_line: Line number to start from (0-indexed)
+        num_lines: Number of lines to return (default: 500)
 
     Returns:
-        Dict with job info and logs (or file path if too large)
+        Dict with:
+        - total_lines: Total number of lines in the log
+        - start_line: Starting line of this chunk
+        - end_line: Ending line of this chunk
+        - lines: The actual log content (timestamps stripped)
+
+    Example:
+        # Read first 500 lines
+        chunk1 = get_job_logs_raw(owner, repo, job_id, start_line=0, num_lines=500)
+
+        # Read next 500 lines
+        chunk2 = get_job_logs_raw(owner, repo, job_id, start_line=500, num_lines=500)
+
+        # Read last 500 lines (if total is 2000)
+        chunk_end = get_job_logs_raw(owner, repo, job_id, start_line=1500, num_lines=500)
     """
     github_token = os.getenv("GITHUB_TOKEN")
     if not github_token:
@@ -115,34 +133,31 @@ async def get_job_logs(
     }
 
     async with httpx.AsyncClient(timeout=60.0) as client:
-        # Get job details
-        job_url = f"https://api.github.com/repos/{owner}/{repo}/actions/jobs/{job_id}"
-        job_resp = await client.get(job_url, headers=headers)
-        job_resp.raise_for_status()
-        job_data = job_resp.json()
-
         # Get logs
-        logs_url = f"{job_url}/logs"
+        logs_url = (
+            f"https://api.github.com/repos/{owner}/{repo}/actions/jobs/{job_id}/logs"
+        )
         logs_resp = await client.get(logs_url, headers=headers, follow_redirects=True)
         logs_resp.raise_for_status()
         logs_text = logs_resp.text
 
-        # Optionally limit to last N lines
-        if max_lines:
-            lines = logs_text.split("\n")
-            if len(lines) > max_lines:
-                logs_text = "\n".join(lines[-max_lines:])
-                logs_text = (
-                    f"... (showing last {max_lines} of {len(lines)} lines) ...\n\n"
-                    + logs_text
-                )
+        # Split into lines
+        lines = logs_text.split("\n")
+
+        # Strip GitHub Actions timestamps (format: 2024-03-27T12:34:56.789Z)
+        clean_lines = [
+            re.sub(r"^\d{4}-\d{2}-\d{2}T[\d:.]+Z\s+", "", line) for line in lines
+        ]
+
+        # Extract requested chunk
+        chunk = clean_lines[start_line : start_line + num_lines]
 
         return {
-            "job_id": job_data["id"],
-            "job_name": job_data["name"],
-            "status": job_data["status"],
-            "conclusion": job_data.get("conclusion"),
-            "logs": logs_text,
+            "total_lines": len(clean_lines),
+            "start_line": start_line,
+            "end_line": start_line + len(chunk),
+            "num_lines_returned": len(chunk),
+            "lines": "\n".join(chunk),
         }
 
 
@@ -225,19 +240,20 @@ async def get_failed_steps(
     log_lines_per_step: int = 100,
 ) -> dict[str, Any]:
     """
-    Extract only failed steps from a job with their logs.
+    Extract failed steps from a job with relevant log sections.
 
-    Automatically identifies failed steps and returns their logs.
-    Most efficient way to diagnose CI failures.
+    Returns failed step metadata and the last N lines of the full job log.
+    GitHub doesn't provide per-step logs via API, so we return the full log
+    with failed step markers to help identify relevant sections.
 
     Args:
         owner: Repository owner
         repo: Repository name
         job_id: Job ID from workflow run
-        log_lines_per_step: Max lines to include per failed step
+        log_lines_per_step: Max lines from end of log to include (default: 100)
 
     Returns:
-        Dict with failed steps and their log excerpts
+        Dict with failed steps metadata and log excerpt
     """
     github_token = os.getenv("GITHUB_TOKEN")
     if not github_token:
@@ -266,21 +282,6 @@ async def get_failed_steps(
         failed_steps = []
         for step in job_data.get("steps", []):
             if step.get("conclusion") == "failure":
-                # Extract logs for this step (GitHub logs include timestamps and step markers)
-                # This is a simplified extraction - in practice, you'd parse the log format
-                step_name = step["name"]
-
-                # Find step logs (simplified - actual implementation would parse log structure)
-                step_logs = []
-                in_step = False
-                for line in logs_lines:
-                    if step_name in line:
-                        in_step = True
-                    if in_step:
-                        step_logs.append(line)
-                        if len(step_logs) >= log_lines_per_step:
-                            break
-
                 failed_steps.append(
                     {
                         "name": step["name"],
@@ -289,13 +290,25 @@ async def get_failed_steps(
                         "conclusion": step["conclusion"],
                         "started_at": step.get("started_at"),
                         "completed_at": step.get("completed_at"),
-                        "log_excerpt": (
-                            "\n".join(step_logs[-log_lines_per_step:])
-                            if step_logs
-                            else "No logs found"
-                        ),
                     }
                 )
+
+        # Calculate how many lines to include
+        # For multiple failed steps, give more context
+        total_lines = len(logs_lines)
+        lines_to_include = min(
+            log_lines_per_step * max(len(failed_steps), 1), total_lines
+        )
+
+        # Get the last N lines (where errors usually are)
+        log_excerpt = "\n".join(logs_lines[-lines_to_include:])
+
+        # Add truncation notice if needed
+        if lines_to_include < total_lines:
+            log_excerpt = (
+                f"... (showing last {lines_to_include} of {total_lines} lines) ...\n\n"
+                + log_excerpt
+            )
 
         return {
             "job_id": job_data["id"],
@@ -303,4 +316,7 @@ async def get_failed_steps(
             "job_conclusion": job_data.get("conclusion"),
             "failed_steps_count": len(failed_steps),
             "failed_steps": failed_steps,
+            "log_excerpt": log_excerpt,
+            "log_excerpt_lines": lines_to_include,
+            "total_log_lines": total_lines,
         }
