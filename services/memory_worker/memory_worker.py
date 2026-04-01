@@ -2,7 +2,7 @@
 
 Listens on `agent:memory:requests`. For each job it:
 1. Reads the persisted session transcript from the agent-memory volume.
-2. Invokes the @memory-extractor subagent (via Claude Agent SDK / Haiku) to update MEMORY.md.
+2. Invokes the @memory-extractor subagent (via Claude Agent SDK / Haiku) to update index.md.
 3. Serialises access per-repo using asyncio.Lock to prevent concurrent write races.
 """
 
@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 shutdown_event = asyncio.Event()
 
-# Per-repo locks — prevents concurrent MEMORY.md writes for the same repository.
+# Per-repo locks — prevents concurrent index.md writes for the same repository.
 # defaultdict so we create a lock on first access without a global init step.
 _repo_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
@@ -67,11 +67,6 @@ def extract_conversation(transcript_path: str) -> str:
 
                 if role == "user":
                     if isinstance(content, str):
-                        # Skip the injected "Prior Session Memory" preamble — it's
-                        # system context, not a real user turn, and MEMORY.md already
-                        # has this information.
-                        if content.startswith("## Prior Session Memory"):
-                            continue
                         lines.append(f"User: {content}")
                     elif isinstance(content, list):
                         for block in content:
@@ -88,9 +83,7 @@ def extract_conversation(transcript_path: str) -> str:
                                         text = str(inner)
                                     lines.append(f"Tool result: {text[:500]}")
                                 elif block.get("type") == "text":
-                                    text = block.get("text", "")
-                                    if not text.startswith("## Prior Session Memory"):
-                                        lines.append(f"User: {text}")
+                                    lines.append(f"User: {block.get('text', '')}")
 
                 elif role == "assistant":
                     if isinstance(content, list):
@@ -201,15 +194,14 @@ async def process_memory_job(message: dict) -> None:
         logger.warning(f"Memory job: transcript no longer exists: {transcript_path}")
         return
 
-    # Serialise per-repo to avoid concurrent MEMORY.md writes
+    # Serialise per-repo to avoid concurrent index.md writes
     async with _repo_locks[repo]:
         logger.info(
             f"Processing memory job for {repo} [{hook_event}]: {transcript_path}"
         )
 
-        memory_dir = f"/home/bot/.claude/projects/{repo}/memory"
+        memory_dir = f"/home/bot/agent-memory/{repo}/memory"
         os.makedirs(memory_dir, exist_ok=True)
-        memory_file = os.path.join(memory_dir, "MEMORY.md")
 
         conversation_text = extract_conversation(transcript_path)
         if not conversation_text:
@@ -218,18 +210,17 @@ async def process_memory_job(message: dict) -> None:
             )
             return
 
-        prompt = (
-            f"Repository: {repo}\n"
-            f"Session event: {hook_event}\n\n"
-            f"## Session Transcript\n\n"
-            f"{conversation_text}\n\n"
-            f"---\n\n"
-            f"## Task\n\n"
-            f"Read the existing memory file at: {memory_file}\n"
-            f"Then extract any new facts from the transcript above and update {memory_file}.\n"
-            f"If the file doesn't exist, create it with the header: # Repository Memory: {repo}\n"
-            f"Only add NEW facts not already present. Do not duplicate existing entries."
-        )
+        # Use XML format for better structure (inspired by Claude Code)
+        prompt = f"""<repository>{repo}</repository>
+<session_event>{hook_event}</session_event>
+
+<session_transcript>
+{conversation_text}
+</session_transcript>
+
+<memory_directory>{memory_dir}</memory_directory>
+
+Extract memorable facts from the session transcript and update the memory files accordingly."""
 
         memory_model = os.getenv(
             "ANTHROPIC_DEFAULT_HAIKU_MODEL", "claude-haiku-4-5-20251001"
@@ -237,18 +228,27 @@ async def process_memory_job(message: dict) -> None:
 
         hooks = setup_langfuse_hooks()
 
+        mcp_servers = {
+            "memory": {
+                "type": "stdio",
+                "command": "python3",
+                "args": ["/app/mcp_servers/memory/server.py"],
+                "env": {
+                    "GITHUB_REPOSITORY": repo,
+                    "PYTHONPATH": "/app",
+                },
+            }
+        }
+
         options = ClaudeAgentOptions(
             model=memory_model,
-            allowed_tools=["Read", "Write", "Edit", "List"],
+            allowed_tools=["Read", "Write", "Edit", "List", "mcp__memory__*"],
             permission_mode="acceptEdits",
+            mcp_servers=mcp_servers,  # type: ignore[arg-type]
             agents=AGENTS,
             hooks=hooks,
             cwd=memory_dir,  # Working directory is the persistent memory dir
-            system_prompt=(
-                "You are a memory extraction agent. "
-                "Read session transcripts and update MEMORY.md with actionable facts. "
-                "Keep the file under 200 lines by grooming old/stale facts as needed."
-            ),
+            add_dirs=[memory_dir],  # Allow writes to memory directory
         )
 
         try:

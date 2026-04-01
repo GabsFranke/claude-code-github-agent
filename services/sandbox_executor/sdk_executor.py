@@ -117,7 +117,7 @@ async def _enqueue_memory_job(repo: str, transcript_path: str, hook_event: str) 
 
     # Persist transcript to the agent-memory volume so memory_worker can read it
     # after the ephemeral workspace is cleaned up.
-    transcripts_dir = f"/home/bot/.claude/projects/{repo}/transcripts"
+    transcripts_dir = f"/home/bot/agent-memory/{repo}/transcripts"
     os.makedirs(transcripts_dir, exist_ok=True)
     persistent_path = os.path.join(transcripts_dir, transcript_file.name)
     try:
@@ -137,8 +137,6 @@ async def _enqueue_memory_job(repo: str, transcript_path: str, hook_event: str) 
             redis_url, decode_responses=True, password=redis_password
         )
         try:
-            import json
-
             payload = json.dumps(
                 {
                     "repo": repo,
@@ -211,6 +209,15 @@ async def execute_sandbox_request(
                 "GITHUB_TOKEN": github_token,
             },
         },
+        "memory": {
+            "type": "stdio",
+            "command": "python3",
+            "args": ["/app/mcp_servers/memory/server.py"],
+            "env": {
+                "GITHUB_REPOSITORY": repo,
+                "PYTHONPATH": "/app",
+            },
+        },
     }
 
     # Plugin MCP servers are auto-discovered from ~/.claude/plugins/*/.mcp.json
@@ -278,6 +285,7 @@ async def execute_sandbox_request(
             "Glob",
             "mcp__github__*",
             "mcp__github-actions__*",  # Allow GitHub Actions tools
+            "mcp__memory__memory_read",  # Read-only memory access (writes handled by memory_worker)
         ],
         permission_mode="acceptEdits",
         mcp_servers=mcp_servers,  # type: ignore[arg-type]
@@ -290,6 +298,9 @@ async def execute_sandbox_request(
         plugins=plugins,  # Explicitly pass plugins
         hooks=hooks,
         cwd=working_dir,  # Set working directory for SDK operations
+        add_dirs=[
+            f"/home/bot/agent-memory/{repo}/memory"
+        ],  # Allow writes to memory directory
         stderr=stderr_callback,  # Capture stderr output for debugging
         system_prompt=system_context,  # Add system context as system prompt
     )

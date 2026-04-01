@@ -45,7 +45,7 @@ services:
       dockerfile: services/agent_worker/Dockerfile
     env_file: .env
     volumes:
-      - agent-memory:/home/bot/.claude/projects:rw
+      - agent-memory:/home/bot/agent-memory:rw
     environment:
       - PYTHONPATH=/app
       # Worker creates jobs in queue (lightweight coordinator)
@@ -71,7 +71,7 @@ services:
       # Persistent cache for bare repositories across all workers
       - repo-cache:/var/cache/repos:rw
       # Persistent agent memory
-      - agent-memory:/home/bot/.claude/projects:rw
+      - agent-memory:/home/bot/agent-memory:rw
       # gcloud credentials for Vertex AI — sandbox is the one calling the SDK
       # Mounted to bot user's home directory
       - ${APPDATA}/gcloud/application_default_credentials.json:/home/bot/.config/gcloud/application_default_credentials.json:ro
@@ -109,7 +109,7 @@ services:
     env_file: .env
     volumes:
       # Reads transcripts written by sandbox_worker; writes MEMORY.md
-      - agent-memory:/home/bot/.claude/projects:rw
+      - agent-memory:/home/bot/agent-memory:rw
       # gcloud credentials for Vertex AI (if using Vertex backend)
       - ${APPDATA}/gcloud/application_default_credentials.json:/home/bot/.config/gcloud/application_default_credentials.json:ro
     environment:

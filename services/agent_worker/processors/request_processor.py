@@ -224,17 +224,15 @@ class RequestProcessor:
 
         # Inject existing memory as context (written by the auto-memory hook after each session)
         try:
-            memory_md = await self.context_loader.fetch_memory_md(repo)
-            if memory_md:
+            memory_index = await self.context_loader.fetch_memory_index(repo)
+            if memory_index:
                 memory_section = (
-                    "## Prior Session Memory\n\n"
-                    "The following facts were recorded from previous work on this repository:\n\n"
-                    f"{memory_md}\n\n"
+                    f'<memory name="index.md">\n{memory_index}\n</memory>\n\n'
                 )
                 prompt = f"{memory_section}{prompt}"
-                logger.info("Prepended MEMORY.md context to prompt")
+                logger.info("Prepended index.md context to prompt")
         except Exception as e:
-            logger.warning(f"Failed to fetch MEMORY.md from {repo}: {e}")
+            logger.warning(f"Failed to fetch index.md from {repo}: {e}")
 
         # Use provided ref or default to main
         final_ref = ref or "main"

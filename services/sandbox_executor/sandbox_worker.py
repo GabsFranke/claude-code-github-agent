@@ -271,23 +271,6 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
             )
             # Don't fail the job if setup fails - agent can still work with source code
 
-        # Setup per-repo memory symlink
-        try:
-            memory_base_dir = f"/home/bot/.claude/projects/{repo}/memory"
-            os.makedirs(memory_base_dir, exist_ok=True)
-
-            # Create .claude directory in the ephemeral workspace
-            workspace_claude_dir = os.path.join(workspace, ".claude")
-            os.makedirs(workspace_claude_dir, exist_ok=True)
-
-            # Create symlink: workspace/.claude/memory -> /home/bot/.claude/projects/{repo}/memory
-            symlink_target = os.path.join(workspace_claude_dir, "memory")
-            if not os.path.exists(symlink_target):
-                os.symlink(memory_base_dir, symlink_target)
-                logger.info(f"Symlinked memory for {repo} to {symlink_target}")
-        except Exception as e:
-            logger.warning(f"Failed to setup agent memory symlink for {repo}: {e}")
-
         # Change to workspace directory before executing
         original_cwd = os.getcwd()
         os.chdir(workspace)

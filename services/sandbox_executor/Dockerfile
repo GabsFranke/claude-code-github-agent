@@ -23,6 +23,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY subagents/ ./subagents/
 COPY shared/ ./shared/
 
+# Copy MCP servers
+COPY mcp_servers/ ./mcp_servers/
+
 # Copy repo_setup module for dependency installation
 COPY repo_setup/ ./repo_setup/
 

@@ -14,6 +14,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY shared/ ./shared/
 COPY subagents/ ./subagents/
 
+# Copy MCP servers (needed by memory extractor subagent)
+COPY mcp_servers/ ./mcp_servers/
+
 # Hook scripts for Langfuse observability
 COPY hooks/langfuse_hook.py /app/hooks/langfuse_hook.py
 RUN chmod +x /app/hooks/langfuse_hook.py
