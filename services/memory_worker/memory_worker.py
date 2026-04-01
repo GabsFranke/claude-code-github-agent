@@ -200,18 +200,19 @@ async def process_memory_job(message: dict) -> None:
             f"Processing memory job for {repo} [{hook_event}]: {transcript_path}"
         )
 
-        memory_dir = f"/home/bot/agent-memory/{repo}/memory"
-        os.makedirs(memory_dir, exist_ok=True)
+        try:
+            memory_dir = f"/home/bot/agent-memory/{repo}/memory"
+            os.makedirs(memory_dir, exist_ok=True)
 
-        conversation_text = extract_conversation(transcript_path)
-        if not conversation_text:
-            logger.info(
-                f"No conversation content extracted from {transcript_path}, skipping."
-            )
-            return
+            conversation_text = extract_conversation(transcript_path)
+            if not conversation_text:
+                logger.info(
+                    f"No conversation content extracted from {transcript_path}, skipping."
+                )
+                return
 
-        # Use XML format for better structure (inspired by Claude Code)
-        prompt = f"""<repository>{repo}</repository>
+            # Use XML format for better structure (inspired by Claude Code)
+            prompt = f"""<repository>{repo}</repository>
 <session_event>{hook_event}</session_event>
 
 <session_transcript>
@@ -222,52 +223,61 @@ async def process_memory_job(message: dict) -> None:
 
 Extract memorable facts from the session transcript and update the memory files accordingly."""
 
-        memory_model = os.getenv(
-            "ANTHROPIC_DEFAULT_HAIKU_MODEL", "claude-haiku-4-5-20251001"
-        )
-
-        hooks = setup_langfuse_hooks()
-
-        mcp_servers = {
-            "memory": {
-                "type": "stdio",
-                "command": "python3",
-                "args": ["/app/mcp_servers/memory/server.py"],
-                "env": {
-                    "GITHUB_REPOSITORY": repo,
-                    "PYTHONPATH": "/app",
-                },
-            }
-        }
-
-        options = ClaudeAgentOptions(
-            model=memory_model,
-            allowed_tools=["Read", "Write", "Edit", "List", "mcp__memory__*"],
-            permission_mode="acceptEdits",
-            mcp_servers=mcp_servers,  # type: ignore[arg-type]
-            agents=AGENTS,
-            hooks=hooks,
-            cwd=memory_dir,  # Working directory is the persistent memory dir
-            add_dirs=[memory_dir],  # Allow writes to memory directory
-        )
-
-        try:
-            async with ClaudeSDKClient(options=options) as client:
-                await client.query(f"@memory-extractor {prompt}")
-
-                async for msg in client.receive_messages():
-                    if isinstance(msg, ResultMessage):
-                        logger.info(
-                            f"Memory extraction done for {repo} — "
-                            f"{msg.num_turns} turns, {msg.duration_ms}ms"
-                        )
-                        break
-
-        except Exception as e:
-            logger.warning(
-                f"Memory extraction failed for {repo} [{hook_event}]: {e}",
-                exc_info=True,
+            memory_model = os.getenv(
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL", "claude-haiku-4-5-20251001"
             )
+
+            hooks = setup_langfuse_hooks()
+
+            mcp_servers = {
+                "memory": {
+                    "type": "stdio",
+                    "command": "python3",
+                    "args": ["/app/mcp_servers/memory/server.py"],
+                    "env": {
+                        "GITHUB_REPOSITORY": repo,
+                        "PYTHONPATH": "/app",
+                    },
+                }
+            }
+
+            options = ClaudeAgentOptions(
+                model=memory_model,
+                allowed_tools=["Read", "Write", "Edit", "List", "mcp__memory__*"],
+                permission_mode="acceptEdits",
+                mcp_servers=mcp_servers,  # type: ignore[arg-type]
+                agents=AGENTS,
+                hooks=hooks,
+                cwd=memory_dir,  # Working directory is the persistent memory dir
+                add_dirs=[memory_dir],  # Allow writes to memory directory
+            )
+
+            try:
+                async with ClaudeSDKClient(options=options) as client:
+                    await client.query(f"@memory-extractor {prompt}")
+
+                    async for msg in client.receive_messages():
+                        if isinstance(msg, ResultMessage):
+                            logger.info(
+                                f"Memory extraction done for {repo} — "
+                                f"{msg.num_turns} turns, {msg.duration_ms}ms"
+                            )
+                            break
+
+            except Exception as e:
+                logger.warning(
+                    f"Memory extraction failed for {repo} [{hook_event}]: {e}",
+                    exc_info=True,
+                )
+
+        finally:
+            # Clean up transcript after processing (success or failure)
+            # The valuable information is now in memory/index.md, and Langfuse has the full trace
+            try:
+                os.remove(transcript_path)
+                logger.debug(f"Cleaned up transcript: {transcript_path}")
+            except Exception as e:
+                logger.warning(f"Failed to delete transcript {transcript_path}: {e}")
 
 
 async def main() -> None:

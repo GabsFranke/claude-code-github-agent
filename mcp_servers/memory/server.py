@@ -144,14 +144,20 @@ async def handle_request(request: dict[str, Any]) -> dict[str, Any]:
     return {"error": {"code": -32601, "message": f"Unknown method: {method}"}}
 
 
+async def read_stdin_line() -> str | None:
+    """Read a line from stdin asynchronously."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, sys.stdin.readline)
+
+
 async def main():
     """Main server loop - reads JSON-RPC requests from stdin, writes responses to stdout."""
     logger.info("Memory MCP server starting...")
 
     while True:
         try:
-            # Read request from stdin
-            line = sys.stdin.readline()
+            # Read request from stdin (non-blocking via executor)
+            line = await read_stdin_line()
             if not line:
                 break
 
