@@ -19,7 +19,6 @@ flowchart LR
     JQ --> SW[Sandbox<br/>Workers]
     CACHE -.->|worktree| SW
 
-    SW --> |Local Files| SW
     SW --> |GitHub API| MCP[GitHub<br/>MCP]
     SW --> |transcript| MEMQ[(Memory<br/>Queue)]
 
