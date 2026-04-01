@@ -19,8 +19,12 @@ flowchart LR
     JQ --> SW[Sandbox<br/>Workers]
     CACHE -.->|worktree| SW
 
-    SW --> |Local Files| SW
     SW --> |GitHub API| MCP[GitHub<br/>MCP]
+    SW --> |transcript| MEMQ[(Memory<br/>Queue)]
+
+    MEMQ --> MW[Memory<br/>Worker]
+    MW --> |memory_read/write| MEM_MCP[Memory<br/>MCP]
+    MW --> MEM_VOL[(Agent<br/>Memory)]
 
     MCP --> GH
 
@@ -31,6 +35,10 @@ flowchart LR
     style SW fill:#e8f5e9
     style CACHE fill:#fce4ec
     style MCP fill:#e0f2f1
+    style MW fill:#fff9c4
+    style MEM_MCP fill:#fff9c4
+    style MEM_VOL fill:#fff9c4
+    style MEMQ fill:#fff9c4
 ```
 
 **Architecture Flow:**
@@ -42,6 +50,7 @@ flowchart LR
 5. **Sandbox Workers** → Execute Claude SDK in isolated worktrees
 6. **Claude SDK** → Local file operations + GitHub MCP for API calls
 7. **Results** → Posted back to GitHub via MCP
+8. **Memory Worker** → Extracts knowledge from session transcripts via `@memory-extractor` subagent
 
 ## Workflow System
 
@@ -360,6 +369,74 @@ async with GitHubAuthService(app_id, private_key, installation_id) as auth:
 - Better token lifecycle management
 - Shared across all services
 
+### 8. Memory Worker
+
+**Technology**: Python + Claude Agent SDK (Haiku)
+**Purpose**: Extracts persistent knowledge from session transcripts
+
+**Responsibilities**:
+
+- Listens for memory extraction jobs on Redis queue (`agent:memory:requests`)
+- Reads persisted session transcripts from the `agent-memory` volume
+- Invokes the `@memory-extractor` subagent (runs on Haiku for cost efficiency)
+- Updates memory files (index.md + detailed files) via Memory MCP server
+- Serializes access per-repo using asyncio.Lock to prevent concurrent write races
+- Cleans up transcript files after processing
+- Optional Langfuse observability for memory extraction sessions
+
+**Key Files**:
+
+- `services/memory_worker/memory_worker.py`
+- `subagents/memory_extractor.py`
+- `mcp_servers/memory/server.py`
+- `mcp_servers/memory/tools.py`
+
+**Memory Storage**:
+
+```
+/home/bot/agent-memory/
+├── owner/repo/
+│   ├── memory/                # Persistent knowledge
+│   │   ├── index.md           # Table of contents (100 lines max)
+│   │   ├── architecture/      # System design notes
+│   │   ├── issues/            # Known bugs and workarounds
+│   │   ├── workflows/         # Development workflows
+│   │   ├── commands.md        # Operational commands
+│   │   └── decisions.md       # Architectural decision records
+│   └── transcripts/           # Session transcripts (cleaned up after extraction)
+```
+
+**Memory Extraction Flow**:
+
+1. Sandbox worker session completes (Stop/SubagentStop hook)
+2. Transcript persisted to `agent-memory` volume
+3. Job enqueued to `agent:memory:requests` Redis queue
+4. Memory worker picks up job
+5. Transcript parsed into clean conversation text (strips metadata, thinking blocks)
+6. `@memory-extractor` subagent invoked with conversation text
+7. Subagent reads existing memory, extracts new facts, updates memory files
+8. Transcript cleaned up after processing
+
+**Memory MCP Server**:
+
+A lightweight stdio-based MCP server that provides two tools:
+
+- `memory_read(file_path?)` - List or read memory files (scoped per repo)
+- `memory_write(file_path, content)` - Create or update memory files (scoped per repo)
+
+Both tools validate paths to prevent directory traversal attacks.
+
+**Per-Repo Locking**:
+
+Memory jobs are serialized per repository to prevent concurrent writes to `index.md`:
+
+```python
+_repo_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+
+async with _repo_locks[repo]:
+    # Process memory extraction for this repo
+```
+
 ## Data Flow
 
 ### Automatic PR Review
@@ -409,6 +486,19 @@ async with GitHubAuthService(app_id, private_key, installation_id) as auth:
 4. Repo sync service updates cached bare repository
 5. Future jobs for this repo start faster (no sync wait)
 
+### Memory Extraction (Automatic)
+
+1. Sandbox worker session completes (Stop/SubagentStop hook fires)
+2. Session transcript persisted to `agent-memory` volume (`/home/bot/agent-memory/{repo}/transcripts/`)
+3. Memory extraction job enqueued to `agent:memory:requests` Redis queue
+4. Memory worker picks up job from queue
+5. Transcript parsed — metadata, thinking blocks, and queue telemetry stripped
+6. `@memory-extractor` subagent (Haiku) invoked with clean conversation text
+7. Subagent reads existing `index.md`, extracts new facts, organizes into memory files
+8. Memory files updated via Memory MCP (`memory_read` / `memory_write`)
+9. Transcript cleaned up after processing (valuable info now in memory files)
+10. Future sessions receive memory context at startup via `<memory>` tags in prompt
+
 ## Job Queue Architecture
 
 ### Redis Keys
@@ -431,12 +521,17 @@ async with GitHubAuthService(app_id, private_key, installation_id) as auth:
 - `agent:sync:lock:{repo}` - Lock for preventing concurrent syncs
 - `agent:sync:complete:{repo}:{ref}` - Completion signal (TTL: 5 minutes)
 
+**Memory Extraction**:
+
+- `agent:memory:requests` - Memory extraction job queue (transcript paths + repo info)
+
 ### Benefits
 
 1. **Workspace Isolation**: Each job in clean temporary directory
 2. **Independent Scaling**: Scale sandbox workers separately
 3. **Job Persistence**: Jobs survive worker crashes
 4. **Observability**: Clear job states and metrics
+5. **Persistent Memory**: Knowledge extracted across sessions via shared `agent-memory` volume
 
 ## Scaling
 
@@ -487,6 +582,7 @@ docker-compose exec redis redis-cli -a myredissecret GET "agent:sync:complete:ow
 # View logs
 docker-compose logs -f sandbox_worker
 docker-compose logs -f repo_sync
+docker-compose logs -f memory_worker
 ```
 
 ## Rate Limiting
@@ -660,9 +756,9 @@ docker-compose exec sandbox_worker cat /root/.claude/state/langfuse_hook.log
 docker-compose -f docker-compose.minimal.yml up --build -d
 ```
 
-Components: webhook + worker + sandbox_worker + repo_sync + Redis
+Components: webhook + worker + sandbox_worker + repo_sync + memory_worker + Redis
 
-Volumes: repo-cache (shared bare repositories)
+Volumes: repo-cache (shared bare repositories) + agent-memory (persistent memory)
 
 ### Full Setup
 
@@ -720,6 +816,10 @@ Specialized agents for focused tasks:
 - context-gatherer - Codebase exploration
 - bug-investigator - Root cause analysis
 - test-writer - Test generation
+
+**Memory**:
+
+- memory-extractor - Extracts facts from session transcripts to build repository knowledge
 
 See [SUBAGENTS.md](SUBAGENTS.md) for details.
 

@@ -23,13 +23,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY subagents/ ./subagents/
 COPY shared/ ./shared/
 
+# Copy MCP servers
+COPY mcp_servers/ ./mcp_servers/
+
 # Copy repo_setup module for dependency installation
 COPY repo_setup/ ./repo_setup/
 
 # Copy repo-setup.yaml configuration
 COPY repo-setup.yaml ./repo-setup.yaml
 
-# Hook scripts for Langfuse
+# Hook scripts
 COPY hooks/langfuse_hook.py /app/hooks/langfuse_hook.py
 RUN chmod +x /app/hooks/langfuse_hook.py
 
@@ -50,6 +53,9 @@ COPY skills/ /home/bot/.claude/skills/
 
 # Create repo cache directory and set ownership to bot user
 RUN mkdir -p /var/cache/repos && chown -R bot:bot /var/cache/repos
+
+# Create agent memory directory structure and set ownership to bot user
+RUN mkdir -p /home/bot/.claude/projects && chown -R bot:bot /home/bot/.claude/projects
 
 # Set ownership to bot user
 RUN chown -R bot:bot /app /home/bot/.claude

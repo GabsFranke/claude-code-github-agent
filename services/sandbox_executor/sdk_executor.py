@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+from pathlib import Path
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -101,6 +102,56 @@ def setup_langfuse_hooks() -> dict:
     }
 
 
+async def _enqueue_memory_job(repo: str, transcript_path: str, hook_event: str) -> None:
+    """Copy transcript to persistent volume and enqueue a memory extraction job.
+
+    Runs inside the Stop/SubagentStop hook — fires even if the main agent fails,
+    so memory is captured from crashed sessions too.
+    """
+    import shutil
+
+    transcript_file = Path(transcript_path)
+    if not transcript_file.exists():
+        logger.warning(f"Memory hook: transcript not found: {transcript_path}")
+        return
+
+    # Persist transcript to the agent-memory volume so memory_worker can read it
+    # after the ephemeral workspace is cleaned up.
+    transcripts_dir = f"/home/bot/agent-memory/{repo}/transcripts"
+    os.makedirs(transcripts_dir, exist_ok=True)
+    persistent_path = os.path.join(transcripts_dir, transcript_file.name)
+    try:
+        shutil.copy2(transcript_path, persistent_path)
+        logger.info(f"Transcript persisted: {persistent_path}")
+    except Exception as e:
+        logger.warning(f"Failed to persist transcript for {repo}: {e}")
+        return  # Don't enqueue if we can't persist the file
+
+    # Publish to memory extraction queue — memory_worker will pick this up
+    try:
+        import redis.asyncio as aioredis
+
+        redis_url = os.getenv("REDIS_URL", "redis://redis:6379")
+        redis_password = os.getenv("REDIS_PASSWORD")
+        rc = await aioredis.from_url(
+            redis_url, decode_responses=True, password=redis_password
+        )
+        try:
+            payload = json.dumps(
+                {
+                    "repo": repo,
+                    "transcript_path": persistent_path,
+                    "hook_event": hook_event,
+                }
+            )
+            await rc.rpush("agent:memory:requests", payload)
+            logger.info(f"Enqueued memory job for {repo} [{hook_event}]")
+        finally:
+            await rc.close()
+    except Exception as e:
+        logger.warning(f"Failed to enqueue memory job for {repo}: {e}")
+
+
 async def execute_sandbox_request(
     prompt: str,
     github_token: str,
@@ -158,12 +209,46 @@ async def execute_sandbox_request(
                 "GITHUB_TOKEN": github_token,
             },
         },
+        "memory": {
+            "type": "stdio",
+            "command": "python3",
+            "args": ["/app/mcp_servers/memory/server.py"],
+            "env": {
+                "GITHUB_REPOSITORY": repo,
+                "PYTHONPATH": "/app",
+            },
+        },
     }
 
     # Plugin MCP servers are auto-discovered from ~/.claude/plugins/*/.mcp.json
     # via setting_sources=["user", "project", "local"]
 
     hooks = setup_langfuse_hooks()
+
+    # On Stop/SubagentStop: persist transcript to the agent-memory volume and enqueue
+    # a memory extraction job. Runs inside the hook so it fires even on failures/timeouts.
+    async def capture_and_enqueue_memory(input_data, _tool_use_id, _context):
+        transcript = (
+            input_data.get("agent_transcript_path")
+            or input_data.get("transcriptPath")
+            or input_data.get("transcript_path")
+        )
+        if transcript:
+            event = input_data.get("hook_event_name", "Stop")
+            logger.debug(f"Memory hook triggered: {transcript} ({event})")
+            # Fire-and-forget — don't block the hook response
+            asyncio.create_task(_enqueue_memory_job(repo, transcript, event))
+        return {"success": True}
+
+    for event in ("Stop", "SubagentStop"):
+        if event in hooks:
+            hooks[event].append(
+                HookMatcher(matcher="*", hooks=[capture_and_enqueue_memory])
+            )
+        else:
+            hooks[event] = [
+                HookMatcher(matcher="*", hooks=[capture_and_enqueue_memory])
+            ]
 
     # Load plugins and skills from ~/.claude/ using setting_sources
     # Get model from environment variable
@@ -200,6 +285,7 @@ async def execute_sandbox_request(
             "Glob",
             "mcp__github__*",
             "mcp__github-actions__*",  # Allow GitHub Actions tools
+            "mcp__memory__memory_read",  # Read-only memory access (writes handled by memory_worker)
         ],
         permission_mode="acceptEdits",
         mcp_servers=mcp_servers,  # type: ignore[arg-type]
@@ -212,6 +298,9 @@ async def execute_sandbox_request(
         plugins=plugins,  # Explicitly pass plugins
         hooks=hooks,
         cwd=working_dir,  # Set working directory for SDK operations
+        add_dirs=[
+            f"/home/bot/agent-memory/{repo}/memory"
+        ],  # Allow writes to memory directory
         stderr=stderr_callback,  # Capture stderr output for debugging
         system_prompt=system_context,  # Add system context as system prompt
     )

@@ -222,6 +222,18 @@ class RequestProcessor:
                 f"Failed to fetch CLAUDE.md from {repo}, continuing without repository context: {e}"
             )
 
+        # Inject existing memory as context (written by the auto-memory hook after each session)
+        try:
+            memory_index = await self.context_loader.fetch_memory_index(repo)
+            if memory_index:
+                memory_section = (
+                    f'<memory name="index.md">\n{memory_index}\n</memory>\n\n'
+                )
+                prompt = f"{memory_section}{prompt}"
+                logger.info("Prepended index.md context to prompt")
+        except Exception as e:
+            logger.warning(f"Failed to fetch index.md from {repo}: {e}")
+
         # Use provided ref or default to main
         final_ref = ref or "main"
         logger.info(f"Using ref: {final_ref}")
