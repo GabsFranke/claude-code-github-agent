@@ -26,80 +26,33 @@ else:
     logging.getLogger("claude_agent_sdk").setLevel(logging.WARNING)
 
 
-# We recreate the ObservabilityManager logic here inside the sandbox
-def setup_langfuse_hooks() -> dict:
-    span_id = os.getenv("CURRENT_SPAN_ID")
-    langfuse_public_key = os.getenv("LANGFUSE_PUBLIC_KEY")
-    langfuse_secret_key = os.getenv("LANGFUSE_SECRET_KEY")
+def _setup_langfuse_otel() -> None:
+    """Configure Langfuse observability via OpenTelemetry instrumentation."""
+    if not (os.getenv("LANGFUSE_PUBLIC_KEY") and os.getenv("LANGFUSE_SECRET_KEY")):
+        return
 
-    if not (langfuse_public_key and langfuse_secret_key):
-        return {}
+    try:
+        os.environ.setdefault(
+            "LANGFUSE_BASE_URL",
+            os.getenv("LANGFUSE_HOST", "http://langfuse:3000"),
+        )
+        os.environ["LANGSMITH_OTEL_ENABLED"] = "true"
+        os.environ["LANGSMITH_OTEL_ONLY"] = "true"
+        os.environ["LANGSMITH_TRACING"] = "true"
 
-    async def langfuse_stop_hook_async(input_data, _tool_use_id, _context):
-        error_msg = None
-        process = None
-        try:
-            hook_payload = json.dumps(input_data)
-            process = await asyncio.create_subprocess_exec(
-                "python3",
-                "/app/hooks/langfuse_hook.py",
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env={
-                    "TRACE_TO_LANGFUSE": "true",
-                    "LANGFUSE_PUBLIC_KEY": langfuse_public_key,
-                    "LANGFUSE_SECRET_KEY": langfuse_secret_key,
-                    "LANGFUSE_HOST": os.getenv("LANGFUSE_HOST", "http://langfuse:3000"),
-                    "LANGFUSE_BASE_URL": os.getenv(
-                        "LANGFUSE_HOST", "http://langfuse:3000"
-                    ),
-                    "CC_LANGFUSE_DEBUG": "true",
-                    "PARENT_SPAN_ID": span_id or "",
-                    "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-                    "HOME": os.environ.get("HOME", "/home/bot"),
-                },
-            )
+        from langsmith.integrations.claude_agent_sdk import configure_claude_agent_sdk
 
-            try:
-                _stdout, stderr = await asyncio.wait_for(
-                    process.communicate(input=hook_payload.encode()),
-                    timeout=float(os.getenv("LANGFUSE_HOOK_TIMEOUT", "30.0")),
-                )
-                if process.returncode != 0:
-                    logger.warning(f"Langfuse hook failed: {stderr.decode()}")
-                else:
-                    return {"success": True}
-            except TimeoutError:
-                logger.warning("Langfuse hook timed out after 30s")
-                process.kill()
-                await process.wait()
+        configure_claude_agent_sdk()
+        logger.info("Langfuse OTel instrumentation enabled")
+    except ImportError:
+        logger.warning(
+            "langsmith not installed, skipping Langfuse OTel instrumentation"
+        )
+    except Exception as e:
+        logger.warning(f"Failed to setup Langfuse OTel instrumentation: {e}")
 
-        except Exception as e:
-            logger.warning(f"Error running Langfuse hook: {e}")
-            error_msg = str(e)
-        finally:
-            # Ensure process is cleaned up if it exists and hasn't been waited on
-            if process and process.returncode is None:
-                try:
-                    process.kill()
-                    await process.wait()
-                except ProcessLookupError:
-                    pass  # Expected - process already terminated
-                except OSError as e:
-                    logger.warning(f"Failed to cleanup Langfuse hook process: {e}")
-                except Exception as e:
-                    logger.error(
-                        f"Unexpected error cleaning up Langfuse hook process: {e}",
-                        exc_info=True,
-                    )
 
-        return {"success": False, "error": error_msg}
-
-    return {
-        "Stop": [HookMatcher(matcher="*", hooks=[langfuse_stop_hook_async])],
-        "SubagentStop": [HookMatcher(matcher="*", hooks=[langfuse_stop_hook_async])],
-    }
+_setup_langfuse_otel()
 
 
 async def _enqueue_memory_job(repo: str, transcript_path: str, hook_event: str) -> None:
@@ -223,8 +176,6 @@ async def execute_sandbox_request(
     # Plugin MCP servers are auto-discovered from ~/.claude/plugins/*/.mcp.json
     # via setting_sources=["user", "project", "local"]
 
-    hooks = setup_langfuse_hooks()
-
     # On Stop/SubagentStop: persist transcript to the agent-memory volume and enqueue
     # a memory extraction job. Runs inside the hook so it fires even on failures/timeouts.
     async def capture_and_enqueue_memory(input_data, _tool_use_id, _context):
@@ -240,15 +191,10 @@ async def execute_sandbox_request(
             asyncio.create_task(_enqueue_memory_job(repo, transcript, event))
         return {"success": True}
 
-    for event in ("Stop", "SubagentStop"):
-        if event in hooks:
-            hooks[event].append(
-                HookMatcher(matcher="*", hooks=[capture_and_enqueue_memory])
-            )
-        else:
-            hooks[event] = [
-                HookMatcher(matcher="*", hooks=[capture_and_enqueue_memory])
-            ]
+    hooks = {
+        "Stop": [HookMatcher(matcher="*", hooks=[capture_and_enqueue_memory])],
+        "SubagentStop": [HookMatcher(matcher="*", hooks=[capture_and_enqueue_memory])],
+    }
 
     # Load plugins and skills from ~/.claude/ using setting_sources
     # Get model from environment variable

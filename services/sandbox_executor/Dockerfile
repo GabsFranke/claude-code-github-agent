@@ -32,16 +32,12 @@ COPY repo_setup/ ./repo_setup/
 # Copy repo-setup.yaml configuration
 COPY repo-setup.yaml ./repo-setup.yaml
 
-# Hook scripts
-COPY hooks/langfuse_hook.py /app/hooks/langfuse_hook.py
-RUN chmod +x /app/hooks/langfuse_hook.py
-
 COPY services/sandbox_executor/requirements.txt ./
 RUN pip3 install --no-cache-dir -r requirements.txt
 
 # Try to install claude-agent-sdk directly as it might be required
 # If it's a private repo, we might need a requirements.txt with the correct index
-RUN pip3 install uvicorn fastapi pydantic httpx langfuse
+RUN pip3 install uvicorn fastapi pydantic httpx
 
 # Sandbox Executor source code
 COPY services/sandbox_executor/ /app/services/sandbox_executor/

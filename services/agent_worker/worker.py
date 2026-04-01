@@ -5,7 +5,7 @@ import logging
 import sys
 
 import httpx
-from langfuse import Langfuse
+from langfuse import get_client
 
 # Import shared utilities
 from shared import JobQueue, MultiRateLimiter, get_queue, setup_graceful_shutdown
@@ -32,11 +32,7 @@ logger.info(f"Configuration loaded: GitHub App ID={config.github.github_app_id}"
 # Initialize Langfuse client (module-level, never shutdown)
 langfuse = None
 if config.langfuse.is_enabled:
-    langfuse = Langfuse(
-        public_key=config.langfuse.langfuse_public_key,
-        secret_key=config.langfuse.langfuse_secret_key,
-        host=config.langfuse.langfuse_host,
-    )
+    langfuse = get_client()
     logger.info("Langfuse observability enabled")
 else:
     logger.info("Langfuse not configured - skipping observability")

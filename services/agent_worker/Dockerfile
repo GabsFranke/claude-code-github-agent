@@ -20,10 +20,6 @@ COPY services/agent_worker/ ./services/agent_worker/
 # Copy subagents package
 COPY subagents/ ./subagents/
 
-# Copy hooks
-COPY hooks/langfuse_hook.py /app/hooks/langfuse_hook.py
-RUN chmod +x /app/hooks/langfuse_hook.py
-
 WORKDIR /app
 
 # Health check

@@ -126,12 +126,12 @@ class TestSetupClaudeSettings:
         settings = json.loads(written_data)
 
         assert "env" in settings
-        assert settings["env"]["TRACE_TO_LANGFUSE"] == "true"
         assert settings["env"]["LANGFUSE_PUBLIC_KEY"] == "pk_test"
         assert settings["env"]["LANGFUSE_SECRET_KEY"] == "sk_test"
-        assert settings["env"]["LANGFUSE_HOST"] == "http://localhost:3000"
         assert settings["env"]["LANGFUSE_BASE_URL"] == "http://localhost:3000"
-        assert settings["env"]["CC_LANGFUSE_DEBUG"] == "true"
+        assert settings["env"]["LANGSMITH_OTEL_ENABLED"] == "true"
+        assert settings["env"]["LANGSMITH_OTEL_ONLY"] == "true"
+        assert settings["env"]["LANGSMITH_TRACING"] == "true"
 
     @patch("services.agent_worker.config.claude_settings.Path.home")
     @patch("pathlib.Path.exists")
@@ -150,7 +150,7 @@ class TestSetupClaudeSettings:
 
         # Should not have Langfuse config
         if "env" in settings:
-            assert "TRACE_TO_LANGFUSE" not in settings["env"]
+            assert "LANGSMITH_OTEL_ENABLED" not in settings["env"]
 
     @patch("services.agent_worker.config.claude_settings.Path.home")
     @patch("pathlib.Path.exists")

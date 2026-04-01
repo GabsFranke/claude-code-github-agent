@@ -13,12 +13,7 @@ import os
 import sys
 from collections import defaultdict
 
-from claude_agent_sdk import (
-    ClaudeAgentOptions,
-    ClaudeSDKClient,
-    HookMatcher,
-    ResultMessage,
-)
+from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, ResultMessage
 
 from shared.logging_utils import setup_logging
 from shared.queue import RedisQueue
@@ -29,6 +24,35 @@ from subagents import AGENTS
 
 setup_logging(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
+
+
+def _setup_langfuse_otel() -> None:
+    """Configure Langfuse observability via OpenTelemetry instrumentation."""
+    if not (os.getenv("LANGFUSE_PUBLIC_KEY") and os.getenv("LANGFUSE_SECRET_KEY")):
+        return
+
+    try:
+        os.environ.setdefault(
+            "LANGFUSE_BASE_URL",
+            os.getenv("LANGFUSE_HOST", "http://langfuse:3000"),
+        )
+        os.environ["LANGSMITH_OTEL_ENABLED"] = "true"
+        os.environ["LANGSMITH_OTEL_ONLY"] = "true"
+        os.environ["LANGSMITH_TRACING"] = "true"
+
+        from langsmith.integrations.claude_agent_sdk import configure_claude_agent_sdk
+
+        configure_claude_agent_sdk()
+        logger.info("Langfuse OTel instrumentation enabled")
+    except ImportError:
+        logger.warning(
+            "langsmith not installed, skipping Langfuse OTel instrumentation"
+        )
+    except Exception as e:
+        logger.warning(f"Failed to setup Langfuse OTel instrumentation: {e}")
+
+
+_setup_langfuse_otel()
 
 shutdown_event = asyncio.Event()
 
@@ -106,80 +130,6 @@ def extract_conversation(transcript_path: str) -> str:
     return "\n".join(lines)
 
 
-def setup_langfuse_hooks() -> dict:
-    """Setup Langfuse observability hooks for memory extraction sessions."""
-    langfuse_public_key = os.getenv("LANGFUSE_PUBLIC_KEY")
-    langfuse_secret_key = os.getenv("LANGFUSE_SECRET_KEY")
-
-    if not (langfuse_public_key and langfuse_secret_key):
-        return {}
-
-    async def langfuse_stop_hook_async(input_data, _tool_use_id, _context):
-        error_msg = None
-        process = None
-        try:
-            hook_payload = json.dumps(input_data)
-            process = await asyncio.create_subprocess_exec(
-                "python3",
-                "/app/hooks/langfuse_hook.py",
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env={
-                    "TRACE_TO_LANGFUSE": "true",
-                    "LANGFUSE_PUBLIC_KEY": langfuse_public_key,
-                    "LANGFUSE_SECRET_KEY": langfuse_secret_key,
-                    "LANGFUSE_HOST": os.getenv("LANGFUSE_HOST", "http://langfuse:3000"),
-                    "LANGFUSE_BASE_URL": os.getenv(
-                        "LANGFUSE_HOST", "http://langfuse:3000"
-                    ),
-                    "CC_LANGFUSE_DEBUG": "true",
-                    "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-                    "HOME": os.environ.get("HOME", "/home/bot"),
-                },
-            )
-
-            try:
-                _stdout, stderr = await asyncio.wait_for(
-                    process.communicate(input=hook_payload.encode()),
-                    timeout=float(os.getenv("LANGFUSE_HOOK_TIMEOUT", "30.0")),
-                )
-                if process.returncode != 0:
-                    logger.warning(f"Langfuse hook failed: {stderr.decode()}")
-                else:
-                    return {"success": True}
-            except TimeoutError:
-                logger.warning("Langfuse hook timed out after 30s")
-                process.kill()
-                await process.wait()
-
-        except Exception as e:
-            logger.warning(f"Error running Langfuse hook: {e}")
-            error_msg = str(e)
-        finally:
-            # Ensure process is cleaned up if it exists and hasn't been waited on
-            if process and process.returncode is None:
-                try:
-                    process.kill()
-                    await process.wait()
-                except ProcessLookupError:
-                    pass  # Expected - process already terminated
-                except OSError as e:
-                    logger.warning(f"Failed to cleanup Langfuse hook process: {e}")
-                except Exception as e:
-                    logger.error(
-                        f"Unexpected error cleaning up Langfuse hook process: {e}",
-                        exc_info=True,
-                    )
-
-        return {"success": False, "error": error_msg}
-
-    return {
-        "Stop": [HookMatcher(matcher="*", hooks=[langfuse_stop_hook_async])],
-        "SubagentStop": [HookMatcher(matcher="*", hooks=[langfuse_stop_hook_async])],
-    }
-
-
 async def process_memory_job(message: dict) -> None:
     """Invoke memory-extractor subagent for one transcript."""
     repo = message.get("repo")
@@ -227,8 +177,6 @@ Extract memorable facts from the session transcript and update the memory files 
                 "ANTHROPIC_DEFAULT_HAIKU_MODEL", "claude-haiku-4-5-20251001"
             )
 
-            hooks = setup_langfuse_hooks()
-
             mcp_servers = {
                 "memory": {
                     "type": "stdio",
@@ -247,7 +195,6 @@ Extract memorable facts from the session transcript and update the memory files 
                 permission_mode="acceptEdits",
                 mcp_servers=mcp_servers,  # type: ignore[arg-type]
                 agents=AGENTS,
-                hooks=hooks,
                 cwd=memory_dir,  # Working directory is the persistent memory dir
                 add_dirs=[memory_dir],  # Allow writes to memory directory
             )

@@ -193,7 +193,7 @@ services:
 
   # Langfuse worker (processes events asynchronously)
   langfuse-worker:
-    image: langfuse/langfuse-worker:3.149
+    image: langfuse/langfuse-worker:latest
     env_file: .env
     environment:
       DATABASE_URL: postgresql://langfuse:${LANGFUSE_DB_PASSWORD:-langfuse}@langfuse-db:5432/langfuse
@@ -233,7 +233,7 @@ services:
 
   # Langfuse web UI
   langfuse:
-    image: langfuse/langfuse:3.149
+    image: langfuse/langfuse:latest
     env_file: .env
     ports:
       - "7500:3000"

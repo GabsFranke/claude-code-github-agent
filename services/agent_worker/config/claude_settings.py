@@ -44,16 +44,19 @@ def setup_claude_settings():
         if os.getenv(var):
             custom_env[var] = os.getenv(var)
 
-    # Langfuse env vars
+    # Langfuse env vars (OTel-based instrumentation via langsmith)
     if os.getenv("LANGFUSE_PUBLIC_KEY") and os.getenv("LANGFUSE_SECRET_KEY"):
+        langfuse_base_url = os.getenv("LANGFUSE_BASE_URL") or os.getenv(
+            "LANGFUSE_HOST", "http://langfuse:3000"
+        )
         custom_env.update(
             {
-                "TRACE_TO_LANGFUSE": "true",
                 "LANGFUSE_PUBLIC_KEY": os.getenv("LANGFUSE_PUBLIC_KEY"),
                 "LANGFUSE_SECRET_KEY": os.getenv("LANGFUSE_SECRET_KEY"),
-                "LANGFUSE_HOST": os.getenv("LANGFUSE_HOST", "http://langfuse:3000"),
-                "LANGFUSE_BASE_URL": os.getenv("LANGFUSE_HOST", "http://langfuse:3000"),
-                "CC_LANGFUSE_DEBUG": "true",
+                "LANGFUSE_BASE_URL": langfuse_base_url,
+                "LANGSMITH_OTEL_ENABLED": "true",
+                "LANGSMITH_OTEL_ONLY": "true",
+                "LANGSMITH_TRACING": "true",
             }
         )
 

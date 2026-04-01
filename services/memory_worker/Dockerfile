@@ -17,10 +17,6 @@ COPY subagents/ ./subagents/
 # Copy MCP servers (needed by memory extractor subagent)
 COPY mcp_servers/ ./mcp_servers/
 
-# Hook scripts for Langfuse observability
-COPY hooks/langfuse_hook.py /app/hooks/langfuse_hook.py
-RUN chmod +x /app/hooks/langfuse_hook.py
-
 # Worker source
 COPY services/memory_worker/ /app/services/memory_worker/
 
