@@ -31,6 +31,9 @@ RUN pip3 install --no-cache-dir -r requirements.txt
 # Create persistent memory directory and set ownership
 RUN mkdir -p /home/bot/.claude/projects && chown -R bot:bot /home/bot/.claude/projects
 
+# Create agent memory directory for reading transcripts and writing MEMORY.md
+RUN mkdir -p /home/bot/agent-memory && chown -R bot:bot /home/bot/agent-memory
+
 # Set ownership
 RUN chown -R bot:bot /app /home/bot
 

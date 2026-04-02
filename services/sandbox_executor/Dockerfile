@@ -57,6 +57,9 @@ RUN mkdir -p /var/cache/repos && chown -R bot:bot /var/cache/repos
 # Create agent memory directory structure and set ownership to bot user
 RUN mkdir -p /home/bot/.claude/projects && chown -R bot:bot /home/bot/.claude/projects
 
+# Create agent memory directory for persistent transcripts and set ownership to bot user
+RUN mkdir -p /home/bot/agent-memory && chown -R bot:bot /home/bot/agent-memory
+
 # Set ownership to bot user
 RUN chown -R bot:bot /app /home/bot/.claude
 
