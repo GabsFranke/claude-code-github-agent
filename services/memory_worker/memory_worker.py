@@ -12,14 +12,11 @@ import logging
 import os
 import sys
 from collections import defaultdict
+from pathlib import Path
 
-from claude_agent_sdk import (
-    ClaudeAgentOptions,
-    ClaudeSDKClient,
-    HookMatcher,
-    ResultMessage,
-)
+from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, ResultMessage
 
+from shared.langfuse_hooks import setup_langfuse_hooks  # noqa: E402
 from shared.logging_utils import setup_logging
 from shared.queue import RedisQueue
 from shared.signals import setup_graceful_shutdown
@@ -106,81 +103,24 @@ def extract_conversation(transcript_path: str) -> str:
     return "\n".join(lines)
 
 
-def setup_langfuse_hooks() -> dict:
-    """Setup Langfuse observability hooks for memory extraction sessions."""
-    langfuse_public_key = os.getenv("LANGFUSE_PUBLIC_KEY")
-    langfuse_secret_key = os.getenv("LANGFUSE_SECRET_KEY")
-
-    if not (langfuse_public_key and langfuse_secret_key):
-        return {}
-
-    async def langfuse_stop_hook_async(input_data, _tool_use_id, _context):
-        error_msg = None
-        process = None
-        try:
-            hook_payload = json.dumps(input_data)
-            process = await asyncio.create_subprocess_exec(
-                "python3",
-                "/app/hooks/langfuse_hook.py",
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env={
-                    "TRACE_TO_LANGFUSE": "true",
-                    "LANGFUSE_PUBLIC_KEY": langfuse_public_key,
-                    "LANGFUSE_SECRET_KEY": langfuse_secret_key,
-                    "LANGFUSE_HOST": os.getenv("LANGFUSE_HOST", "http://langfuse:3000"),
-                    "LANGFUSE_BASE_URL": os.getenv(
-                        "LANGFUSE_HOST", "http://langfuse:3000"
-                    ),
-                    "CC_LANGFUSE_DEBUG": "true",
-                    "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-                    "HOME": os.environ.get("HOME", "/home/bot"),
-                },
-            )
-
+async def _release_transcript(transcript_path: str, redis_client) -> None:
+    """Decrement the transcript ref counter; delete the file when it hits zero."""
+    ref_key = f"agent:transcript:ref:{Path(transcript_path).stem}"
+    try:
+        remaining = await redis_client.decr(ref_key)
+        if remaining <= 0:
             try:
-                _stdout, stderr = await asyncio.wait_for(
-                    process.communicate(input=hook_payload.encode()),
-                    timeout=float(os.getenv("LANGFUSE_HOOK_TIMEOUT", "30.0")),
-                )
-                if process.returncode != 0:
-                    logger.warning(f"Langfuse hook failed: {stderr.decode()}")
-                else:
-                    return {"success": True}
-            except TimeoutError:
-                logger.warning("Langfuse hook timed out after 30s")
-                process.kill()
-                await process.wait()
-
-        except Exception as e:
-            logger.warning(f"Error running Langfuse hook: {e}")
-            error_msg = str(e)
-        finally:
-            # Ensure process is cleaned up if it exists and hasn't been waited on
-            if process and process.returncode is None:
-                try:
-                    process.kill()
-                    await process.wait()
-                except ProcessLookupError:
-                    pass  # Expected - process already terminated
-                except OSError as e:
-                    logger.warning(f"Failed to cleanup Langfuse hook process: {e}")
-                except Exception as e:
-                    logger.error(
-                        f"Unexpected error cleaning up Langfuse hook process: {e}",
-                        exc_info=True,
-                    )
-
-        return {"success": False, "error": error_msg}
-
-    return {
-        "Stop": [HookMatcher(matcher="*", hooks=[langfuse_stop_hook_async])],
-        "SubagentStop": [HookMatcher(matcher="*", hooks=[langfuse_stop_hook_async])],
-    }
+                os.remove(transcript_path)
+                logger.debug(f"Deleted transcript (last consumer): {transcript_path}")
+            except FileNotFoundError:
+                pass
+            except Exception as e:
+                logger.warning(f"Failed to delete transcript {transcript_path}: {e}")
+    except Exception as e:
+        logger.warning(f"Failed to decrement transcript ref counter: {e}")
 
 
-async def process_memory_job(message: dict) -> None:
+async def process_memory_job(message: dict, redis_client) -> None:
     """Invoke memory-extractor subagent for one transcript."""
     repo = message.get("repo")
     transcript_path = message.get("transcript_path")
@@ -246,6 +186,11 @@ Extract memorable facts from the session transcript and update the memory files 
                 allowed_tools=["Read", "Write", "Edit", "List", "mcp__memory__*"],
                 permission_mode="acceptEdits",
                 mcp_servers=mcp_servers,  # type: ignore[arg-type]
+                setting_sources=[
+                    "user",
+                    "project",
+                    "local",
+                ],
                 agents=AGENTS,
                 hooks=hooks,
                 cwd=memory_dir,  # Working directory is the persistent memory dir
@@ -271,13 +216,7 @@ Extract memorable facts from the session transcript and update the memory files 
                 )
 
         finally:
-            # Clean up transcript after processing (success or failure)
-            # The valuable information is now in memory/index.md, and Langfuse has the full trace
-            try:
-                os.remove(transcript_path)
-                logger.debug(f"Cleaned up transcript: {transcript_path}")
-            except Exception as e:
-                logger.warning(f"Failed to delete transcript {transcript_path}: {e}")
+            await _release_transcript(transcript_path, redis_client)
 
 
 async def main() -> None:
@@ -293,13 +232,15 @@ async def main() -> None:
         queue_name="agent:memory:requests",
         password=redis_password,
     )
+    await queue._connect()
+    redis_client = queue.redis
 
     logger.info("Memory worker ready, waiting for jobs...")
 
     async def message_handler(message: dict) -> None:
         if shutdown_event.is_set():
             return
-        await process_memory_job(message)
+        await process_memory_job(message, redis_client)
 
     try:
         await queue.subscribe(message_handler)

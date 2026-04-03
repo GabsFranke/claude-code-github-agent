@@ -81,7 +81,7 @@ class RequestProcessor:
         )
 
         if self.langfuse:
-            with self.langfuse.start_as_current_span(
+            with self.langfuse.start_as_current_observation(  # type: ignore[attr-defined]
                 name="github_agent_request"
             ) as trace:
                 trace.update(
