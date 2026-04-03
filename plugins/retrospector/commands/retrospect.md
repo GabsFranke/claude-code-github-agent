@@ -1,6 +1,6 @@
 ---
 description: "Analyse a session transcript and improve agent instructions via a PR to develop"
-argument-hint: "<transcript_path> <workflow_name> <target_repo> [num_turns] [is_error]"
+argument-hint: "<transcript_summary_path> <workflow_name> <target_repo> [num_turns] [is_error]"
 skills:
   - git-worktree-workflow
 allowed-tools: ["Bash", "Glob", "Grep", "Read", "Edit", "mcp__github__*"]
@@ -14,7 +14,7 @@ behaviour. Propose changes as a pull request to the `develop` branch.
 
 **Arguments:** "$ARGUMENTS"
 
-- First argument: absolute path to the session transcript (JSONL)
+- First argument: path to the session transcript summary (markdown, pre-processed)
 - Second argument: workflow name (e.g. `review-pr`, `fix-ci`, `triage-issue`, `generic`)
 - Third argument: target repository the session worked on (owner/repo, for context)
 - Fourth argument (optional): number of turns the session took
@@ -22,21 +22,31 @@ behaviour. Propose changes as a pull request to the `develop` branch.
 
 ---
 
-## Step 1 — Read the transcript
+## Step 1 — Read the transcript summary
 
-Read the full transcript at the path given in the first argument.
+Read the transcript summary at the path given in the first argument.
 
-The file is newline-delimited JSON. Each line is a message object. Scan for:
+The file is a structured markdown summary of the session, not the raw JSONL.
+It includes:
 
-- `"role": "assistant"` blocks — what the agent did (text + tool calls)
-- `"role": "user"` blocks with `"type": "tool_result"` — tool outputs and errors
+- Total turn count and error count
+- List of subagents invoked (via `@agent-name`)
+- Timeline of assistant messages, tool calls, and tool results
+- Summary of all tool errors
+
+Scan for:
+
 - Tool calls that returned errors followed by redundant retries
-- `@agent-name` references in assistant text — note which subagents were invoked
-- Instructions from the prompt that were visibly ignored
+- `@agent-name` references — note which subagents were invoked
+- Instructions that were visibly ignored (look for repeated similar tool calls)
 - Steps taken in the wrong order (e.g. editing before reading)
 - Excessive back-and-forth on something that should have been one step
-- Missing context that led to wrong assumptions or hallucinations
+- Missing context that led to wrong assumptions
 - Any explicit failure or error in the final turns
+
+**Note:** The summary is pre-processed to avoid buffer limits. If you need more
+detail about a specific turn, the patterns above should be sufficient to identify
+instruction gaps.
 
 ---
 
@@ -55,14 +65,15 @@ agent's instructions (not with the user's request or an external service).
 Determine which instruction files govern the workflow from the second argument.
 The mapping is:
 
-| Workflow | Command file | Agent files |
-|----------|-------------|-------------|
-| `review-pr` | `plugins/pr-review-toolkit/commands/review-pr.md` | `plugins/pr-review-toolkit/agents/*.md` |
-| `fix-ci` | `plugins/ci-failure-toolkit/commands/fix-ci.md` | `plugins/ci-failure-toolkit/agents/*.md` |
-| `triage-issue` | `prompts/triage.md` | — |
-| `generic` | `prompts/generic.md` | — |
+| Workflow       | Command file                                      | Agent files                              |
+| -------------- | ------------------------------------------------- | ---------------------------------------- |
+| `review-pr`    | `plugins/pr-review-toolkit/commands/review-pr.md` | `plugins/pr-review-toolkit/agents/*.md`  |
+| `fix-ci`       | `plugins/ci-failure-toolkit/commands/fix-ci.md`   | `plugins/ci-failure-toolkit/agents/*.md` |
+| `triage-issue` | `prompts/triage.md`                               | —                                        |
+| `generic`      | `prompts/generic.md`                              | —                                        |
 
 **Subagents** — if `@agent-name` appears in the transcript, read the agent file:
+
 - Plugin agents: `plugins/{plugin-name}/agents/{agent-name}.md`
 - Python subagents: `subagents/{agent_name}.py` (edit only the `prompt="""..."""` field)
 
@@ -81,6 +92,7 @@ and evaluate whether your own instructions have gaps that this session exposed.
 ## Step 4 — Formulate precise improvements
 
 For each problem you found, identify:
+
 1. Which instruction file is responsible
 2. The exact change needed (add a step, clarify wording, reorder, add an example)
 3. Why this change would have prevented the specific failure observed
@@ -138,6 +150,7 @@ PR body:
 ## Problems identified
 
 ### Problem 1: <short title>
+
 **Observed:** <what happened in the transcript>
 **Root cause:** <which instruction was missing or wrong>
 **Fix:** <what was changed and why>

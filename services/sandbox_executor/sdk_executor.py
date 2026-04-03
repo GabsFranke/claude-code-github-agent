@@ -78,15 +78,10 @@ async def _enqueue_retrospector_job(
 async def _stage_transcript(
     repo: str,
     transcript_path: str,
-    consumers: int,
-    redis_url: str,
-    redis_password: str | None,
 ) -> str | None:
-    """Move transcript to the shared transcripts volume and set a ref counter.
+    """Copy transcript to the shared transcripts volume for post-processing workers.
 
-    The file is moved (not copied) so there is only ever one copy.
-    Each consumer decrements the counter when done; the last one deletes the file.
-    The counter has a 24 h safety TTL in case a worker crashes before cleanup.
+    The transcript is persisted permanently for future analysis and debugging.
 
     Returns the staged path on success, None on failure.
     """
@@ -106,21 +101,6 @@ async def _stage_transcript(
     except Exception as e:
         logger.warning(f"Failed to stage transcript for {repo}: {e}")
         return None
-
-    # Set ref counter so workers can coordinate deletion
-    try:
-        import redis.asyncio as aioredis
-
-        rc = await aioredis.from_url(
-            redis_url, decode_responses=True, password=redis_password
-        )
-        try:
-            ref_key = f"agent:transcript:ref:{transcript_file.stem}"
-            await rc.set(ref_key, consumers, ex=86400)
-        finally:
-            await rc.close()
-    except Exception as e:
-        logger.warning(f"Failed to set transcript ref counter: {e}")
 
     return staged_path
 
@@ -227,10 +207,6 @@ async def execute_sandbox_request(
 
     memory_enabled = os.getenv("MEMORY_WORKER_ENABLED", "true").lower() == "true"
     retrospector_enabled = os.getenv("RETROSPECTOR_ENABLED", "true").lower() == "true"
-    consumers = (1 if memory_enabled else 0) + (1 if retrospector_enabled else 0)
-
-    _redis_url = os.getenv("REDIS_URL", "redis://redis:6379")
-    _redis_password = os.getenv("REDIS_PASSWORD")
 
     # On Stop/SubagentStop: stage transcript and enqueue enabled post-processing jobs.
     # Runs inside the hook so it fires even on failures/timeouts.
@@ -243,17 +219,24 @@ async def execute_sandbox_request(
         if transcript:
             event = input_data.get("hook_event_name", "Stop")
             logger.debug(f"Post-session hook triggered: {transcript} ({event})")
-            # Move to shared volume once — both workers get the same path.
-            staged_path = await _stage_transcript(
-                repo, transcript, consumers, _redis_url, _redis_password
-            )
+            # Copy to shared volume for post-processing workers
+            staged_path = await _stage_transcript(repo, transcript)
             if not staged_path:
+                logger.error(
+                    f"Failed to stage transcript {transcript}, skipping post-processing"
+                )
                 return {"success": True}
+
+            # Enqueue jobs with error handling
             if memory_enabled:
-                asyncio.create_task(_enqueue_memory_job(repo, staged_path, event))
+                try:
+                    await _enqueue_memory_job(repo, staged_path, event)
+                except Exception as e:
+                    logger.error(f"Failed to enqueue memory job: {e}", exc_info=True)
+
             if retrospector_enabled:
-                asyncio.create_task(
-                    _enqueue_retrospector_job(
+                try:
+                    await _enqueue_retrospector_job(
                         repo,
                         staged_path,
                         event,
@@ -264,7 +247,10 @@ async def execute_sandbox_request(
                             "duration_ms": input_data.get("duration_ms", 0),
                         },
                     )
-                )
+                except Exception as e:
+                    logger.error(
+                        f"Failed to enqueue retrospector job: {e}", exc_info=True
+                    )
         return {"success": True}
 
     if memory_enabled or retrospector_enabled:

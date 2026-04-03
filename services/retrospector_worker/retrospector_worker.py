@@ -8,8 +8,7 @@ Listens on `agent:retrospector:requests`. For each job it:
    any proposed instruction improvements.
 5. Cleans up the worktree.
 
-The retrospector runs only for sessions that errored or exceeded the turn
-threshold (RETROSPECTOR_MIN_TURNS, default 10).
+Transcripts are persisted permanently in the shared volume for future analysis.
 """
 
 import asyncio
@@ -39,6 +38,7 @@ from shared.github_auth import get_github_auth_service
 from shared.logging_utils import setup_logging
 from shared.queue import RedisQueue
 from shared.signals import setup_graceful_shutdown
+from shared.transcript_parser import extract_retrospector_summary
 
 setup_logging(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
@@ -47,26 +47,6 @@ logger = logging.getLogger(__name__)
 from shared.langfuse_hooks import setup_langfuse_hooks  # noqa: E402
 
 shutdown_event = asyncio.Event()
-
-
-async def _release_transcript(transcript_path: str | None, redis_client) -> None:
-    """Decrement the transcript ref counter; delete the file when it hits zero."""
-    if not transcript_path:
-        return
-    ref_key = f"agent:transcript:ref:{Path(transcript_path).stem}"
-    try:
-        remaining = await redis_client.decr(ref_key)
-        if remaining <= 0:
-            try:
-                os.remove(transcript_path)
-                logger.debug(f"Deleted transcript (last consumer): {transcript_path}")
-            except FileNotFoundError:
-                pass
-            except Exception as e:
-                logger.warning(f"Failed to delete transcript {transcript_path}: {e}")
-    except Exception as e:
-        logger.warning(f"Failed to decrement transcript ref counter: {e}")
-
 
 # Per-workflow locks — prevent concurrent instruction edits for the same workflow.
 _workflow_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
@@ -140,6 +120,7 @@ async def process_retrospector_job(message: dict, redis_client) -> None:
 
         bot_repo = os.getenv("BOT_REPO", "GabsFranke/claude-code-github-agent")
         workspace = None
+        repo_dir = None  # Initialize to prevent NameError in finally block
 
         try:
             repo_dir = await _ensure_bot_repo_synced(bot_repo, redis_client)
@@ -196,9 +177,18 @@ async def process_retrospector_job(message: dict, redis_client) -> None:
             duration_ms = int(session_meta.get("duration_ms", 0))
             num_turns = int(session_meta.get("num_turns", 0))
             is_error = bool(session_meta.get("is_error", False))
+
+            # Extract a summary instead of passing the raw transcript path
+            # to avoid hitting the SDK's 1MB JSON buffer limit
+            transcript_summary = extract_retrospector_summary(transcript_path)
+
+            # Write summary to a temp file that the SDK can read
+            summary_path = os.path.join(workspace, "transcript_summary.md")
+            Path(summary_path).write_text(transcript_summary, encoding="utf-8")
+
             prompt = (
                 f"/retrospector:retrospect "
-                f"{transcript_path} "
+                f"{summary_path} "
                 f"{workflow_name} "
                 f"{target_repo} "
                 f"{num_turns} "
@@ -325,7 +315,6 @@ async def process_retrospector_job(message: dict, redis_client) -> None:
                 except Exception:
                     pass
 
-            await _release_transcript(transcript_path, redis_client)
             await close_github_auth_service()
 
 
