@@ -204,6 +204,7 @@ class TestProcessJob:
             auto_triage,
             workspace,
             system_context=None,
+            workflow_name=None,
         ):
             nonlocal created_workspace
             created_workspace = workspace

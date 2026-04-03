@@ -275,7 +275,7 @@ class TestRequestProcessorExecution:
         mock_span.update = MagicMock()
         mock_span.__enter__ = MagicMock(return_value=mock_span)
         mock_span.__exit__ = MagicMock(return_value=False)
-        langfuse_client.start_as_current_span = MagicMock(return_value=mock_span)
+        langfuse_client.start_as_current_observation = MagicMock(return_value=mock_span)
         langfuse_client.flush = MagicMock()
 
         with patch(
@@ -305,5 +305,5 @@ class TestRequestProcessorExecution:
                 )
 
                 assert job_id == "job-303"
-                langfuse_client.start_as_current_span.assert_called_once()
+                langfuse_client.start_as_current_observation.assert_called_once()
                 langfuse_client.flush.assert_called_once()
