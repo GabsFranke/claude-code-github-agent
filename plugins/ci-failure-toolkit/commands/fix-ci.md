@@ -78,7 +78,9 @@ You are the main coordinator with these responsibilities:
 **CRITICAL - Log Access:**
 
 - ❌ **NEVER use Read or Bash to access workflow logs** - They are too large (often 50KB+) and will be truncated
-- ✅ **ALWAYS use GitHub Actions MCP tools** - They handle large logs efficiently and provide structured output
+- ❌ **NEVER use `curl`, `gh` CLI, or direct HTTP requests to fetch logs** - Always use MCP tools instead
+- ❌ **NEVER extract tokens from git config or remote URLs** - Credentials are pre-configured; MCP tools handle auth automatically
+- ✅ **ALWAYS use GitHub Actions MCP tools (`mcp__github-actions__*`)** - They handle large logs efficiently and provide structured output
 - ✅ **Use `get_failed_steps` with `log_lines_per_step: 200`** - This gives you ALL errors in one call
 - ✅ **Pass the COMPLETE failed steps output to subagents** - Don't just pass a snippet or the first error
 
@@ -137,6 +139,8 @@ Extract from $ARGUMENTS:
 **Use the GitHub Actions MCP tools - they fetch logs via API and handle size limits:**
 
 All tools use the `mcp__github-actions__` prefix. Call them directly as MCP tools.
+
+**Do NOT fall back to `curl`, `gh` CLI, or other direct methods if MCP tools seem unavailable.** If a `mcp__github-actions__*` tool call fails, try the next one in the recommended flow before considering alternatives. These tools are the only approved way to access logs.
 
 **IMPORTANT: You are ONLY gathering information here. Do NOT attempt to fix anything yourself.**
 
@@ -762,7 +766,8 @@ All agents have the `git-worktree-workflow` skill and know how to:
 - **You create the branch first** - Before delegating to agents
 - **Agents commit to your branch** - They work in the same worktree
 - **You create the PR** - After all fixes are done
-- **GitHub MCP only** - Use `mcp__github__*` tools, NOT `gh` CLI
+- **GitHub MCP only** - Use `mcp__github__*` tools and `mcp__github-actions__*` tools, NOT `gh` CLI, `curl`, or direct HTTP requests
+- **Never extract credentials** - Do not read git config or remote URLs to obtain tokens; MCP tools handle auth automatically
 - **Delegate with context** - Provide error logs and clear instructions
 - **Trust the agents** - They have the `git-worktree-workflow` skill
 
