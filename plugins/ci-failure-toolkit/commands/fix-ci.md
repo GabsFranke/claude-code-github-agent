@@ -77,10 +77,49 @@ You are the main coordinator with these responsibilities:
 
 **CRITICAL - Log Access:**
 
+- ❌ **NEVER use `gh` CLI** - It is NOT available in this environment. Do not attempt `gh run view`, `gh api`, or any `gh` commands.
 - ❌ **NEVER use Read or Bash to access workflow logs** - They are too large (often 50KB+) and will be truncated
 - ✅ **ALWAYS use GitHub Actions MCP tools** - They handle large logs efficiently and provide structured output
 - ✅ **Use `get_failed_steps` with `log_lines_per_step: 200`** - This gives you ALL errors in one call
 - ✅ **Pass the COMPLETE failed steps output to subagents** - Don't just pass a snippet or the first error
+
+**Fallback - When `mcp__github-actions__*` tools are not available:**
+
+If you do not have `mcp__github-actions__*` tools in your toolset, use the GitHub REST API via `curl`. The git remote URL already contains an access token:
+
+```bash
+# 1. Extract the token from the git remote
+TOKEN=$(git remote get-url origin | sed 's|.*://\([^@]*\)@.*|\1|' | cut -d: -f2)
+OWNER="owner-name"
+REPO="repo-name"
+RUN_ID="12345678"
+
+# 2. Get failed job IDs from the run
+curl -s -H "Authorization: token $TOKEN" \
+  "https://api.github.com/repos/$OWNER/$REPO/actions/runs/$RUN_ID/jobs" \
+  | python3 -c "
+import json,sys
+for j in json.load(sys.stdin)['jobs']:
+    if j['conclusion']=='failure':
+        print(f\"Job: {j['name']}, ID: {j['id']}, Conclusion: {j['conclusion']}\")
+"
+
+# 3. Download job logs (use -L to follow redirects — the logs endpoint returns a redirect)
+curl -sL -H "Authorization: token $TOKEN" \
+  "https://api.github.com/repos/$OWNER/$REPO/actions/jobs/$JOB_ID/logs" \
+  > /tmp/job_logs_$JOB_ID.txt
+
+# 4. Extract errors in a single pass — do NOT run multiple grep rounds
+grep -E "FAILED|ERROR|error:|failed|assert|Traceback" /tmp/job_logs_$JOB_ID.txt \
+  | grep -v "Collecting\|Downloading\|Installing\|Requirement already" \
+  | head -100
+```
+
+**Key points for the curl fallback:**
+- Always use `-L` (follow redirects) when downloading logs — the logs endpoint returns a 302 redirect to a signed URL
+- Extract errors in **one** grep pass — do not run multiple rounds of grep/sed to re-parse the same file
+- Save logs to a file first, then analyze — don't pipe through multiple commands in one shot
+- Use `Read` tool on the saved file for detailed analysis (it handles large files with offset/limit)
 
 ## Workflow
 
@@ -248,6 +287,23 @@ Parse logs to identify:
 - **Stack traces**: Full error context
 
 **IMPORTANT: You are analyzing to plan delegation. Do NOT attempt to fix anything yourself.**
+
+**Log Analysis Efficiency:**
+
+When analyzing downloaded logs, do NOT run multiple rounds of grep/sed on the same file. Use a single pass:
+
+```bash
+# Single efficient pass: extract ALL error-related lines at once
+grep -E "FAILED|ERROR|error:|failed|assert|Traceback|ruff|black|mypy|I001|E501|F401" /tmp/job_logs_JOB_ID.txt \
+  | grep -v "Collecting\|Downloading\|Installing\|Requirement already\|Successfully" \
+  > /tmp/errors_summary.txt
+
+# Then read the summary with the Read tool (use offset/limit for large files)
+```
+
+❌ **DO NOT** run 6+ rounds of grep with slightly different patterns
+❌ **DO NOT** strip ANSI codes with sed and re-grep
+✅ **DO** one comprehensive pass, save to file, then read/analyze
 
 **Failure Type Detection:**
 
@@ -763,6 +819,8 @@ All agents have the `git-worktree-workflow` skill and know how to:
 - **Agents commit to your branch** - They work in the same worktree
 - **You create the PR** - After all fixes are done
 - **GitHub MCP only** - Use `mcp__github__*` tools, NOT `gh` CLI
+- **`gh` CLI is never available** - Do not waste turns trying `gh run view`, `gh api`, etc.
+- **Use the curl fallback** - If `mcp__github-actions__*` tools are missing, use `curl` with the token from git remote (see "Fallback" section above)
 - **Delegate with context** - Provide error logs and clear instructions
 - **Trust the agents** - They have the `git-worktree-workflow` skill
 
