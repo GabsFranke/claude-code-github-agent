@@ -202,7 +202,9 @@ class TestProcessJob:
 
         async def capture_workspace(prompt, options_builder):
             nonlocal created_workspace
-            created_workspace = options_builder.cwd
+            # Build the options to get the cwd
+            options = options_builder.build()
+            created_workspace = options.cwd
             return {
                 "response": "Response",
                 "num_turns": 1,
@@ -244,6 +246,7 @@ class TestProcessJob:
             patch(
                 "services.sandbox_executor.sandbox_worker.RepoSetupEngine"
             ) as mock_engine_class,
+            patch("builtins.open", MagicMock()),
         ):
             # Mock workspace path
             test_workspace = "/tmp/test_workspace"
