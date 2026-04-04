@@ -72,6 +72,17 @@ Use the file operation tools as described in your `git-worktree-workflow` skill:
 
 **Use the python-code-quality skill for the exact commands.**
 
+**BEFORE auto-fixing, check for tool conflicts:**
+
+If the lint errors include import-sorting rules (I001 from ruff), check whether ruff and isort are configured to agree:
+
+```bash
+# Check ruff's isort configuration
+grep -A5 '\[tool.ruff.isort\]\|\[tool.ruff.lint.isort\]' pyproject.toml
+```
+
+If there is no `known-first-party` setting and you see I001 errors on imports that mix third-party and local packages, the tools will conflict. See the "Troubleshooting Tool Conflicts" section in the python-code-quality skill for the fix.
+
 The project has specific auto-fixing tools that MUST be run in this order:
 
 ```bash

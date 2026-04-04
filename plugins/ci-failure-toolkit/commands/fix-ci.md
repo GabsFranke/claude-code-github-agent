@@ -310,6 +310,16 @@ Scenario 4: Lint errors in shared/config.py, shared/queue.py, shared/models.py
 
 ### Step 4: Delegate to Specialized Agent(s)
 
+> **⚠️ MANDATORY DELEGATION — READ THIS BEFORE PROCEEDING**
+>
+> You MUST use the Task tool to invoke a specialist agent (build-failure-analyzer, test-failure-analyzer, or lint-failure-analyzer).
+>
+> The specialist agent will implement ALL fixes, run quality checks, commit, and push.
+>
+> If you find yourself about to use Read/Write/Edit to fix code, or about to run `ruff`/`isort`/`black` yourself — STOP. You are the coordinator, not the implementer. Delegate to an agent.
+>
+> The ONLY tools you should use are: `mcp__github-actions__*` (for logs), `mcp__github__*` (for PR/comments), `Bash` (for git branch creation), and `Task` (for delegation).
+
 **CRITICAL: You MUST delegate ALL implementation work. DO NOT implement fixes yourself.**
 
 Your job in this step:

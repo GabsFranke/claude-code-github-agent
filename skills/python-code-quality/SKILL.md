@@ -19,13 +19,32 @@ This project follows strict Python code quality standards:
 
 All code must pass these checks before being committed.
 
+## Tool Discovery
+
+Tools like `ruff`, `black`, `isort`, and `flake8` may not be on `$PATH`. Always try `.venv/bin/` first:
+
+```bash
+# Check if tools are in the virtual environment
+ls .venv/bin/ruff .venv/bin/black .venv/bin/isort 2>/dev/null
+
+# Use venv-prefixed commands
+.venv/bin/ruff check --fix services/
+.venv/bin/black services/
+.venv/bin/isort services/
+
+# If check-code.sh is not executable, run it with bash:
+bash check-code.sh
+```
+
+**Tip:** If a bare command like `ruff` returns "command not found", it almost certainly lives in `.venv/bin/`.
+
 ## Quick Fix Command
 
 The project has a bash script for code quality checks:
 
 ```bash
 # Check code quality (read-only)
-./check-code.sh
+bash check-code.sh
 
 # Auto-fix formatting and imports
 ./check-code.sh --fix
@@ -243,6 +262,29 @@ When fixing CI lint failures:
    ```bash
    git push origin HEAD
    ```
+
+## Troubleshooting Tool Conflicts
+
+### ruff I001 vs isort disagreement
+
+If `ruff check` and `isort` keep toggling import order (one "fixes" what the other just did), the root cause is usually a missing `known-first-party` setting in ruff's isort configuration.
+
+**Symptom:** You run `ruff check --fix`, then `isort --check-only` fails. You run `isort`, then `ruff check` fails. They loop forever.
+
+**Diagnosis:**
+```bash
+# Check if ruff has isort configuration with known-first-party
+grep -A5 '\[tool.ruff.isort\]\|\[tool.ruff.lint.isort\]' pyproject.toml
+```
+
+**Fix:** Add `known-first-party` to ruff's isort config so both tools agree on which packages are first-party vs third-party:
+
+```toml
+[tool.ruff.lint.isort]
+known-first-party = ["services", "shared", "subagents", "hooks", "plugins"]
+```
+
+**Key insight:** When ruff and isort disagree, do NOT keep running them back and forth. Check the configuration first.
 
 ## Configuration Files
 
