@@ -40,11 +40,9 @@ async def _enqueue_retrospector_job(
 ) -> None:
     """Enqueue a retrospection job — fires after Stop/SubagentStop hooks.
 
-    Only the Stop event (main agent) is relevant for instruction improvement.
-    SubagentStop events are skipped — the main transcript captures everything.
+    Both Stop (main agent) and SubagentStop events trigger retrospection.
+    Each subagent session gets its own analysis to improve subagent instructions.
     """
-    if hook_event != "Stop":
-        return
 
     try:
         import redis.asyncio as aioredis
