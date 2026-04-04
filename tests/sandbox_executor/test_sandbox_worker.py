@@ -64,9 +64,15 @@ class TestProcessJob:
                 return_value=(0, "", ""),
             ),
             patch(
-                "services.sandbox_executor.sandbox_worker.execute_sandbox_request",
+                "services.sandbox_executor.sandbox_worker.execute_sdk",
                 new_callable=AsyncMock,
-                return_value="Test response",
+                return_value={
+                    "response": "Test response",
+                    "num_turns": 1,
+                    "duration_ms": 1000,
+                    "is_error": False,
+                    "messages": [],
+                },
             ),
             patch(
                 "services.sandbox_executor.sandbox_worker.tempfile.mkdtemp"
@@ -134,7 +140,7 @@ class TestProcessJob:
                 return_value=(0, "", ""),
             ),
             patch(
-                "services.sandbox_executor.sandbox_worker.execute_sandbox_request",
+                "services.sandbox_executor.sandbox_worker.execute_sdk",
                 new_callable=AsyncMock,
                 side_effect=Exception("Execution failed"),
             ),
@@ -194,21 +200,16 @@ class TestProcessJob:
 
         created_workspace = None
 
-        async def capture_workspace(
-            prompt,
-            github_token,
-            repo,
-            issue_number,
-            user,
-            auto_review,
-            auto_triage,
-            workspace,
-            system_context=None,
-            workflow_name=None,
-        ):
+        async def capture_workspace(prompt, options_builder):
             nonlocal created_workspace
-            created_workspace = workspace
-            return "Response"
+            created_workspace = options_builder.cwd
+            return {
+                "response": "Response",
+                "num_turns": 1,
+                "duration_ms": 1000,
+                "is_error": False,
+                "messages": [],
+            }
 
         with (
             patch(
@@ -222,7 +223,7 @@ class TestProcessJob:
                 return_value=(0, "", ""),
             ),
             patch(
-                "services.sandbox_executor.sandbox_worker.execute_sandbox_request",
+                "services.sandbox_executor.sandbox_worker.execute_sdk",
                 new_callable=AsyncMock,
                 side_effect=capture_workspace,
             ),

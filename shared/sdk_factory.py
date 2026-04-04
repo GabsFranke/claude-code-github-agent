@@ -110,18 +110,43 @@ class SDKOptionsBuilder:
         Returns:
             Self for method chaining
         """
+        # Determine plugin path (priority order):
+        # 1. Docker container: /app/plugins/ci-failure-toolkit
+        # 2. Project directory: <project_root>/plugins/ci-failure-toolkit
+        # 3. User home: ~/.claude/plugins/ci-failure-toolkit
+
+        plugin_path = None
+        server_script = None
+
+        # Check Docker container path
+        if os.path.exists("/app/plugins/ci-failure-toolkit"):
+            plugin_path = "/app/plugins/ci-failure-toolkit"
+            server_script = (
+                "/app/plugins/ci-failure-toolkit/servers/github_actions_server.py"
+            )
+        else:
+            # Check project directory (relative to this file)
+            project_plugin_path = os.path.join(
+                Path(__file__).parent.parent, "plugins/ci-failure-toolkit"
+            )
+            if os.path.exists(project_plugin_path):
+                plugin_path = str(project_plugin_path)
+                server_script = os.path.join(
+                    plugin_path, "servers/github_actions_server.py"
+                )
+            else:
+                # Fall back to user home directory
+                plugin_path = os.path.expanduser("~/.claude/plugins/ci-failure-toolkit")
+                server_script = os.path.join(
+                    plugin_path, "servers/github_actions_server.py"
+                )
+
         self._mcp_servers["github-actions"] = {
             "type": "stdio",
             "command": "python",
-            "args": [
-                os.path.expanduser(
-                    "~/.claude/plugins/ci-failure-toolkit/servers/github_actions_server.py"
-                )
-            ],
+            "args": [server_script],
             "env": {
-                "PYTHONPATH": os.path.expanduser(
-                    "~/.claude/plugins/ci-failure-toolkit"
-                ),
+                "PYTHONPATH": plugin_path,
                 "GITHUB_TOKEN": token,
             },
         }

@@ -1,0 +1,230 @@
+"""Unit tests for MCP server configuration.
+
+These tests validate that MCP servers are properly configured without
+requiring actual API keys or network access.
+"""
+
+import os
+import sys
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+
+# Add parent directory to path for shared imports
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+from shared.sdk_factory import SDKOptionsBuilder  # noqa: E402
+
+
+class TestMCPConfiguration:
+    """Test MCP server configuration."""
+
+    def test_github_mcp_configuration(self):
+        """Test that GitHub MCP server is configured correctly."""
+        token = "test_token_123"
+        builder = SDKOptionsBuilder(cwd="/tmp")
+        builder.with_github_mcp(token)
+        options = builder.build()
+
+        assert "github" in options.mcp_servers
+        github_config = options.mcp_servers["github"]
+        assert github_config["type"] == "http"
+        assert github_config["url"] == "https://api.githubcopilot.com/mcp"
+        assert "Authorization" in github_config["headers"]
+        assert github_config["headers"]["Authorization"] == f"Bearer {token}"
+
+    def test_github_actions_mcp_configuration_docker(self):
+        """Test GitHub Actions MCP configuration in Docker environment."""
+        token = "test_token_123"
+
+        # Mock Docker environment
+        with patch("os.path.exists") as mock_exists:
+            # Simulate Docker container path exists
+            mock_exists.side_effect = lambda p: p == "/app/plugins/ci-failure-toolkit"
+
+            builder = SDKOptionsBuilder(cwd="/tmp")
+            builder.with_github_actions_mcp(token)
+            options = builder.build()
+
+            assert "github-actions" in options.mcp_servers
+            ga_config = options.mcp_servers["github-actions"]
+            assert ga_config["type"] == "stdio"
+            assert ga_config["command"] == "python"
+            assert len(ga_config["args"]) == 1
+            assert (
+                ga_config["args"][0]
+                == "/app/plugins/ci-failure-toolkit/servers/github_actions_server.py"
+            )
+            assert ga_config["env"]["PYTHONPATH"] == "/app/plugins/ci-failure-toolkit"
+            assert ga_config["env"]["GITHUB_TOKEN"] == token
+
+    def test_github_actions_mcp_configuration_local(self):
+        """Test GitHub Actions MCP configuration in local development."""
+        token = "test_token_123"
+
+        # Get actual project root
+        project_root = Path(__file__).parent.parent.parent
+        expected_plugin_path = project_root / "plugins/ci-failure-toolkit"
+
+        # Only run if plugin actually exists
+        if not expected_plugin_path.exists():
+            pytest.skip("Plugin directory not found in project")
+
+        builder = SDKOptionsBuilder(cwd="/tmp")
+        builder.with_github_actions_mcp(token)
+        options = builder.build()
+
+        assert "github-actions" in options.mcp_servers
+        ga_config = options.mcp_servers["github-actions"]
+        assert ga_config["type"] == "stdio"
+        assert ga_config["command"] == "python"
+        assert len(ga_config["args"]) == 1
+        # Normalize path separators for cross-platform compatibility
+        assert "ci-failure-toolkit" in ga_config["args"][0]
+        assert "github_actions_server.py" in ga_config["args"][0]
+        assert "ci-failure-toolkit" in ga_config["env"]["PYTHONPATH"]
+        assert ga_config["env"]["GITHUB_TOKEN"] == token
+
+    def test_memory_mcp_configuration(self):
+        """Test memory MCP server configuration."""
+        repo = "owner/repo"
+        builder = SDKOptionsBuilder(cwd="/tmp")
+        builder.with_memory_mcp(repo)
+        options = builder.build()
+
+        assert "memory" in options.mcp_servers
+        memory_config = options.mcp_servers["memory"]
+        assert memory_config["type"] == "stdio"
+        assert memory_config["command"] == "python3"
+        assert memory_config["args"] == ["/app/mcp_servers/memory/server.py"]
+        assert memory_config["env"]["GITHUB_REPOSITORY"] == repo
+        assert memory_config["env"]["PYTHONPATH"] == "/app"
+
+    def test_full_toolset_includes_mcp_tools(self):
+        """Test that full toolset includes MCP tool patterns."""
+        builder = SDKOptionsBuilder(cwd="/tmp")
+        builder.with_full_toolset()
+        options = builder.build()
+
+        assert "mcp__github__*" in options.allowed_tools
+        assert "mcp__github-actions__*" in options.allowed_tools
+        assert "mcp__memory__memory_read" in options.allowed_tools
+
+    def test_retrospector_toolset_includes_github_mcp(self):
+        """Test that retrospector toolset includes GitHub MCP tools."""
+        builder = SDKOptionsBuilder(cwd="/tmp")
+        builder.with_retrospector_toolset()
+        options = builder.build()
+
+        assert "mcp__github__*" in options.allowed_tools
+        # Should not include github-actions or memory
+        assert "mcp__github-actions__*" not in options.allowed_tools
+        assert "mcp__memory__memory_read" not in options.allowed_tools
+
+    def test_memory_toolset_includes_memory_mcp(self):
+        """Test that memory toolset includes memory MCP tools."""
+        builder = SDKOptionsBuilder(cwd="/tmp")
+        builder.with_memory_toolset()
+        options = builder.build()
+
+        assert "mcp__memory__*" in options.allowed_tools
+        # Should not include github or github-actions
+        assert "mcp__github__*" not in options.allowed_tools
+        assert "mcp__github-actions__*" not in options.allowed_tools
+
+    def test_builder_chaining(self):
+        """Test that builder methods can be chained."""
+        token = "test_token_123"
+        repo = "owner/repo"
+
+        builder = (
+            SDKOptionsBuilder(cwd="/tmp")
+            .with_sonnet()
+            .with_github_mcp(token)
+            .with_github_actions_mcp(token)
+            .with_memory_mcp(repo)
+            .with_full_toolset()
+        )
+
+        options = builder.build()
+
+        # Verify all MCP servers are configured
+        assert "github" in options.mcp_servers
+        assert "github-actions" in options.mcp_servers
+        assert "memory" in options.mcp_servers
+
+        # Verify model is set
+        assert options.model is not None
+
+        # Verify tools are configured
+        assert len(options.allowed_tools) > 0
+
+    def test_model_selection(self):
+        """Test model selection methods."""
+        # Test with_sonnet
+        builder = SDKOptionsBuilder(cwd="/tmp").with_sonnet()
+        options = builder.build()
+        assert "sonnet" in options.model.lower() or options.model == os.getenv(
+            "ANTHROPIC_DEFAULT_SONNET_MODEL", "claude-sonnet-4-20250514"
+        )
+
+        # Test with_haiku
+        builder = SDKOptionsBuilder(cwd="/tmp").with_haiku()
+        options = builder.build()
+        assert "haiku" in options.model.lower() or options.model == os.getenv(
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL", "claude-haiku-4-5-20251001"
+        )
+
+        # Test with_model
+        builder = SDKOptionsBuilder(cwd="/tmp").with_model("custom-model")
+        options = builder.build()
+        assert options.model == "custom-model"
+
+    def test_github_actions_server_file_exists(self):
+        """Test that GitHub Actions MCP server file exists in project."""
+        project_root = Path(__file__).parent.parent.parent
+        server_file = (
+            project_root / "plugins/ci-failure-toolkit/servers/github_actions_server.py"
+        )
+
+        assert (
+            server_file.exists()
+        ), f"GitHub Actions MCP server file not found: {server_file}"
+        assert server_file.is_file()
+
+    def test_github_actions_server_is_executable_python(self):
+        """Test that GitHub Actions MCP server is valid Python."""
+        project_root = Path(__file__).parent.parent.parent
+        server_file = (
+            project_root / "plugins/ci-failure-toolkit/servers/github_actions_server.py"
+        )
+
+        if not server_file.exists():
+            pytest.skip("Server file not found")
+
+        # Check it has a shebang or is valid Python
+        with open(server_file, encoding="utf-8") as f:
+            first_line = f.readline()
+            assert (
+                first_line.startswith("#!/usr/bin/env python")
+                or first_line.startswith("#!")
+                or first_line.startswith('"""')
+                or first_line.startswith("import")
+            )
+
+    def test_plugin_structure(self):
+        """Test that plugin directory structure is correct."""
+        project_root = Path(__file__).parent.parent.parent
+        plugin_dir = project_root / "plugins/ci-failure-toolkit"
+
+        if not plugin_dir.exists():
+            pytest.skip("Plugin directory not found")
+
+        # Check required directories
+        assert (plugin_dir / "servers").exists()
+        assert (plugin_dir / "tools").exists()
+
+        # Check required files
+        assert (plugin_dir / ".mcp.json").exists()
+        assert (plugin_dir / "servers/github_actions_server.py").exists()
