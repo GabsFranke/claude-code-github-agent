@@ -77,10 +77,40 @@ You are the main coordinator with these responsibilities:
 
 **CRITICAL - Log Access:**
 
-- ❌ **NEVER use Read or Bash to access workflow logs** - They are too large (often 50KB+) and will be truncated
 - ✅ **ALWAYS use GitHub Actions MCP tools** - They handle large logs efficiently and provide structured output
-- ✅ **Use `get_failed_steps` with `log_lines_per_step: 200`** - This gives you ALL errors in one call
+- ✅ **Use `get_workflow_run_summary` first** - Identify failed jobs before fetching logs
+- ✅ **Use `get_job_logs_raw` with pagination** - Read logs in 500-line chunks
+- ✅ **Use `search_job_logs` for specific patterns** - Find errors without reading entire logs
 - ✅ **Pass the COMPLETE failed steps output to subagents** - Don't just pass a snippet or the first error
+
+**Fallback when Actions MCP tools are unavailable:**
+
+If `mcp__github-actions__*` tools are NOT available (e.g., tool calls return errors or are not listed), use this fallback sequence:
+
+1. **Do NOT try `gh` CLI** — it is typically not available in worktrees. Skip it entirely.
+2. **Use `curl` with the token from git remote** — extract it and query the GitHub Actions API directly:
+
+```bash
+# Extract token from git remote URL
+TOKEN=$(git remote get-url origin | sed 's|.*://||;s|@.*||')
+
+# Get workflow run details (list jobs)
+curl -s -H "Authorization: token $TOKEN" \
+  "https://api.github.com/repos/{owner}/{repo}/actions/runs/{run_id}/jobs" \
+  | python3 -c "import sys,json; [print(f'Job: {j[\"name\"]}, ID: {j[\"id\"]}, Conclusion: {j[\"conclusion\"]}') for j in json.load(sys.stdin)['jobs']]"
+
+# Download logs for a failed job (follow redirects with -L)
+curl -sL -H "Authorization: token $TOKEN" \
+  "https://api.github.com/repos/{owner}/{repo}/actions/jobs/{job_id}/logs" \
+  > /tmp/job_{job_id}_logs.txt
+```
+
+3. **Read downloaded logs with the Read tool** — once logs are saved to disk, use `Read` to examine them. Use `Grep` to search for error patterns. Do NOT chain multiple `grep` commands through Bash (wastes turns).
+
+**When logs are saved to disk (from any source):**
+- ✅ Use `Read` tool to read the file (supports offset/limit for large files)
+- ✅ Use `Grep` tool to search for error patterns (`FAILED|ERROR|AssertionError`)
+- ❌ Do NOT run multiple `grep` commands through Bash to parse the same file
 
 ## Workflow
 
@@ -132,9 +162,9 @@ Extract from $ARGUMENTS:
 
 **Your goal in this step: Gather complete log information to pass to specialist agents.**
 
-**CRITICAL: DO NOT use Read or Bash to access logs! They will fail with "Output too large".**
+**IMPORTANT: Do NOT try `gh` CLI first.** It is usually not available in worktrees. Start directly with the tools below.
 
-**Use the GitHub Actions MCP tools - they fetch logs via API and handle size limits:**
+**Preferred: Use the GitHub Actions MCP tools** (when available):
 
 All tools use the `mcp__github-actions__` prefix. Call them directly as MCP tools.
 
@@ -762,7 +792,8 @@ All agents have the `git-worktree-workflow` skill and know how to:
 - **You create the branch first** - Before delegating to agents
 - **Agents commit to your branch** - They work in the same worktree
 - **You create the PR** - After all fixes are done
-- **GitHub MCP only** - Use `mcp__github__*` tools, NOT `gh` CLI
+- **Never try `gh` CLI** - It is usually not available in worktrees; use MCP tools or curl fallback
+- **Log access priority**: GitHub Actions MCP → curl with git token → Read tool on saved files
 - **Delegate with context** - Provide error logs and clear instructions
 - **Trust the agents** - They have the `git-worktree-workflow` skill
 
