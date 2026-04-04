@@ -21,30 +21,18 @@ import tempfile
 from collections import defaultdict
 from pathlib import Path
 
-from claude_agent_sdk import (
-    AssistantMessage,
-    ClaudeAgentOptions,
-    ClaudeSDKClient,
-    ResultMessage,
-    SystemMessage,
-    TextBlock,
-    ToolUseBlock,
-    UserMessage,
-)
-
 from shared import close_github_auth_service
 from shared.git_utils import execute_git_command
 from shared.github_auth import get_github_auth_service
 from shared.logging_utils import setup_logging
 from shared.queue import RedisQueue
+from shared.sdk_executor import execute_sdk
+from shared.sdk_factory import SDKOptionsBuilder
 from shared.signals import setup_graceful_shutdown
 from shared.transcript_parser import extract_retrospector_summary
 
 setup_logging(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
-
-
-from shared.langfuse_hooks import setup_langfuse_hooks  # noqa: E402
 
 shutdown_event = asyncio.Event()
 
@@ -195,59 +183,19 @@ async def process_retrospector_job(message: dict, redis_client) -> None:
                 f"{'error' if is_error else ''}"
             ).strip()
 
-            model = os.getenv(
-                "ANTHROPIC_DEFAULT_SONNET_MODEL", "claude-sonnet-4-20250514"
-            )
+            # Build SDK options using the factory builder
+            builder = SDKOptionsBuilder(cwd=workspace).with_sonnet()
 
-            # Load the retrospector plugin from the pre-installed container path.
-            # The worktree is checked out from origin/main which may not yet have the
-            # plugin (e.g. when running from a feature branch). The Dockerfile always
-            # copies plugins/retrospector/ to /app/plugins/retrospector/.
-            plugins = [
-                {
-                    "type": "local",
-                    "path": "/app/plugins/retrospector",
-                }
-            ]
-
-            # GitHub MCP for PR creation
-            mcp_servers: dict = {}
+            # Add GitHub MCP conditionally
             if github_token:
-                mcp_servers["github"] = {
-                    "type": "http",
-                    "url": "https://api.githubcopilot.com/mcp",
-                    "headers": {"Authorization": f"Bearer {github_token}"},
-                }
+                builder.with_github_mcp(github_token)
 
-            hooks = setup_langfuse_hooks()
-
-            def _stderr_callback(message: str) -> None:
-                logger.warning(f"Retrospector SDK stderr: {message}")
-
-            options = ClaudeAgentOptions(
-                model=model,
-                allowed_tools=[
-                    "Skill",
-                    "Bash",
-                    "Glob",
-                    "Grep",
-                    "Read",
-                    "Write",
-                    "Edit",
-                    "mcp__github__*",
-                ],
-                setting_sources=[
-                    "user",
-                    "project",
-                    "local",
-                ],
-                permission_mode="acceptEdits",
-                mcp_servers=mcp_servers,  # type: ignore[arg-type]
-                plugins=plugins,  # type: ignore[arg-type]
-                hooks=hooks,
-                cwd=workspace,
-                add_dirs=[workspace],
-                stderr=_stderr_callback,
+            # Build final options with retrospector-specific features
+            builder = (
+                builder.with_plugin("/app/plugins/retrospector")
+                .with_retrospector_toolset()
+                .with_langfuse_hooks()
+                .with_writable_dir(workspace)
             )
 
             logger.info(
@@ -257,36 +205,19 @@ async def process_retrospector_job(message: dict, redis_client) -> None:
             )
 
             try:
-                async with ClaudeSDKClient(options=options) as client:
-                    await client.query(prompt)
-                    async for msg in client.receive_messages():
-                        if isinstance(msg, SystemMessage):
-                            logger.debug(f"Retrospector system init: {str(msg)[:300]}")
-                        elif isinstance(msg, AssistantMessage):
-                            for block in msg.content:
-                                if isinstance(block, TextBlock):
-                                    logger.info(
-                                        f"Retrospector [{workflow_name}] text: "
-                                        f"{repr(block.text[:500])}"
-                                    )
-                                elif isinstance(block, ToolUseBlock):
-                                    logger.info(
-                                        f"Retrospector [{workflow_name}] tool: "
-                                        f"{block.name}({str(block.input)[:200]})"
-                                    )
-                        elif isinstance(msg, UserMessage):
-                            logger.debug(
-                                f"Retrospector [{workflow_name}] user msg: "
-                                f"{str(msg)[:200]}"
-                            )
-                        elif isinstance(msg, ResultMessage):
-                            level = logger.warning if msg.is_error else logger.info
-                            level(
-                                f"Retrospection done [{workflow_name}] — "
-                                f"{msg.num_turns} turns, {msg.duration_ms}ms, "
-                                f"is_error={msg.is_error}, subtype={msg.subtype}"
-                            )
-                            break
+                # Execute via centralized executor
+                result = await execute_sdk(
+                    prompt=prompt,
+                    options_builder=builder,
+                    collect_text=False,  # We don't need text response
+                )
+
+                logger.info(
+                    f"Retrospection done [{workflow_name}] — "
+                    f"{result['num_turns']} turns, {result['duration_ms']}ms, "
+                    f"is_error={result['is_error']}"
+                )
+
             except Exception as e:
                 logger.warning(
                     f"Retrospection failed [{workflow_name}]: {e}",

@@ -14,11 +14,10 @@ import os
 import sys
 from collections import defaultdict
 
-from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, ResultMessage
-
-from shared.langfuse_hooks import setup_langfuse_hooks  # noqa: E402
 from shared.logging_utils import setup_logging
 from shared.queue import RedisQueue
+from shared.sdk_executor import execute_sdk
+from shared.sdk_factory import SDKOptionsBuilder
 from shared.signals import setup_graceful_shutdown
 from shared.transcript_parser import extract_conversation
 
@@ -77,51 +76,29 @@ async def process_memory_job(message: dict, redis_client) -> None:
 
 Extract memorable facts from the session transcript and update the memory files accordingly."""
 
-        memory_model = os.getenv(
-            "ANTHROPIC_DEFAULT_HAIKU_MODEL", "claude-haiku-4-5-20251001"
-        )
-
-        hooks = setup_langfuse_hooks()
-
-        mcp_servers = {
-            "memory": {
-                "type": "stdio",
-                "command": "python3",
-                "args": ["/app/mcp_servers/memory/server.py"],
-                "env": {
-                    "GITHUB_REPOSITORY": repo,
-                    "PYTHONPATH": "/app",
-                },
-            }
-        }
-
-        options = ClaudeAgentOptions(
-            model=memory_model,
-            allowed_tools=["Read", "Write", "Edit", "List", "mcp__memory__*"],
-            permission_mode="acceptEdits",
-            mcp_servers=mcp_servers,  # type: ignore[arg-type]
-            setting_sources=[
-                "user",
-                "project",
-                "local",
-            ],
-            agents=AGENTS,
-            hooks=hooks,
-            cwd=memory_dir,  # Working directory is the persistent memory dir
-            add_dirs=[memory_dir],  # Allow writes to memory directory
+        # Build SDK options using the factory builder
+        builder = (
+            SDKOptionsBuilder(cwd=memory_dir)
+            .with_haiku()
+            .with_memory_mcp(repo)
+            .with_memory_toolset()
+            .with_agents(AGENTS)
+            .with_langfuse_hooks()
+            .with_writable_dir(memory_dir)
         )
 
         try:
-            async with ClaudeSDKClient(options=options) as client:
-                await client.query(f"@memory-extractor {prompt}")
+            # Execute via centralized executor
+            result = await execute_sdk(
+                prompt=f"@memory-extractor {prompt}",
+                options_builder=builder,
+                collect_text=False,  # We don't need text response
+            )
 
-                async for msg in client.receive_messages():
-                    if isinstance(msg, ResultMessage):
-                        logger.info(
-                            f"Memory extraction done for {repo} — "
-                            f"{msg.num_turns} turns, {msg.duration_ms}ms"
-                        )
-                        break
+            logger.info(
+                f"Memory extraction done for {repo} — "
+                f"{result['num_turns']} turns, {result['duration_ms']}ms"
+            )
 
         except Exception as e:
             logger.warning(

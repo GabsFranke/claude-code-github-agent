@@ -20,8 +20,9 @@ from shared import (  # noqa: E402
     setup_graceful_shutdown,
 )
 from shared.logging_utils import setup_logging  # noqa: E402
-
-from .sdk_executor import execute_sandbox_request  # noqa: E402
+from shared.sdk_executor import execute_sdk  # noqa: E402
+from shared.sdk_factory import SDKOptionsBuilder  # noqa: E402
+from subagents import AGENTS  # noqa: E402
 
 # Configure logging
 setup_logging(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -271,27 +272,53 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
             )
             # Don't fail the job if setup fails - agent can still work with source code
 
-        # Change to workspace directory before executing
-        original_cwd = os.getcwd()
-        os.chdir(workspace)
+        # Build SDK options using the factory builder
+        model = os.getenv("ANTHROPIC_DEFAULT_SONNET_MODEL", "claude-sonnet-4-20250514")
+        github_token = job_data["github_token"]
+        workflow_name = job_data.get("workflow_name")
+        system_context = job_data.get("system_context")
 
-        try:
-            # Execute using shared executor function
-            response = await execute_sandbox_request(
-                prompt=job_data["prompt"],
-                github_token=job_data["github_token"],
-                repo=job_data["repo"],
-                issue_number=job_data["issue_number"],
-                user=job_data["user"],
-                auto_review=job_data.get("auto_review", False),
-                auto_triage=job_data.get("auto_triage", False),
-                workspace=workspace,
-                system_context=job_data.get("system_context"),
-                workflow_name=job_data.get("workflow_name"),
+        # Inject GitHub token for tools/plugins to use
+        os.environ["GITHUB_TOKEN"] = github_token
+
+        # Log token availability for debugging (first/last chars only)
+        if github_token:
+            logger.info(
+                f"GitHub token available: {github_token[:10]}...{github_token[-10:]}"
             )
-        finally:
-            # Restore original directory
-            os.chdir(original_cwd)
+        else:
+            logger.warning("No GitHub token provided to sandbox executor")
+
+        # Start with base configuration
+        builder = SDKOptionsBuilder(cwd=workspace).with_model(model)
+
+        # Add MCP servers conditionally
+        if github_token:
+            builder.with_github_mcp(github_token).with_github_actions_mcp(github_token)
+
+        builder.with_memory_mcp(repo)
+
+        # Get parent span ID for trace linking (if enabled)
+        parent_span_id = job_data.get("parent_span_id")
+
+        # Build final options with all sandbox-specific features
+        builder = (
+            builder.with_auto_discovered_plugins()
+            .with_full_toolset()
+            .with_agents(AGENTS)
+            .with_langfuse_hooks(parent_span_id=parent_span_id)
+            .with_transcript_staging(repo, workflow_name)
+            .with_writable_dir(f"/home/bot/agent-memory/{repo}/memory")
+            .with_system_prompt(system_context)
+        )
+
+        # Execute via centralized executor
+        result = await execute_sdk(
+            prompt=job_data["prompt"],
+            options_builder=builder,
+        )
+
+        response = result["response"]
 
         # Mark job as complete (agent already posted to GitHub via MCP)
         await job_queue.complete_job(

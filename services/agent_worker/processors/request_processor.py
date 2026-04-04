@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 from typing import TYPE_CHECKING, Literal, Optional
 
 import httpx
@@ -241,6 +242,16 @@ class RequestProcessor:
         # Get GitHub token
         github_token = await self.token_manager.get_token()
 
+        # Generate parent span ID for trace linking (if enabled)
+        parent_span_id = None
+        if os.getenv("LANGFUSE_TRACE_LINKING", "true").lower() == "true":
+            import uuid
+
+            parent_span_id = str(uuid.uuid4())
+            logger.debug(
+                f"Generated parent span ID for trace linking: {parent_span_id}"
+            )
+
         # Create job in queue
         logger.info(f"Creating job with ref: {final_ref}")
         job_id = await self.job_queue.create_job(
@@ -255,6 +266,7 @@ class RequestProcessor:
                 "workflow_name": workflow_name,
                 "user_query": user_query,
                 "event_data": event_data,
+                "parent_span_id": parent_span_id,  # For Langfuse trace linking
             }
         )
 
