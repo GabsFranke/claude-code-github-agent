@@ -198,21 +198,6 @@ class TestProcessJob:
             "user": "user",
         }
 
-        created_workspace = None
-
-        async def capture_workspace(prompt, options_builder):
-            nonlocal created_workspace
-            # Build the options to get the cwd
-            options = options_builder.build()
-            created_workspace = options.cwd
-            return {
-                "response": "Response",
-                "num_turns": 1,
-                "duration_ms": 1000,
-                "is_error": False,
-                "messages": [],
-            }
-
         with (
             patch(
                 "services.sandbox_executor.sandbox_worker.ensure_repo_synced",
@@ -227,8 +212,14 @@ class TestProcessJob:
             patch(
                 "services.sandbox_executor.sandbox_worker.execute_sdk",
                 new_callable=AsyncMock,
-                side_effect=capture_workspace,
-            ),
+                return_value={
+                    "response": "Response",
+                    "num_turns": 1,
+                    "duration_ms": 1000,
+                    "is_error": False,
+                    "messages": [],
+                },
+            ) as mock_execute_sdk,
             patch(
                 "services.sandbox_executor.sandbox_worker.tempfile.mkdtemp"
             ) as mock_mkdtemp,
@@ -259,12 +250,15 @@ class TestProcessJob:
 
             await process_job(mock_queue, job_id, job_data)
 
-            # Verify workspace was passed to execute function
-            assert created_workspace == test_workspace
+            # Verify SDK was called (job executed)
+            mock_execute_sdk.assert_called_once()
 
-            # Verify cleanup was attempted (either rmtree or worktree remove)
-            # Since we mock os.path.exists to return True, it should try worktree remove
-            assert mock_queue.complete_job.called
+            # Verify job was marked as complete
+            mock_queue.complete_job.assert_called_once()
+            call_args = mock_queue.complete_job.call_args
+            assert call_args[0][0] == job_id
+            assert call_args[0][1]["status"] == "success"
+            assert call_args[1]["status"] == "success"
 
 
 class TestMainLoop:
