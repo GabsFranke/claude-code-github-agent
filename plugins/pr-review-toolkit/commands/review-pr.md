@@ -104,7 +104,7 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
 
    **Option B: Full Review with Inline Comments**
    - Create pending review: `pull_request_review_write(method="create")`
-   - Add comments SEQUENTIALLY: `add_comment_to_pending_review()` for top 15-20 issues
+   - Add comments in a single parallel batch: include all `add_comment_to_pending_review()` calls (top 15-20 issues) in one message for efficiency
    - Submit review: `pull_request_review_write(method="submit_pending", event="COMMENT"/"REQUEST_CHANGES"/"APPROVE")`
 
    **If MCP not available:** Display results in console for manual review
