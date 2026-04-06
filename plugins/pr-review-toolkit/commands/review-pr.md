@@ -22,6 +22,7 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
    - Parse optional review aspects (comments, tests, errors, types, code, simplify, all)
    - Check git status to identify changed files: `git diff main --name-only`
    - Default: Run all applicable reviews
+   - **Important:** When the user requests a specific aspect (e.g., "test coverage", "error handling"), focus ONLY on that aspect. Do not perform a broad exploration of unrelated files. Skip review steps that don't apply to the requested aspect.
 
 2. **Available Review Aspects:**
    - **comments** - Analyze code comment accuracy and maintainability
@@ -36,6 +37,7 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
    - Run `git diff main --name-only` to see modified files in worktree
    - Agents can read files directly from the working directory
    - Identify file types and what reviews apply
+   - **Large PRs:** If the diff output is too large to process in one call, use `git diff --stat` first to get an overview, then read only the files relevant to the requested review aspect. Avoid re-reading files you already have from the diff preview. Batch independent file reads in a single tool call.
 
 4. **Determine Applicable Reviews**
 
@@ -48,6 +50,8 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
    - **After passing review**: code-simplifier (polish and refine)
 
 5. **Launch Review Agents: tool_name: Agent**
+
+   **CRITICAL: You MUST delegate to specialized agents rather than performing their work manually.** The agents listed below are experts in their domain — reading files and analyzing them yourself duplicates their work and wastes turns. When a specific review aspect is requested, launch the corresponding agent immediately with the relevant file list and context.
 
    **Parallel approach** (default):
    - Launch all agents simultaneously
@@ -69,7 +73,9 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
    - **Suggestions** (nice to have)
    - **Positive Observations** (what's good)
 
-7. **Post Review to GitHub (Optional)**
+7. **Post Review to GitHub (Mandatory Output)**
+
+   **You MUST produce a structured review summary even if you cannot post to GitHub.** Do not end the session without delivering results. The review is incomplete until a structured analysis has been written or posted.
 
    If GitHub MCP is available, post results:
 
@@ -108,6 +114,8 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
    - Submit review: `pull_request_review_write(method="submit_pending", event="COMMENT"/"REQUEST_CHANGES"/"APPROVE")`
 
    **If MCP not available:** Display results in console for manual review
+
+   **Anti-pattern — Never do this:** Spending many turns reading files manually, exploring the codebase broadly, and ending the session without producing any structured output. If you find yourself reading more than 5-6 files without delegating to an agent or producing findings, you are off track.
 
 ## Usage Examples:
 
