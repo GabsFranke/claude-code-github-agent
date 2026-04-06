@@ -20,10 +20,16 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
    - Extract repository from $ARGUMENTS (e.g., "owner/repo")
    - Extract PR number from $ARGUMENTS
    - Parse optional review aspects (comments, tests, errors, types, code, simplify, all)
-   - Check git status to identify changed files: `git diff main --name-only`
+   - Determine the PR's base branch from PR metadata (do not assume `main`)
+   - Check git status to identify changed files: `git diff <base-branch> --name-only`
    - Default: Run all applicable reviews
 
-2. **Available Review Aspects:**
+2. **Check Existing Reviews**
+   - Use `pull_request_read(method="get_review_comments")` to check for existing review feedback
+   - Note any issues already flagged to avoid duplicating feedback
+   - If a prior review exists, focus agents on new or unresolved findings
+
+3. **Available Review Aspects:**
    - **comments** - Analyze code comment accuracy and maintainability
    - **tests** - Review test coverage quality and completeness
    - **errors** - Check error handling for silent failures
@@ -32,12 +38,13 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
    - **simplify** - Simplify code for clarity and maintainability
    - **all** - Run all applicable reviews (default)
 
-3. **Identify Changed Files**
-   - Run `git diff main --name-only` to see modified files in worktree
+4. **Identify Changed Files**
+   - Run `git diff <base-branch> --name-only` to see modified files in worktree (use the PR's base branch, not hardcoded `main`)
+   - Use the diff output as the authoritative list of changed files — do not guess file paths
    - Agents can read files directly from the working directory
    - Identify file types and what reviews apply
 
-4. **Determine Applicable Reviews**
+5. **Determine Applicable Reviews**
 
    Based on changes:
    - **Always applicable**: code-reviewer (general quality)
@@ -47,7 +54,7 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
    - **If types added/modified**: type-design-analyzer
    - **After passing review**: code-simplifier (polish and refine)
 
-5. **Launch Review Agents: tool_name: Agent**
+6. **Launch Review Agents: tool_name: Agent**
 
    **Parallel approach** (default):
    - Launch all agents simultaneously
@@ -61,7 +68,7 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
    - Agents read files directly from worktree
 
 
-6. **Aggregate Results**
+7. **Aggregate Results**
 
    After agents complete, organize findings:
    - **Critical Issues** (must fix before merge)
@@ -69,7 +76,7 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
    - **Suggestions** (nice to have)
    - **Positive Observations** (what's good)
 
-7. **Post Review to GitHub (Optional)**
+8. **Post Review to GitHub (Optional)**
 
    If GitHub MCP is available, post results:
 
@@ -103,6 +110,7 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
    ```
 
    **Option B: Full Review with Inline Comments**
+   - Delete any existing pending review first: `pull_request_review_write(method="delete_pending")` (prevents "User can only have one pending review" error)
    - Create pending review: `pull_request_review_write(method="create")`
    - Add comments SEQUENTIALLY: `add_comment_to_pending_review()` for top 15-20 issues
    - Submit review: `pull_request_review_write(method="submit_pending", event="COMMENT"/"REQUEST_CHANGES"/"APPROVE")`
