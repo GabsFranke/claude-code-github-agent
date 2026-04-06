@@ -20,10 +20,15 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
    - Extract repository from $ARGUMENTS (e.g., "owner/repo")
    - Extract PR number from $ARGUMENTS
    - Parse optional review aspects (comments, tests, errors, types, code, simplify, all)
-   - Check git status to identify changed files: `git diff main --name-only`
    - Default: Run all applicable reviews
 
-2. **Available Review Aspects:**
+2. **Fetch the PR Diff (mandatory first step)**
+   - Use `pull_request_read(method="get_diff")` to get the full diff
+   - Use `pull_request_read(method="get_files")` to list changed files
+   - **You MUST review the diff before doing anything else.** Reading entire files without understanding what changed leads to unfocused reviews and wasted turns.
+   - Do NOT read entire files that are only tangentially related. Focus on changed lines and their immediate context.
+
+3. **Available Review Aspects:**
    - **comments** - Analyze code comment accuracy and maintainability
    - **tests** - Review test coverage quality and completeness
    - **errors** - Check error handling for silent failures
@@ -32,12 +37,12 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
    - **simplify** - Simplify code for clarity and maintainability
    - **all** - Run all applicable reviews (default)
 
-3. **Identify Changed Files**
-   - Run `git diff main --name-only` to see modified files in worktree
-   - Agents can read files directly from the working directory
+4. **Identify Changed Files**
+   - Use the diff from step 2 to see modified files
+   - Also run `git diff main --name-only` in the worktree as a cross-check
    - Identify file types and what reviews apply
 
-4. **Determine Applicable Reviews**
+5. **Determine Applicable Reviews**
 
    Based on changes:
    - **Always applicable**: code-reviewer (general quality)
@@ -47,10 +52,12 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
    - **If types added/modified**: type-design-analyzer
    - **After passing review**: code-simplifier (polish and refine)
 
-5. **Launch Review Agents: tool_name: Agent**
+6. **Launch Review Agents (mandatory — do NOT perform analysis yourself)**
+
+   **You MUST delegate to the specialized agents.** Your role is orchestration and aggregation, not manual analysis. The agents are experts — use them.
 
    **Parallel approach** (default):
-   - Launch all agents simultaneously
+   - Launch all applicable agents simultaneously using the Agent tool
    - Faster for comprehensive review
    - Results come back together
 
@@ -60,18 +67,19 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
    - Good for interactive review
    - Agents read files directly from worktree
 
+   **Reading context for agents:** When reading files to provide context to agents, read the entire relevant file at once rather than in small chunks at different offsets. Agents need complete context.
 
-6. **Aggregate Results**
+7. **Aggregate Results**
 
-   After agents complete, organize findings:
+   After agents complete, organize their findings:
    - **Critical Issues** (must fix before merge)
    - **Important Issues** (should fix)
    - **Suggestions** (nice to have)
    - **Positive Observations** (what's good)
 
-7. **Post Review to GitHub (Optional)**
+8. **Post Review to GitHub (required when repository and PR number are provided)**
 
-   If GitHub MCP is available, post results:
+   When repository and PR number were given in arguments, you MUST post results to GitHub using MCP tools. Only skip this if no MCP tools are available.
 
    **Option A: Summary Comment Only**
    - Use `add_issue_comment` to post comprehensive summary
@@ -107,7 +115,7 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
    - Add comments SEQUENTIALLY: `add_comment_to_pending_review()` for top 15-20 issues
    - Submit review: `pull_request_review_write(method="submit_pending", event="COMMENT"/"REQUEST_CHANGES"/"APPROVE")`
 
-   **If MCP not available:** Display results in console for manual review
+   **Only display results in console if MCP tools are genuinely unavailable.**
 
 ## Usage Examples:
 
