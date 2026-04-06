@@ -22,6 +22,7 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
    - Parse optional review aspects (comments, tests, errors, types, code, simplify, all)
    - Check git status to identify changed files: `git diff main --name-only`
    - Default: Run all applicable reviews
+   - **After parsing, immediately proceed to Step 5 to launch the matching agents. Do not start reading files yourself.**
 
 2. **Available Review Aspects:**
    - **comments** - Analyze code comment accuracy and maintainability
@@ -47,10 +48,29 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
    - **If types added/modified**: type-design-analyzer
    - **After passing review**: code-simplifier (polish and refine)
 
-5. **Launch Review Agents: tool_name: Agent**
+5. **Launch Review Agents using the Agent tool**
 
-   **Parallel approach** (default):
-   - Launch all agents simultaneously
+   **IMPORTANT: You MUST delegate analysis to the specialized agents listed below. Do NOT manually read files and grep patterns yourself — that is the agents' job. Your role is to launch the right agents, aggregate their findings, and post results.**
+
+   Each review aspect maps to a specific agent file in `plugins/pr-review-toolkit/agents/`:
+
+   | Review Aspect  | Agent File                | Agent name             |
+   |----------------|---------------------------|------------------------|
+   | comments       | comment-analyzer.md       | comment-analyzer       |
+   | tests          | pr-test-analyzer.md       | pr-test-analyzer       |
+   | errors         | silent-failure-hunter.md  | silent-failure-hunter  |
+   | types          | type-design-analyzer.md   | type-design-analyzer   |
+   | code           | code-reviewer.md          | code-reviewer          |
+   | simplify       | code-simplifier.md        | code-simplifier        |
+
+   **How to launch an agent (use the Agent tool):**
+   - Pass the agent's prompt as a focused review task
+   - Include the list of changed files and the PR description
+   - Tell the agent to read files directly from the worktree
+   - Request structured output (Critical Issues, Important Issues, Suggestions)
+
+   **Parallel approach** (default, recommended):
+   - Launch all applicable agents simultaneously in a single message with multiple Agent tool calls
    - Faster for comprehensive review
    - Results come back together
 
@@ -58,7 +78,6 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
    - Easier to understand and act on
    - Each report is complete before next
    - Good for interactive review
-   - Agents read files directly from worktree
 
 
 6. **Aggregate Results**
@@ -69,7 +88,9 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
    - **Suggestions** (nice to have)
    - **Positive Observations** (what's good)
 
-7. **Post Review to GitHub (Optional)**
+7. **Post Review to GitHub (Required)**
+
+   **Always post results to GitHub when reviewing a PR.** Post findings even if analysis is partial or only some agents completed. Do not skip this step.
 
    If GitHub MCP is available, post results:
 
