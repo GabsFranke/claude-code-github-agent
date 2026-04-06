@@ -14,16 +14,25 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
 - Second argument: PR number (required for posting review)
 - Additional arguments: Specific review aspects (optional)
 
+## Critical Principle: Deliver First, Refine Second
+
+**The most important step is posting the review to GitHub.** A brief review that reaches the PR is infinitely more valuable than an exhaustive analysis that never gets posted. If you are running low on turns, post what you have immediately — you can always follow up with additional comments.
+
 ## Review Workflow:
 
 1. **Parse Arguments & Determine Review Scope**
    - Extract repository from $ARGUMENTS (e.g., "owner/repo")
    - Extract PR number from $ARGUMENTS
    - Parse optional review aspects (comments, tests, errors, types, code, simplify, all)
-   - Check git status to identify changed files: `git diff main --name-only`
    - Default: Run all applicable reviews
 
-2. **Available Review Aspects:**
+2. **Identify Changed Files**
+   - Run `git diff develop --stat` (or `git diff main --stat`) to see modified files and diff sizes
+   - Agents can read files directly from the working directory
+   - Identify file types and what reviews apply
+   - **Read the diff summary first** to understand scope before diving into individual files
+
+3. **Available Review Aspects:**
    - **comments** - Analyze code comment accuracy and maintainability
    - **tests** - Review test coverage quality and completeness
    - **errors** - Check error handling for silent failures
@@ -31,11 +40,6 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
    - **code** - General code review for project guidelines
    - **simplify** - Simplify code for clarity and maintainability
    - **all** - Run all applicable reviews (default)
-
-3. **Identify Changed Files**
-   - Run `git diff main --name-only` to see modified files in worktree
-   - Agents can read files directly from the working directory
-   - Identify file types and what reviews apply
 
 4. **Determine Applicable Reviews**
 
@@ -47,33 +51,39 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
    - **If types added/modified**: type-design-analyzer
    - **After passing review**: code-simplifier (polish and refine)
 
-5. **Launch Review Agents: tool_name: Agent**
+5. **Launch Review Agents**
 
-   **Parallel approach** (default):
-   - Launch all agents simultaneously
-   - Faster for comprehensive review
-   - Results come back together
+   Use the **Agent tool** to launch specialized review agents. Each agent focuses on its specialty for deep analysis. Pass the list of changed files and the PR context as the agent prompt.
 
-   **Sequential approach**:
-   - Easier to understand and act on
-   - Each report is complete before next
-   - Good for interactive review
-   - Agents read files directly from worktree
+   **How to invoke agents:**
+   Use the Agent tool with `description` set to a short label and `prompt` containing the review context:
 
+   ```
+   Agent(
+     description="Code quality review",
+     prompt="Review the following files from this PR for code quality, bugs, and CLAUDE.md compliance: <file_list>. The PR changes are: <brief description>. Focus on the git diff between develop and the PR branch."
+   )
+   ```
 
-6. **Aggregate Results**
+   **Agent mapping:**
+   | Review Aspect | Agent to invoke (use description) | When to use |
+   |---|---|---|
+   | code | "Code quality review" | Always |
+   | errors | "Silent failure analysis" | When error handling changed |
+   | tests | "Test coverage analysis" | When tests changed or new code lacks tests |
+   | comments | "Comment accuracy analysis" | When docs/comments added |
+   | types | "Type design analysis" | When new types/classes added |
+   | simplify | "Code simplification" | After other reviews pass |
 
-   After agents complete, organize findings:
-   - **Critical Issues** (must fix before merge)
-   - **Important Issues** (should fix)
-   - **Suggestions** (nice to have)
-   - **Positive Observations** (what's good)
+   **Launch multiple agents in parallel** by including multiple Agent tool calls in a single message. This is significantly faster than running them sequentially.
 
-7. **Post Review to GitHub (Optional)**
+   **Important:** Each agent can read files directly from the worktree — tell them which files to focus on.
 
-   If GitHub MCP is available, post results:
+6. **Post Review to GitHub**
 
-   **Option A: Summary Comment Only**
+   **Do this step as soon as you have findings, even if analysis is not complete.** Do not wait until all analysis is done. Post early and add follow-up comments if needed.
+
+   **Option A: Summary Comment Only (faster — use when turn budget is limited)**
    - Use `add_issue_comment` to post comprehensive summary
 
    ```markdown
@@ -108,6 +118,16 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
    - Submit review: `pull_request_review_write(method="submit_pending", event="COMMENT"/"REQUEST_CHANGES"/"APPROVE")`
 
    **If MCP not available:** Display results in console for manual review
+
+7. **Aggregate Remaining Results (if turns remain)**
+
+   After posting the initial review, if additional agents complete, organize their findings:
+   - **Critical Issues** (must fix before merge)
+   - **Important Issues** (should fix)
+   - **Suggestions** (nice to have)
+   - **Positive Observations** (what's good)
+   
+   Post follow-up comments for any additional high-priority findings.
 
 ## Usage Examples:
 
@@ -190,6 +210,9 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
 - **Address critical first**: Fix high-priority issues before lower priority
 - **Re-run after fixes**: Can be manually triggered again after pushing fixes
 - **Use specific reviews**: Target specific aspects when you know the concern
+- **Post early**: Always post your review to GitHub before running out of turns — a partial review delivered is better than a perfect review that never reaches the PR
+- **Parallelize agents**: Launch multiple Agent tool calls in a single message for faster analysis
+- **Read diff stats first**: Start with `git diff develop --stat` to understand scope before reading individual files
 
 ## Workflow Integration:
 
