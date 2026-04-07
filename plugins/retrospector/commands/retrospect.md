@@ -19,6 +19,7 @@ behaviour. Propose changes as a pull request to the `develop` branch.
 - Third argument: target repository the session worked on (owner/repo, for context)
 - Fourth argument (optional): number of turns the session took
 - Fifth argument (optional): `error` if the session errored, otherwise omitted
+- Sixth argument (optional): `subagent` if this is a subagent session, otherwise omitted
 
 ---
 
@@ -30,19 +31,39 @@ The file is a structured markdown summary of the session, not the raw JSONL.
 It includes:
 
 - Total turn count and error count
-- List of subagents invoked (via `@agent-name`)
+- List of subagents invoked (via Agent tool calls)
 - Timeline of assistant messages, tool calls, and tool results
 - Summary of all tool errors
 
-Scan for:
+**Check the sixth argument** to determine session type:
+
+- If sixth argument is `subagent`: This is a subagent execution session
+- Otherwise: This is a main workflow session
+
+**For main workflow sessions**, scan for:
 
 - Tool calls that returned errors followed by redundant retries
-- `@agent-name` references — note which subagents were invoked
+- Agent tool calls — note which subagents were invoked (this is expected and good)
 - Instructions that were visibly ignored (look for repeated similar tool calls)
 - Steps taken in the wrong order (e.g. editing before reading)
 - Excessive back-and-forth on something that should have been one step
 - Missing context that led to wrong assumptions
 - Any explicit failure or error in the final turns
+
+**For subagent sessions**, scan for:
+
+- Whether the subagent stayed focused on its specialized task
+- Tool calls that returned errors followed by redundant retries
+- Instructions that were visibly ignored
+- Steps taken in the wrong order
+- Excessive back-and-forth on something that should have been one step
+- Missing domain-specific context for this subagent's specialty
+- Any explicit failure or error in the final turns
+
+**IMPORTANT:** Do NOT suggest that a main workflow should delegate to subagents
+if the transcript already shows Agent tool invocations. Subagent delegation
+is already happening correctly. Focus on whether the RIGHT subagents were chosen
+and whether they were given appropriate context.
 
 **Note:** The summary is pre-processed to avoid buffer limits. If you need more
 detail about a specific turn, the patterns above should be sufficient to identify
@@ -62,8 +83,10 @@ agent's instructions (not with the user's request or an external service).
 
 ## Step 3 — Read the instruction files
 
-Determine which instruction files govern the workflow from the second argument.
-The mapping is:
+Determine which instruction files govern the workflow from the second argument
+and the session type from the sixth argument.
+
+**For main workflow sessions** (sixth argument is NOT `subagent`):
 
 | Workflow       | Command file                                      | Agent files                              |
 | -------------- | ------------------------------------------------- | ---------------------------------------- |
@@ -72,12 +95,28 @@ The mapping is:
 | `triage-issue` | `prompts/triage.md`                               | —                                        |
 | `generic`      | `prompts/generic.md`                              | —                                        |
 
-**Subagents** — if `@agent-name` appears in the transcript, read the agent file:
+**For subagent sessions** (sixth argument is `subagent`):
 
-- Plugin agents: `plugins/{plugin-name}/agents/{agent-name}.md`
-- Python subagents: `subagents/{agent_name}.py` (edit only the `prompt="""..."""` field)
+The workflow name (second argument) is the subagent name (e.g., "comment-analyzer").
 
-Use `Glob` to discover agent files in a plugin if the exact names are unclear.
+To find the subagent's instruction file:
+
+1. Check the transcript summary header for "Subagents invoked" - it may show the full type like "pr-review-toolkit:comment-analyzer"
+2. If you see a colon format like "plugin-name:agent-name", the file is at `plugins/{plugin-name}/agents/{agent-name}.md`
+3. If no colon (just the agent name), try:
+   - First: `Glob plugins/*/agents/{agent-name}.md` to find plugin agents
+   - If not found: `subagents/{agent_name}.py` for Python subagents (edit only the `prompt="""..."""` field)
+
+Example: For agent "comment-analyzer" with type "pr-review-toolkit:comment-analyzer":
+
+- File is at: `plugins/pr-review-toolkit/agents/comment-analyzer.md`
+
+Focus ONLY on this subagent's instruction file. Do not read the main workflow files.
+
+**Subagents invoked during the session** — if Agent tool calls appear in the transcript
+summary, those subagents were delegated to. For main workflow sessions, you may read
+their files if the problem relates to how they were invoked or what context they received.
+For subagent sessions, focus only on the subagent being analyzed.
 
 **Skills** — skills are invoked via `/skill-name` in the transcript or declared in
 a command's frontmatter (`skills:` list). They live at `skills/{skill-name}/SKILL.md`.

@@ -2,7 +2,6 @@
 
 import json
 import logging
-import re
 
 logger = logging.getLogger(__name__)
 
@@ -156,16 +155,22 @@ def extract_retrospector_summary(transcript_path: str) -> str:
                             btype = block.get("type")
                             if btype == "text":
                                 text = block.get("text", "")
-                                # Extract subagent invocations
-                                if "@" in text:
-                                    for match in re.finditer(r"@([\w-]+)", text):
-                                        subagents_used.add(match.group(1))
                                 lines.append(
                                     f"\n[Turn {turn_count}] Assistant: {text[:500]}"
                                 )
                             elif btype == "tool_use":
                                 tool_name = block.get("name", "")
                                 tool_input = json.dumps(block.get("input", {}))
+
+                                # Track subagent invocations via Agent tool
+                                if tool_name == "Agent":
+                                    agent_input = block.get("input", {})
+                                    agent_name = agent_input.get("name", "unknown")
+                                    agent_type = agent_input.get(
+                                        "subagent_type", agent_name
+                                    )
+                                    subagents_used.add(f"{agent_name} ({agent_type})")
+
                                 lines.append(
                                     f"[Turn {turn_count}] Tool call: {tool_name}({tool_input[:200]})"
                                 )

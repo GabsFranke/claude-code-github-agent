@@ -351,6 +351,10 @@ class SDKOptionsBuilder:
 
                 if retrospector_enabled:
                     try:
+                        # Extract agent metadata for SubagentStop events
+                        agent_id = input_data.get("agent_id")
+                        agent_type = input_data.get("agent_type")
+
                         await _enqueue_retrospector_job(
                             repo,
                             staged_path,
@@ -360,6 +364,8 @@ class SDKOptionsBuilder:
                                 "num_turns": input_data.get("num_turns", 0),
                                 "is_error": input_data.get("is_error", False),
                                 "duration_ms": input_data.get("duration_ms", 0),
+                                "agent_id": agent_id,
+                                "agent_type": agent_type,
                             },
                         )
                     except Exception as e:

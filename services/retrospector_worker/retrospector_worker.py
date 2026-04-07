@@ -98,13 +98,30 @@ async def process_retrospector_job(message: dict, redis_client) -> None:
     transcript_path = message.get("transcript_path")
     target_repo = message.get("repo", "unknown")
     session_meta = message.get("session_meta", {})
+    hook_event = message.get("hook_event", "Stop")
+
+    # For subagent sessions, extract agent info from session_meta
+    agent_id = session_meta.get("agent_id")  # e.g., "comment-analyzer"
+    agent_type = session_meta.get(
+        "agent_type"
+    )  # e.g., "pr-review-toolkit:comment-analyzer"
+
+    if hook_event == "SubagentStop" and agent_id:
+        # Use agent_id as the workflow name for retrospection
+        workflow_name = agent_id
+        logger.info(
+            f"Subagent session detected: agent_id={agent_id}, agent_type={agent_type}"
+        )
 
     if not transcript_path or not os.path.exists(transcript_path):
         logger.warning(f"Retrospector: transcript not found: {transcript_path}")
         return
 
     async with _workflow_locks[workflow_name]:
-        logger.info(f"Running retrospection for {target_repo} [{workflow_name}]")
+        logger.info(
+            f"Running retrospection for {target_repo} [{workflow_name}] "
+            f"(hook_event={hook_event})"
+        )
 
         bot_repo = os.getenv("BOT_REPO", "GabsFranke/claude-code-github-agent")
         workspace = None
@@ -165,6 +182,7 @@ async def process_retrospector_job(message: dict, redis_client) -> None:
             duration_ms = int(session_meta.get("duration_ms", 0))
             num_turns = int(session_meta.get("num_turns", 0))
             is_error = bool(session_meta.get("is_error", False))
+            is_subagent = hook_event == "SubagentStop"
 
             # Extract a summary instead of passing the raw transcript path
             # to avoid hitting the SDK's 1MB JSON buffer limit
@@ -174,13 +192,17 @@ async def process_retrospector_job(message: dict, redis_client) -> None:
             summary_path = os.path.join(workspace, "transcript_summary.md")
             Path(summary_path).write_text(transcript_summary, encoding="utf-8")
 
+            # Build the retrospector command
+            # For subagents, workflow_name is the agent_id (e.g., "comment-analyzer")
+            # The retrospector will use agent_type to find the correct file
             prompt = (
                 f"/retrospector:retrospect "
                 f"{summary_path} "
                 f"{workflow_name} "
                 f"{target_repo} "
                 f"{num_turns} "
-                f"{'error' if is_error else ''}"
+                f"{'error' if is_error else ''} "
+                f"{'subagent' if is_subagent else ''}"
             ).strip()
 
             # Build SDK options using the factory builder
@@ -201,7 +223,7 @@ async def process_retrospector_job(message: dict, redis_client) -> None:
             logger.info(
                 f"Invoking retrospector in worktree {workspace} "
                 f"for workflow={workflow_name}, turns={num_turns}, "
-                f"duration={duration_ms}ms"
+                f"duration={duration_ms}ms, is_subagent={is_subagent}"
             )
 
             try:
