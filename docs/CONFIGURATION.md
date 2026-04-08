@@ -109,7 +109,6 @@ The memory worker uses the same Anthropic API settings as the sandbox worker. It
 ```bash
 # Memory Worker (optional - uses Haiku for cost efficiency)
 ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-4-5-20251001  # Model for memory extraction
-MEMORY_HOOK_DEBUG=true  # Enable debug logging for memory hooks
 ```
 
 The memory worker listens on the `agent:memory:requests` Redis queue and uses the Memory MCP server to read/write persistent knowledge files.

@@ -2,6 +2,7 @@
 
 import logging
 import string
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -412,3 +413,23 @@ class WorkflowEngine:
             name: workflow.description or "No description"
             for name, workflow in self.workflows.items()
         }
+
+
+@lru_cache(maxsize=1)
+def get_workflow_engine(config_path: str | None = None) -> WorkflowEngine:
+    """Get cached WorkflowEngine instance (singleton per config path).
+
+    The engine is cached to avoid repeatedly parsing and validating workflows.yaml.
+    Since workflow configuration is static during runtime, caching provides
+    significant performance benefits with no downsides.
+
+    Args:
+        config_path: Path to workflows.yaml file (defaults to workflows.yaml in project root)
+
+    Returns:
+        Cached WorkflowEngine instance
+
+    Note:
+        Changes to workflows.yaml require a process restart to take effect.
+    """
+    return WorkflowEngine(config_path)

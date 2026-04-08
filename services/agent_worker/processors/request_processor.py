@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 from typing import TYPE_CHECKING, Literal, Optional
 
 import httpx
@@ -81,7 +82,7 @@ class RequestProcessor:
         )
 
         if self.langfuse:
-            with self.langfuse.start_as_current_span(
+            with self.langfuse.start_as_current_observation(  # type: ignore[attr-defined]
                 name="github_agent_request"
             ) as trace:
                 trace.update(
@@ -211,26 +212,24 @@ class RequestProcessor:
 
         logger.info(f"Built prompt: {prompt[:150]}...")
 
-        # Fetch CLAUDE.md if exists
+        # Fetch repository context (CLAUDE.md and memory) for system prompt
+        # These will be injected by the SDK factory, not prepended to user prompt
+        claude_md = None
+        memory_index = None
+
         try:
             claude_md = await self.context_loader.fetch_claude_md(repo)
             if claude_md:
-                prompt = f"{claude_md}\n\n{prompt}"
-                logger.info("Prepended CLAUDE.md context to prompt")
+                logger.info("Fetched CLAUDE.md for system context")
         except Exception as e:
             logger.warning(
                 f"Failed to fetch CLAUDE.md from {repo}, continuing without repository context: {e}"
             )
 
-        # Inject existing memory as context (written by the auto-memory hook after each session)
         try:
             memory_index = await self.context_loader.fetch_memory_index(repo)
             if memory_index:
-                memory_section = (
-                    f'<memory name="index.md">\n{memory_index}\n</memory>\n\n'
-                )
-                prompt = f"{memory_section}{prompt}"
-                logger.info("Prepended index.md context to prompt")
+                logger.info("Fetched index.md for system context")
         except Exception as e:
             logger.warning(f"Failed to fetch index.md from {repo}: {e}")
 
@@ -241,6 +240,16 @@ class RequestProcessor:
         # Get GitHub token
         github_token = await self.token_manager.get_token()
 
+        # Generate parent span ID for trace linking (if enabled)
+        parent_span_id = None
+        if os.getenv("LANGFUSE_TRACE_LINKING", "true").lower() == "true":
+            import uuid
+
+            parent_span_id = str(uuid.uuid4())
+            logger.debug(
+                f"Generated parent span ID for trace linking: {parent_span_id}"
+            )
+
         # Create job in queue
         logger.info(f"Creating job with ref: {final_ref}")
         job_id = await self.job_queue.create_job(
@@ -250,11 +259,14 @@ class RequestProcessor:
                 "ref": final_ref,
                 "prompt": prompt,
                 "system_context": system_context,
+                "claude_md": claude_md,  # Pass separately for system prompt injection
+                "memory_index": memory_index,  # Pass separately for system prompt injection
                 "github_token": github_token,
                 "user": user,
                 "workflow_name": workflow_name,
                 "user_query": user_query,
                 "event_data": event_data,
+                "parent_span_id": parent_span_id,  # For Langfuse trace linking
             }
         )
 
