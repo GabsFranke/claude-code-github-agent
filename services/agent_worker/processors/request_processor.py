@@ -212,26 +212,24 @@ class RequestProcessor:
 
         logger.info(f"Built prompt: {prompt[:150]}...")
 
-        # Fetch CLAUDE.md if exists
+        # Fetch repository context (CLAUDE.md and memory) for system prompt
+        # These will be injected by the SDK factory, not prepended to user prompt
+        claude_md = None
+        memory_index = None
+
         try:
             claude_md = await self.context_loader.fetch_claude_md(repo)
             if claude_md:
-                prompt = f"{claude_md}\n\n{prompt}"
-                logger.info("Prepended CLAUDE.md context to prompt")
+                logger.info("Fetched CLAUDE.md for system context")
         except Exception as e:
             logger.warning(
                 f"Failed to fetch CLAUDE.md from {repo}, continuing without repository context: {e}"
             )
 
-        # Inject existing memory as context (written by the auto-memory hook after each session)
         try:
             memory_index = await self.context_loader.fetch_memory_index(repo)
             if memory_index:
-                memory_section = (
-                    f'<memory name="index.md">\n{memory_index}\n</memory>\n\n'
-                )
-                prompt = f"{memory_section}{prompt}"
-                logger.info("Prepended index.md context to prompt")
+                logger.info("Fetched index.md for system context")
         except Exception as e:
             logger.warning(f"Failed to fetch index.md from {repo}: {e}")
 
@@ -261,6 +259,8 @@ class RequestProcessor:
                 "ref": final_ref,
                 "prompt": prompt,
                 "system_context": system_context,
+                "claude_md": claude_md,  # Pass separately for system prompt injection
+                "memory_index": memory_index,  # Pass separately for system prompt injection
                 "github_token": github_token,
                 "user": user,
                 "workflow_name": workflow_name,

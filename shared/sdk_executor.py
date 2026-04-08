@@ -28,6 +28,8 @@ async def execute_sdk(
     options_builder: SDKOptionsBuilder,
     timeout: int | None = None,
     collect_text: bool = True,
+    max_retries: int = 1,
+    retry_base_delay: float = 5.0,
 ) -> dict:
     """Execute Claude Agent SDK with given options.
 
@@ -40,6 +42,9 @@ async def execute_sdk(
         options_builder: Pre-configured SDKOptionsBuilder instance
         timeout: Optional timeout in seconds (default: from env or 1800)
         collect_text: Whether to collect text blocks into response (default: True)
+        max_retries: Maximum number of retry attempts (default: 1 = no retry)
+        retry_base_delay: Base delay in seconds for exponential backoff (default: 5.0)
+                         Delays: 5s, 15s, 30s for attempts 1, 2, 3
 
     Returns:
         dict with:
@@ -48,6 +53,59 @@ async def execute_sdk(
             - duration_ms: int
             - is_error: bool
             - messages: list (all messages received)
+
+    Raises:
+        SDKTimeoutError: If execution exceeds timeout
+        SDKError: If SDK execution fails or returns empty response
+    """
+    last_error: Exception | None = None
+
+    for attempt in range(max_retries):
+        try:
+            return await _execute_sdk_once(
+                prompt=prompt,
+                options_builder=options_builder,
+                timeout=timeout,
+                collect_text=collect_text,
+            )
+        except Exception as e:
+            last_error = e
+            if attempt < max_retries - 1:
+                # Log as warning before retry
+                # Exponential backoff: 5s, 15s, 30s (with base_delay=5.0)
+                delay = retry_base_delay * (3**attempt)
+                logger.warning(
+                    f"SDK execution attempt {attempt + 1}/{max_retries} failed: {type(e).__name__}: {e}. "
+                    f"Retrying in {delay}s..."
+                )
+                await asyncio.sleep(delay)
+
+    # All retries exhausted - log as error
+    logger.error(
+        f"SDK execution failed after {max_retries} attempt(s): {type(last_error).__name__}: {last_error}",
+        exc_info=True,
+    )
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("SDK execution failed without capturing an error")
+
+
+async def _execute_sdk_once(
+    prompt: str,
+    options_builder: SDKOptionsBuilder,
+    timeout: int | None = None,
+    collect_text: bool = True,
+) -> dict:
+    """Execute Claude Agent SDK once (internal implementation).
+
+    Args:
+        prompt: User prompt to send to the agent
+        options_builder: Pre-configured SDKOptionsBuilder instance
+        timeout: Optional timeout in seconds (default: from env or 1800)
+        collect_text: Whether to collect text blocks into response (default: True)
+
+    Returns:
+        dict with response, num_turns, duration_ms, is_error, messages
 
     Raises:
         SDKTimeoutError: If execution exceeds timeout

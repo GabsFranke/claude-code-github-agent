@@ -228,3 +228,91 @@ class TestMCPConfiguration:
         # Check required files
         assert (plugin_dir / ".mcp.json").exists()
         assert (plugin_dir / "servers/github_actions_server.py").exists()
+
+    def test_repository_context_injection(self):
+        """Test that repository context is properly injected into system prompt."""
+        builder = SDKOptionsBuilder(cwd="/tmp")
+
+        claude_md = "# Repository Instructions\nThis is CLAUDE.md content"
+        memory_index = "# Memory\nThis is memory content"
+
+        builder.with_repository_context(claude_md=claude_md, memory_index=memory_index)
+        options = builder.build()
+
+        # Verify system prompt contains both contexts
+        assert options.system_prompt is not None
+        assert '<memory name="index.md">' in options.system_prompt
+        assert "This is memory content" in options.system_prompt
+        assert "<repository_context>" in options.system_prompt
+        assert "This is CLAUDE.md content" in options.system_prompt
+
+        # Verify memory comes before CLAUDE.md
+        memory_pos = options.system_prompt.index('<memory name="index.md">')
+        claude_pos = options.system_prompt.index("<repository_context>")
+        assert memory_pos < claude_pos
+
+    def test_repository_context_with_existing_system_prompt(self):
+        """Test that repository context is prepended to existing system prompt."""
+        builder = SDKOptionsBuilder(cwd="/tmp")
+
+        workflow_context = "Workflow-specific instructions"
+        claude_md = "Repository instructions"
+        memory_index = "Memory content"
+
+        builder.with_system_prompt(workflow_context)
+        builder.with_repository_context(claude_md=claude_md, memory_index=memory_index)
+        options = builder.build()
+
+        # Verify all contexts are present
+        assert options.system_prompt is not None
+        assert "Memory content" in options.system_prompt
+        assert "Repository instructions" in options.system_prompt
+        assert "Workflow-specific instructions" in options.system_prompt
+
+        # Verify order: memory -> CLAUDE.md -> workflow context
+        memory_pos = options.system_prompt.index("Memory content")
+        claude_pos = options.system_prompt.index("Repository instructions")
+        workflow_pos = options.system_prompt.index("Workflow-specific instructions")
+        assert memory_pos < claude_pos < workflow_pos
+
+    def test_repository_context_with_none_values(self):
+        """Test that None values are handled gracefully."""
+        builder = SDKOptionsBuilder(cwd="/tmp")
+
+        # Test with None values
+        builder.with_repository_context(claude_md=None, memory_index=None)
+        options = builder.build()
+
+        # System prompt should be None if no context provided
+        assert options.system_prompt is None
+
+    def test_repository_context_with_empty_strings(self):
+        """Test that empty strings are handled gracefully."""
+        builder = SDKOptionsBuilder(cwd="/tmp")
+
+        # Test with empty strings
+        builder.with_repository_context(claude_md="", memory_index="")
+        options = builder.build()
+
+        # System prompt should be None if only empty strings provided
+        assert options.system_prompt is None
+
+    def test_repository_context_partial_injection(self):
+        """Test that partial context (only memory or only CLAUDE.md) works."""
+        # Test with only memory
+        builder1 = SDKOptionsBuilder(cwd="/tmp")
+        builder1.with_repository_context(memory_index="Memory only")
+        options1 = builder1.build()
+
+        assert options1.system_prompt is not None
+        assert "Memory only" in options1.system_prompt
+        assert "<repository_context>" not in options1.system_prompt
+
+        # Test with only CLAUDE.md
+        builder2 = SDKOptionsBuilder(cwd="/tmp")
+        builder2.with_repository_context(claude_md="CLAUDE.md only")
+        options2 = builder2.build()
+
+        assert options2.system_prompt is not None
+        assert "CLAUDE.md only" in options2.system_prompt
+        assert '<memory name="index.md">' not in options2.system_prompt

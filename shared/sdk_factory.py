@@ -4,9 +4,11 @@ This module provides a builder pattern for constructing ClaudeAgentOptions
 with sensible defaults and flexible customization for different worker types.
 """
 
+import asyncio
 import json
 import logging
 import os
+import shutil
 from pathlib import Path
 
 from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
@@ -14,6 +16,26 @@ from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
 from shared.langfuse_hooks import setup_langfuse_hooks
 
 logger = logging.getLogger(__name__)
+
+# Module-level Redis connection pool for reuse across hook invocations
+_redis_pool = None
+
+
+async def _get_redis_pool():
+    """Get or create the module-level Redis connection pool.
+
+    Using a connection pool prevents connection churn under high load.
+    """
+    global _redis_pool
+    if _redis_pool is None:
+        import redis.asyncio as aioredis
+
+        redis_url = os.getenv("REDIS_URL", "redis://redis:6379")
+        redis_password = os.getenv("REDIS_PASSWORD")
+        _redis_pool = aioredis.ConnectionPool.from_url(
+            redis_url, decode_responses=True, password=redis_password
+        )
+    return _redis_pool
 
 
 class SDKOptionsBuilder:
@@ -46,6 +68,7 @@ class SDKOptionsBuilder:
         self._add_dirs: list[str] = []
         self._system_prompt: str | None = None
         self._agents: dict | None = None
+        self._repo_context: dict = {}  # Store context for hooks
 
     # Model selection methods
 
@@ -320,6 +343,9 @@ class SDKOptionsBuilder:
             os.getenv("RETROSPECTOR_ENABLED", "true").lower() == "true"
         )
 
+        # Capture context from builder for hooks to use
+        repo_context = self._repo_context
+
         async def capture_and_enqueue(input_data, _tool_use_id, _context):
             """Stage transcript and enqueue post-processing jobs."""
             transcript = (
@@ -332,18 +358,24 @@ class SDKOptionsBuilder:
                 logger.debug(f"Post-session hook triggered: {transcript} ({event})")
 
                 # Copy to shared volume for post-processing workers
-                staged_path = await _stage_transcript(repo, transcript)
+                staged_path = await _stage_transcript_with_retry(repo, transcript)
                 if not staged_path:
                     logger.error(
-                        f"Failed to stage transcript {transcript}, "
+                        f"Failed to stage transcript {transcript} after retries, "
                         "skipping post-processing"
                     )
-                    return {"success": True}
+                    return {"success": False, "error": "transcript_staging_failed"}
 
-                # Enqueue jobs with error handling
+                # Enqueue jobs with error handling, passing pre-fetched context
                 if memory_enabled:
                     try:
-                        await _enqueue_memory_job(repo, staged_path, event)
+                        await _enqueue_memory_job(
+                            repo,
+                            staged_path,
+                            event,
+                            claude_md=repo_context.get("claude_md"),
+                            memory_index=repo_context.get("memory_index"),
+                        )
                     except Exception as e:
                         logger.error(
                             f"Failed to enqueue memory job: {e}", exc_info=True
@@ -416,6 +448,109 @@ class SDKOptionsBuilder:
             self._system_prompt = prompt
         return self
 
+    def with_repository_context(
+        self, claude_md: str | None = None, memory_index: str | None = None
+    ) -> "SDKOptionsBuilder":
+        """Inject repository context (CLAUDE.md and memory) into system prompt.
+
+        This method prepends repository-specific context to the system prompt,
+        ensuring it's processed as system-level context rather than user input.
+
+        Args:
+            claude_md: Content of CLAUDE.md from repository (optional)
+            memory_index: Content of index.md from agent memory (optional)
+
+        Returns:
+            Self for method chaining
+        """
+        # Store context for hooks to use
+        self._repo_context = {
+            "claude_md": claude_md,
+            "memory_index": memory_index,
+        }
+
+        context_parts = []
+
+        # Add memory first (most persistent context)
+        if memory_index and memory_index.strip():
+            context_parts.append(
+                f'<memory name="index.md">\n{memory_index.strip()}\n</memory>'
+            )
+
+        # Add CLAUDE.md (repository-specific instructions)
+        if claude_md and claude_md.strip():
+            context_parts.append(
+                f"<repository_context>\n{claude_md.strip()}\n</repository_context>"
+            )
+
+        # Prepend to existing system prompt if any
+        if context_parts:
+            repo_context = "\n\n".join(context_parts)
+            if self._system_prompt:
+                self._system_prompt = f"{repo_context}\n\n{self._system_prompt}"
+            else:
+                self._system_prompt = repo_context
+
+        return self
+
+    async def with_repository_context_auto(
+        self, repo: str, fetch_claude_md: bool = True, fetch_memory: bool = True
+    ) -> "SDKOptionsBuilder":
+        """Automatically fetch and inject repository context into system prompt.
+
+        This is a convenience method that fetches CLAUDE.md and memory automatically.
+        Use this when you don't have pre-fetched context available.
+
+        Args:
+            repo: Repository identifier (e.g., "owner/repo")
+            fetch_claude_md: Whether to fetch CLAUDE.md from GitHub (default: True)
+            fetch_memory: Whether to fetch memory from local volume (default: True)
+
+        Returns:
+            Self for method chaining
+        """
+        claude_md = None
+        memory_index = None
+
+        # Fetch CLAUDE.md from GitHub API
+        if fetch_claude_md:
+            try:
+                from shared.github_auth import get_github_auth_service
+
+                auth_service = await get_github_auth_service()
+                if auth_service.is_configured():
+                    github_token = await auth_service.get_token()
+                    import httpx
+
+                    async with httpx.AsyncClient() as client:
+                        url = f"https://api.github.com/repos/{repo}/contents/CLAUDE.md"
+                        headers = {
+                            "Authorization": f"Bearer {github_token}",
+                            "Accept": "application/vnd.github.v3.raw",
+                        }
+                        response = await client.get(url, headers=headers, timeout=10.0)
+                        if response.status_code == 200:
+                            claude_md = response.text
+                            logger.info(f"Auto-fetched CLAUDE.md for {repo}")
+            except Exception as e:
+                logger.warning(f"Failed to auto-fetch CLAUDE.md for {repo}: {e}")
+
+        # Fetch memory from local volume
+        if fetch_memory:
+            try:
+                memory_path = f"/home/bot/agent-memory/{repo}/memory/index.md"
+                if os.path.exists(memory_path):
+                    with open(memory_path, encoding="utf-8") as f:
+                        memory_index = f.read()
+                    logger.info(f"Auto-loaded memory for {repo}")
+            except Exception as e:
+                logger.warning(f"Failed to auto-load memory for {repo}: {e}")
+
+        # Inject the fetched context
+        return self.with_repository_context(
+            claude_md=claude_md, memory_index=memory_index
+        )
+
     # Build method
 
     def build(self) -> ClaudeAgentOptions:
@@ -429,6 +564,18 @@ class SDKOptionsBuilder:
             self._model = os.getenv(
                 "ANTHROPIC_DEFAULT_SONNET_MODEL", "claude-sonnet-4-20250514"
             )
+
+        # Log system prompt for debugging (only if SDK_DEBUG is enabled)
+        if os.getenv("SDK_DEBUG", "false").lower() == "true" and self._system_prompt:
+            logger.debug("=" * 80)
+            logger.debug("SYSTEM PROMPT BEING PASSED TO SDK:")
+            logger.debug("-" * 80)
+            logger.debug(
+                self._system_prompt[:500] + "..."
+                if len(self._system_prompt) > 500
+                else self._system_prompt
+            )
+            logger.debug("=" * 80)
 
         return ClaudeAgentOptions(
             model=self._model,
@@ -449,6 +596,34 @@ class SDKOptionsBuilder:
 # Helper functions for transcript staging (used by with_transcript_staging)
 
 
+async def _stage_transcript_with_retry(
+    repo: str, transcript_path: str, max_retries: int = 3
+) -> str | None:
+    """Stage transcript with exponential backoff retry.
+
+    Args:
+        repo: Repository identifier
+        transcript_path: Path to transcript file
+        max_retries: Maximum number of retry attempts (default: 3)
+
+    Returns:
+        Staged path on success, None on failure after all retries
+    """
+    for attempt in range(max_retries):
+        result = await _stage_transcript(repo, transcript_path)
+        if result:
+            return result
+
+        if attempt < max_retries - 1:
+            delay = 2**attempt  # 1s, 2s, 4s
+            logger.warning(
+                f"Staging attempt {attempt + 1} failed, " f"retrying in {delay}s"
+            )
+            await asyncio.sleep(delay)
+
+    return None
+
+
 async def _stage_transcript(repo: str, transcript_path: str) -> str | None:
     """Copy transcript to the shared transcripts volume for post-processing workers.
 
@@ -461,18 +636,18 @@ async def _stage_transcript(repo: str, transcript_path: str) -> str | None:
     Returns:
         Staged path on success, None on failure
     """
-    import shutil
-
     transcript_file = Path(transcript_path)
     if not transcript_file.exists():
         logger.warning(f"Transcript not found, cannot stage: {transcript_path}")
         return None
 
     staged_dir = f"/home/bot/transcripts/{repo}"
-    os.makedirs(staged_dir, exist_ok=True)
+
+    # Use asyncio.to_thread for blocking I/O operations
+    await asyncio.to_thread(os.makedirs, staged_dir, exist_ok=True)
     staged_path = os.path.join(staged_dir, transcript_file.name)
     try:
-        shutil.copy2(transcript_path, staged_path)
+        await asyncio.to_thread(shutil.copy2, transcript_path, staged_path)
         logger.info(f"Transcript staged: {staged_path}")
     except Exception as e:
         logger.warning(f"Failed to stage transcript for {repo}: {e}")
@@ -481,34 +656,42 @@ async def _stage_transcript(repo: str, transcript_path: str) -> str | None:
     return staged_path
 
 
-async def _enqueue_memory_job(repo: str, transcript_path: str, hook_event: str) -> None:
+async def _enqueue_memory_job(
+    repo: str,
+    transcript_path: str,
+    hook_event: str,
+    claude_md: str | None = None,
+    memory_index: str | None = None,
+) -> None:
     """Enqueue a memory extraction job for an already-persisted transcript.
 
     Args:
         repo: Repository identifier
         transcript_path: Path to staged transcript
         hook_event: Hook event name (Stop or SubagentStop)
+        claude_md: Pre-fetched CLAUDE.md content (optional, will fetch if None)
+        memory_index: Pre-fetched memory content (optional, will fetch if None)
     """
     try:
         import redis.asyncio as aioredis
 
-        redis_url = os.getenv("REDIS_URL", "redis://redis:6379")
-        redis_password = os.getenv("REDIS_PASSWORD")
-        rc = await aioredis.from_url(
-            redis_url, decode_responses=True, password=redis_password
-        )
+        pool = await _get_redis_pool()
+        rc = aioredis.Redis(connection_pool=pool)
         try:
             payload = json.dumps(
                 {
                     "repo": repo,
                     "transcript_path": transcript_path,
                     "hook_event": hook_event,
+                    "claude_md": claude_md,  # Pass pre-fetched context
+                    "memory_index": memory_index,  # Pass pre-fetched context
                 }
             )
-            await rc.rpush("agent:memory:requests", payload)
+            await rc.rpush("agent:memory:requests", payload)  # type: ignore[misc]
             logger.info(f"Enqueued memory job for {repo} [{hook_event}]")
         finally:
-            await rc.close()
+            # Don't close the connection, just release it back to pool
+            await rc.aclose()  # type: ignore[attr-defined]
     except Exception as e:
         logger.warning(f"Failed to enqueue memory job for {repo}: {e}")
 
@@ -535,11 +718,8 @@ async def _enqueue_retrospector_job(
     try:
         import redis.asyncio as aioredis
 
-        redis_url = os.getenv("REDIS_URL", "redis://redis:6379")
-        redis_password = os.getenv("REDIS_PASSWORD")
-        rc = await aioredis.from_url(
-            redis_url, decode_responses=True, password=redis_password
-        )
+        pool = await _get_redis_pool()
+        rc = aioredis.Redis(connection_pool=pool)
         try:
             payload = json.dumps(
                 {
@@ -550,12 +730,13 @@ async def _enqueue_retrospector_job(
                     "session_meta": session_meta,
                 }
             )
-            await rc.rpush("agent:retrospector:requests", payload)
+            await rc.rpush("agent:retrospector:requests", payload)  # type: ignore[misc]
             logger.info(
                 f"Enqueued retrospector job for {repo} "
                 f"[{workflow_name or 'unknown'}] [{hook_event}]"
             )
         finally:
-            await rc.close()
+            # Don't close the connection, just release it back to pool
+            await rc.aclose()  # type: ignore[attr-defined]
     except Exception as e:
         logger.warning(f"Failed to enqueue retrospector job for {repo}: {e}")

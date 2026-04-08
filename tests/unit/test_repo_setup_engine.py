@@ -6,7 +6,55 @@ from pathlib import Path
 import pytest
 import yaml
 
-from repo_setup.engine import RepoSetupEngine
+from repo_setup.engine import RepoSetupEngine, get_repo_setup_engine
+
+
+class TestGetRepoSetupEngine:
+    """Test get_repo_setup_engine factory function with caching."""
+
+    def test_returns_repo_setup_engine_instance(self):
+        """Test that factory returns a RepoSetupEngine instance."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            config = {
+                "repositories": {
+                    "test/repo": {"setup_commands": ["echo test"], "timeout": 300}
+                },
+                "default": {"enabled": False},
+            }
+            yaml.dump(config, f)
+            config_path = Path(f.name)
+
+        try:
+            engine = get_repo_setup_engine(str(config_path))
+            assert isinstance(engine, RepoSetupEngine)
+        finally:
+            config_path.unlink()
+
+    def test_returns_cached_instance(self):
+        """Test that factory returns the same cached instance."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            config = {
+                "repositories": {
+                    "test/repo": {"setup_commands": ["echo test"], "timeout": 300}
+                },
+                "default": {"enabled": False},
+            }
+            yaml.dump(config, f)
+            config_path = Path(f.name)
+
+        try:
+            engine1 = get_repo_setup_engine(str(config_path))
+            engine2 = get_repo_setup_engine(str(config_path))
+
+            # Should be the exact same object (cached)
+            assert engine1 is engine2
+        finally:
+            config_path.unlink()
+
+    def test_cache_has_info(self):
+        """Test that the factory function has cache_info (is cached)."""
+        assert hasattr(get_repo_setup_engine, "cache_info")
+        assert hasattr(get_repo_setup_engine, "cache_clear")
 
 
 @pytest.fixture

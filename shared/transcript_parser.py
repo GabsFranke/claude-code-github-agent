@@ -77,11 +77,13 @@ def extract_conversation(transcript_path: str) -> str:
     return "\n".join(lines)
 
 
-def extract_retrospector_summary(transcript_path: str) -> str:
+def extract_retrospector_summary(transcript_path: str) -> str | None:
     """Parse a Claude JSONL transcript and extract a concise summary for retrospection.
 
     Returns a structured text summary instead of the raw JSONL to avoid hitting
     the SDK's 1MB JSON buffer limit when passing large transcripts.
+
+    Returns None if parsing fails.
 
     Used by retrospector_worker for instruction improvement analysis.
     """
@@ -176,8 +178,8 @@ def extract_retrospector_summary(transcript_path: str) -> str:
                                 )
 
     except Exception as e:
-        logger.warning(f"Failed to parse transcript {transcript_path}: {e}")
-        return f"Error parsing transcript: {e}"
+        logger.error(f"Failed to parse transcript {transcript_path}: {e}")
+        return None
 
     summary = f"""# Session Transcript Summary
 

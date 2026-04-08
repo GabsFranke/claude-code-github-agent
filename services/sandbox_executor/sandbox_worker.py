@@ -31,6 +31,10 @@ logger = logging.getLogger(__name__)
 # Configure Claude Agent SDK logger to match our log level
 logging.getLogger("claude_agent_sdk").setLevel(os.getenv("LOG_LEVEL", "INFO"))
 
+# SDK retry configuration
+SDK_MAX_RETRIES = int(os.getenv("SDK_MAX_RETRIES", "3"))
+SDK_RETRY_BASE_DELAY = float(os.getenv("SDK_RETRY_BASE_DELAY", "5.0"))
+
 # Global state
 shutdown_event = asyncio.Event()
 
@@ -63,11 +67,11 @@ async def ensure_repo_synced(
     try:
         # Wait for completion event with reasonable timeout (5 minutes for large repos)
         timeout = 300  # 5 minutes
-        start_time = asyncio.get_event_loop().time()
+        start_time = asyncio.get_running_loop().time()
 
         async for message in pubsub.listen():
             # Check timeout
-            if asyncio.get_event_loop().time() - start_time > timeout:
+            if asyncio.get_running_loop().time() - start_time > timeout:
                 raise RepositorySyncError(
                     f"Sync timeout for {repo} after {timeout}s - repo sync worker may be down"
                 )
@@ -277,15 +281,15 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
         github_token = job_data["github_token"]
         workflow_name = job_data.get("workflow_name")
         system_context = job_data.get("system_context")
+        claude_md = job_data.get("claude_md")
+        memory_index = job_data.get("memory_index")
 
         # Inject GitHub token for tools/plugins to use
         os.environ["GITHUB_TOKEN"] = github_token
 
-        # Log token availability for debugging (first/last chars only)
+        # Log token availability for debugging (length only, no partial tokens)
         if github_token:
-            logger.info(
-                f"GitHub token available: {github_token[:10]}...{github_token[-10:]}"
-            )
+            logger.info(f"GitHub token available: {len(github_token)} characters")
         else:
             logger.warning("No GitHub token provided to sandbox executor")
 
@@ -309,13 +313,18 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
             .with_langfuse_hooks(parent_span_id=parent_span_id)
             .with_transcript_staging(repo, workflow_name)
             .with_writable_dir(f"/home/bot/agent-memory/{repo}/memory")
-            .with_system_prompt(system_context)
+            .with_system_prompt(system_context)  # Workflow-specific system context
+            .with_repository_context(
+                claude_md=claude_md, memory_index=memory_index
+            )  # Repository context (prepended to system prompt)
         )
 
-        # Execute via centralized executor
+        # Execute via centralized executor with retry
         result = await execute_sdk(
             prompt=job_data["prompt"],
             options_builder=builder,
+            max_retries=SDK_MAX_RETRIES,
+            retry_base_delay=SDK_RETRY_BASE_DELAY,
         )
 
         response = result["response"]
@@ -367,6 +376,11 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
         )
 
     finally:
+        # CRITICAL: Clean up GITHUB_TOKEN from environment
+        if "GITHUB_TOKEN" in os.environ:
+            del os.environ["GITHUB_TOKEN"]
+            logger.debug("Cleaned up GITHUB_TOKEN from environment")
+
         # Cleanup credentials
         try:
             credentials_file = os.path.join(os.path.expanduser("~"), ".git-credentials")

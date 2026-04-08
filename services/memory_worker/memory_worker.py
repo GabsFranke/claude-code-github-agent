@@ -3,16 +3,18 @@
 Listens on `agent:memory:requests`. For each job it:
 1. Reads the persisted session transcript from the agent-memory volume.
 2. Invokes the @memory-extractor subagent (via Claude Agent SDK / Haiku) to update index.md.
-3. Serialises access per-repo using asyncio.Lock to prevent concurrent write races.
 
 Transcripts are persisted permanently in the shared volume for future analysis.
+
+Note: This worker processes jobs sequentially (one at a time). If you need to scale
+to multiple worker instances, you'll need to implement distributed locking (e.g., Redis locks)
+to prevent concurrent writes to the same repository's index.md file.
 """
 
 import asyncio
 import logging
 import os
 import sys
-from collections import defaultdict
 
 from shared.logging_utils import setup_logging
 from shared.queue import RedisQueue
@@ -27,11 +29,11 @@ from subagents import AGENTS
 setup_logging(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 
-shutdown_event = asyncio.Event()
+# SDK retry configuration
+SDK_MAX_RETRIES = int(os.getenv("SDK_MAX_RETRIES", "3"))
+SDK_RETRY_BASE_DELAY = float(os.getenv("SDK_RETRY_BASE_DELAY", "5.0"))
 
-# Per-repo locks — prevents concurrent index.md writes for the same repository.
-# defaultdict so we create a lock on first access without a global init step.
-_repo_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+shutdown_event = asyncio.Event()
 
 
 async def process_memory_job(message: dict, redis_client) -> None:
@@ -39,6 +41,8 @@ async def process_memory_job(message: dict, redis_client) -> None:
     repo = message.get("repo")
     transcript_path = message.get("transcript_path")
     hook_event = message.get("hook_event", "Stop")
+    claude_md = message.get("claude_md")  # Pre-fetched from sandbox worker
+    memory_index = message.get("memory_index")  # Pre-fetched from sandbox worker
 
     if not repo or not transcript_path:
         logger.error(f"Memory job missing required fields: {message}")
@@ -48,24 +52,20 @@ async def process_memory_job(message: dict, redis_client) -> None:
         logger.warning(f"Memory job: transcript no longer exists: {transcript_path}")
         return
 
-    # Serialise per-repo to avoid concurrent index.md writes
-    async with _repo_locks[repo]:
+    logger.info(f"Processing memory job for {repo} [{hook_event}]: {transcript_path}")
+
+    memory_dir = f"/home/bot/agent-memory/{repo}/memory"
+    os.makedirs(memory_dir, exist_ok=True)
+
+    conversation_text = extract_conversation(transcript_path)
+    if not conversation_text:
         logger.info(
-            f"Processing memory job for {repo} [{hook_event}]: {transcript_path}"
+            f"No conversation content extracted from {transcript_path}, skipping."
         )
+        return
 
-        memory_dir = f"/home/bot/agent-memory/{repo}/memory"
-        os.makedirs(memory_dir, exist_ok=True)
-
-        conversation_text = extract_conversation(transcript_path)
-        if not conversation_text:
-            logger.info(
-                f"No conversation content extracted from {transcript_path}, skipping."
-            )
-            return
-
-        # Use XML format for better structure (inspired by Claude Code)
-        prompt = f"""<repository>{repo}</repository>
+    # Use XML format for better structure (inspired by Claude Code)
+    prompt = f"""<repository>{repo}</repository>
 <session_event>{hook_event}</session_event>
 
 <session_transcript>
@@ -76,35 +76,50 @@ async def process_memory_job(message: dict, redis_client) -> None:
 
 Extract memorable facts from the session transcript and update the memory files accordingly."""
 
-        # Build SDK options using the factory builder
-        builder = (
-            SDKOptionsBuilder(cwd=memory_dir)
-            .with_haiku()
-            .with_memory_mcp(repo)
-            .with_memory_toolset()
-            .with_agents(AGENTS)
-            .with_langfuse_hooks()
-            .with_writable_dir(memory_dir)
+    # Build SDK options using the factory builder
+    # Use pre-fetched context if available, otherwise fetch
+    builder = SDKOptionsBuilder(cwd=memory_dir).with_haiku()
+
+    if claude_md is not None or memory_index is not None:
+        # Use pre-fetched context (passed from sandbox worker)
+        logger.info("Using pre-fetched repository context")
+        builder = builder.with_repository_context(
+            claude_md=claude_md, memory_index=memory_index
+        )
+    else:
+        # Fallback: auto-fetch if not provided (shouldn't happen normally)
+        logger.warning("Context not provided, auto-fetching (this is inefficient)")
+        builder = await builder.with_repository_context_auto(repo)
+
+    # Add remaining configuration
+    builder = (
+        builder.with_memory_mcp(repo)
+        .with_memory_toolset()
+        .with_agents(AGENTS)
+        .with_langfuse_hooks()
+        .with_writable_dir(memory_dir)
+    )
+
+    try:
+        # Execute via centralized executor with retry
+        result = await execute_sdk(
+            prompt=f"@memory-extractor {prompt}",
+            options_builder=builder,
+            collect_text=False,  # We don't need text response
+            max_retries=SDK_MAX_RETRIES,
+            retry_base_delay=SDK_RETRY_BASE_DELAY,
         )
 
-        try:
-            # Execute via centralized executor
-            result = await execute_sdk(
-                prompt=f"@memory-extractor {prompt}",
-                options_builder=builder,
-                collect_text=False,  # We don't need text response
-            )
+        logger.info(
+            f"Memory extraction done for {repo} — "
+            f"{result['num_turns']} turns, {result['duration_ms']}ms"
+        )
 
-            logger.info(
-                f"Memory extraction done for {repo} — "
-                f"{result['num_turns']} turns, {result['duration_ms']}ms"
-            )
-
-        except Exception as e:
-            logger.warning(
-                f"Memory extraction failed for {repo} [{hook_event}]: {e}",
-                exc_info=True,
-            )
+    except Exception as e:
+        logger.warning(
+            f"Memory extraction failed for {repo} [{hook_event}]: {e}",
+            exc_info=True,
+        )
 
 
 async def main() -> None:
