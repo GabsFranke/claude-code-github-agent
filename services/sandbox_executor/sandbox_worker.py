@@ -384,6 +384,7 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
             builder.with_github_mcp(github_token).with_github_actions_mcp(github_token)
 
         builder.with_memory_mcp(repo)
+        builder.with_codebase_tools(workspace)
 
         # Get parent span ID for trace linking (if enabled)
         parent_span_id = job_data.get("parent_span_id")

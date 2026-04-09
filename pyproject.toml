@@ -86,7 +86,7 @@ markers = [
 ]
 
 [tool.coverage.run]
-source = ["services", "shared", "subagents"]
+source = ["services", "shared", "subagents", "mcp_servers"]
 omit = [
     "*/tests/*",
     "*/test_*.py",
@@ -133,4 +133,4 @@ requires = ["setuptools>=45", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["shared", "services", "subagents", "hooks", "plugins"]
+packages = ["shared", "services", "subagents", "hooks", "plugins", "mcp_servers"]

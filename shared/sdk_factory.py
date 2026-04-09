@@ -199,6 +199,29 @@ class SDKOptionsBuilder:
         }
         return self
 
+    def with_codebase_tools(self, worktree_path: str) -> "SDKOptionsBuilder":
+        """Add codebase tools MCP server for structured code search.
+
+        Provides find_definitions, find_references, search_codebase, and
+        read_file_summary tools that reuse Phase 1's tree-sitter infrastructure.
+
+        Args:
+            worktree_path: Absolute path to the git worktree.
+
+        Returns:
+            Self for method chaining
+        """
+        self._mcp_servers["codebase-tools"] = {
+            "type": "stdio",
+            "command": "python3",
+            "args": ["/app/mcp_servers/codebase_tools/server.py"],
+            "env": {
+                "REPO_PATH": worktree_path,
+                "PYTHONPATH": "/app",
+            },
+        }
+        return self
+
     # Plugin methods (à la carte)
 
     def with_auto_discovered_plugins(self) -> "SDKOptionsBuilder":
@@ -266,6 +289,10 @@ class SDKOptionsBuilder:
             "mcp__github__*",
             "mcp__github-actions__*",
             "mcp__memory__memory_read",
+            "mcp__codebase-tools__find_definitions",
+            "mcp__codebase-tools__find_references",
+            "mcp__codebase-tools__search_codebase",
+            "mcp__codebase-tools__read_file_summary",
         )
 
     def with_retrospector_toolset(self) -> "SDKOptionsBuilder":
