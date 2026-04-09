@@ -23,6 +23,14 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
    - Check git status to identify changed files: `git diff main --name-only`
    - Default: Run all applicable reviews
 
+1b. **Validate PR Exists** (before proceeding)
+   - Use `pull_request_read(method="get", ...)` to verify the PR exists and is accessible.
+   - **If 404 / Not Found:**
+     1. Use `issue_read(method="get", ...)` to check if the number refers to an issue instead. If it is an issue, post a comment using `add_issue_comment` explaining: "No pull request #N was found — this number refers to an issue, not a PR. PR review requires a pull request number."
+     2. If neither PR nor issue exists, post a comment on the triggering PR/issue (if known) or output a clear message: "PR #N does not exist in owner/repo. Please verify the repository and PR number."
+     3. **Stop here.** Do not proceed to launch agents.
+   - **If other errors** (403, 500, etc.): Post a comment explaining the access problem and stop.
+
 2. **Available Review Aspects:**
    - **comments** - Analyze code comment accuracy and maintainability
    - **tests** - Review test coverage quality and completeness
@@ -217,6 +225,12 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
 2. Can manually re-trigger review to verify fixes
 3. Or wait for automatic trigger on push
 ```
+
+## Error Handling:
+
+- **Always report failures back to the user** — if a step fails (PR not found, diff unavailable, agent errors), post a comment via `add_issue_comment` or output a clear message before stopping. Never end a review session silently after an error.
+- **Distinguish PR vs issue** — GitHub uses the same number namespace for issues and PRs. A 404 on `pull_request_read` may mean the number is an issue. Always check `issue_read` as a fallback before reporting "not found."
+- **Graceful degradation** — if one agent fails, report its failure in the summary and continue with other agents. Only abort the entire review if the PR metadata itself is inaccessible.
 
 ## Notes:
 
