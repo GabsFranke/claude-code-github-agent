@@ -1,9 +1,15 @@
 fastapi==0.135.3
-uvicorn==0.42.0
+uvicorn==0.44.0
 pydantic==2.12.5
 langfuse==3.14.5
 httpx==0.28.1
-claude-agent-sdk>=0.1.54
+claude-agent-sdk>=0.1.58
 redis>=7.4.0
 PyJWT>=2.12.1
 PyYAML>=6.0.3
+tree-sitter>=0.25.2
+tree-sitter-languages>=1.10.2
+networkx>=3.6.1
+numpy>=2.4.4
+tiktoken>=0.12.0
+pathspec>=1.0.4

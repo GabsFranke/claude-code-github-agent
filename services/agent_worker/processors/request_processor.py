@@ -212,6 +212,9 @@ class RequestProcessor:
 
         logger.info(f"Built prompt: {prompt[:150]}...")
 
+        # Get context profile for structural context generation
+        context_profile = self.workflow_engine.get_context_profile(workflow_name)
+
         # Fetch repository context (CLAUDE.md and memory) for system prompt
         # These will be injected by the SDK factory, not prepended to user prompt
         claude_md = None
@@ -267,6 +270,7 @@ class RequestProcessor:
                 "user_query": user_query,
                 "event_data": event_data,
                 "parent_span_id": parent_span_id,  # For Langfuse trace linking
+                "context_profile": context_profile,  # Structural context config
             }
         )
 
