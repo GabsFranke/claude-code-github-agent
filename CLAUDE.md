@@ -75,33 +75,6 @@ When making changes to this codebase:
 ./check-code.sh --fast
 ```
 
-## Project Structure
-
-```
-claude-code-github-agent/
-├── services/
-│   ├── webhook/              # Receives GitHub webhooks
-│   ├── agent_worker/         # Coordinates jobs (workflow routing)
-│   ├── repo_sync/            # Manages bare repository cache
-│   └── sandbox_executor/     # Executes jobs in worktrees (YOU ARE HERE)
-├── shared/                   # Shared utilities (importable package)
-│   ├── config.py            # Pydantic configuration
-│   ├── queue.py             # Message queue abstraction
-│   ├── job_queue.py         # Job queue abstraction
-│   ├── github_auth.py       # GitHub App authentication
-│   └── exceptions.py        # Custom exceptions
-├── workflows/               # Workflow engine
-│   ├── engine.py           # YAML-based routing
-│   └── workflows.yaml      # Single source of truth for workflows
-├── prompts/                # System context for workflows
-├── subagents/              # Specialized subagent definitions
-├── plugins/                # Claude Code plugins
-│   ├── pr-review-toolkit/  # PR review commands & agents
-│   └── ci-failure-toolkit/ # CI failure analysis
-├── hooks/                  # Agent hooks
-└── tests/                  # Test suite
-```
-
 ## Working with Files
 
 ### Local File Operations

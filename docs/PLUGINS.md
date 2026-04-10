@@ -243,6 +243,41 @@ The Memory MCP server is used by:
 
 Memory files are stored in the shared `agent-memory` Docker volume at `/home/bot/agent-memory/{repo}/memory/`.
 
+### Codebase Tools MCP Server
+
+An MCP server that provides AST-based code search and file summaries for the current worktree:
+
+```
+mcp_servers/codebase_tools/
+├── server.py    # stdio-based MCP server
+├── tools.py     # search_code / file_summary implementations
+└── __init__.py
+```
+
+**Tools provided**:
+
+- `search_code(query, max_results)` - Tree-sitter query-based code search across the worktree
+- `file_summary(filepath)` - Structured analysis of a source file (definitions, imports, structure)
+
+Uses the shared tree-sitter language registry (`shared/ts_languages.py`) for multi-language support (10 languages with regex fallback).
+
+### Semantic Search MCP Server
+
+An MCP server that provides embedding-based semantic code search via Qdrant:
+
+```
+mcp_servers/semantic_search/
+├── server.py    # stdio-based MCP server
+├── tools.py     # semantic_search implementation
+└── __init__.py
+```
+
+**Tools provided**:
+
+- `semantic_search(query, max_results, file_filter, kind_filter)` - Natural language code search using Gemini embeddings and Qdrant vector similarity
+
+Requires prior indexing by the Indexing Worker. Connects to Qdrant and uses `gemini-embedding-001` for query embedding. Supports filtering by filepath pattern and chunk kind (function, class, method).
+
 ### Adding a Custom MCP Server
 
 MCP servers can be configured in `ClaudeAgentOptions`:

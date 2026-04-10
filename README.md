@@ -17,6 +17,9 @@ AI-powered GitHub agent that automatically reviews pull requests and responds to
 - 🤝 **Specialized Subagents** - Delegates to focused agents (architecture review, security scanning, bug hunting, test writing)
 - 📝 **Per-repo Customization** - Reads CLAUDE.md configuration files from repository root
 - 📊 **Full Observability** - Self-hosted Langfuse integration for tracing tool calls and reasoning
+- 🗺️ **Structural Code Awareness** - Aider-style repomap with tree-sitter + PageRank for codebase understanding
+- 🔍 **Code Search Tools** - AST-based code search and file summaries via tree-sitter queries (10 languages)
+- 🔎 **Semantic Code Search** - Embedding-based code search across repositories (Gemini + Qdrant)
 
 ### Planned Features
 
@@ -220,6 +223,9 @@ GitHub Event → Webhook → Redis Queues → Worker (Workflow Engine) → Job Q
 - **Redis** - Message queue, job queue, and sync coordination
 - **Claude Agent SDK** - Autonomous coding agent with local file access
 - **GitHub MCP** - Official GitHub integration
+- **Codebase Context** - Structural repomap + AST code search + semantic search (3 layers)
+- **Indexing Worker** - Chunks repos, generates embeddings, stores in Qdrant
+- **Qdrant** - Vector database for semantic code search
 
 **Scaling**: `docker-compose up --scale sandbox_worker=10 -d`
 
@@ -254,6 +260,7 @@ GitHub Event → Webhook → Redis Queues → Worker (Workflow Engine) → Job Q
 - `ANTHROPIC_DEFAULT_SONNET_MODEL`: Override model name
 - `LANGFUSE_PUBLIC_KEY`: Langfuse API key (pre-configured for self-hosted setup)
 - `LANGFUSE_SECRET_KEY`: Langfuse secret key (pre-configured for self-hosted setup)
+- `GEMINI_API_KEY`: Google Gemini API key for semantic code search embeddings
 
 ### Using Alternative AI Providers
 
