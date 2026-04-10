@@ -17,41 +17,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .file_tree import EXCLUDE_DIRS, EXCLUDE_FILES, EXCLUDE_SUFFIXES, _load_ignore_spec
+from .ts_languages import (
+    EXTENSION_MAP,
+    LanguageConfig,
+    get_language,
+    get_language_config,
+)
 
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Tree-sitter setup (lazy-loaded)
-# ---------------------------------------------------------------------------
-
-_ts_languages: dict | None = None
-_ts_parser_cache: dict[str, object] = {}
-
-
-def _get_ts_languages() -> dict | None:
-    """Lazily load tree-sitter language bundle."""
-    global _ts_languages
-    if _ts_languages is None:
-        try:
-            import tree_sitter_languages  # type: ignore[import-untyped]
-
-            _ts_languages = tree_sitter_languages
-        except ImportError:
-            logger.warning("tree_sitter_languages not available, falling back to regex")
-            _ts_languages = {}
-    return _ts_languages
-
-
-# Map file extensions to tree-sitter language names
-LANGUAGE_MAP: dict[str, str] = {
-    ".py": "python",
-    # Future:
-    # ".ts": "typescript",
-    # ".tsx": "tsx",
-    # ".go": "go",
-    # ".js": "javascript",
-    # ".rs": "rust",
-}
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -77,35 +50,6 @@ class _RankedTag:
     tag: Tag
     score: float = 0.0
 
-
-# ---------------------------------------------------------------------------
-# Python tree-sitter queries
-# ---------------------------------------------------------------------------
-
-# S-expression queries for extracting definitions from Python AST.
-# These capture the most important structural elements.
-_PYTHON_DEFINITION_QUERIES = [
-    # Class definitions
-    ("class", "(class_definition name: (identifier) @name) @node"),
-    # Function definitions
-    ("function", "(function_definition name: (identifier) @name) @node"),
-    # Top-level assignments (variables, constants)
-    ("variable", "(assignment left: (identifier) @name) @node"),
-    # Decorated definitions
-    (
-        "decorator",
-        "(decorated_definition definition: (class_definition name: (identifier) @name)) @node",
-    ),
-    (
-        "decorator",
-        "(decorated_definition definition: (function_definition name: (identifier) @name)) @node",
-    ),
-]
-
-_PYTHON_REFERENCE_QUERIES = [
-    # All identifier references
-    ("identifier", "(identifier) @name"),
-]
 
 # ---------------------------------------------------------------------------
 # Regex fallback patterns (Tier 2)
@@ -264,65 +208,46 @@ class RepoMap:
         ext = filepath.suffix.lower()
         rel = str(filepath.relative_to(self.repo_path)).replace("\\", "/")
 
-        if ext not in LANGUAGE_MAP:
-            # Try regex fallback for any text file
-            return self._get_tags_regex(filepath, rel, "_generic")
+        lang_name = EXTENSION_MAP.get(ext)
+        if lang_name:
+            config = get_language_config(lang_name)
+            if config:
+                tags = self._get_tags_treesitter(filepath, rel, config)
+                if tags is not None:
+                    return tags
 
-        # Try tree-sitter first
-        ts_lang = LANGUAGE_MAP[ext]
-        tags = self._get_tags_treesitter(filepath, rel, ts_lang)
-        if tags is not None:
-            return tags
-
-        # Fallback to regex for the specific language
-        lang_patterns = _REGEX_PATTERNS.get(ts_lang)
-        if lang_patterns:
-            return self._get_tags_regex(filepath, rel, ts_lang)
+                # Fallback to regex for the specific language
+                lang_patterns = _REGEX_PATTERNS.get(lang_name)
+                if lang_patterns:
+                    return self._get_tags_regex(filepath, rel, lang_name)
 
         # Generic regex fallback
         return self._get_tags_regex(filepath, rel, "_generic")
 
     def _get_tags_treesitter(
-        self, filepath: Path, rel_path: str, language: str
+        self, filepath: Path, rel_path: str, config: LanguageConfig
     ) -> list[Tag] | None:
         """Extract tags using tree-sitter. Returns None on failure."""
         try:
-            ts_langs = _get_ts_languages()
-            if not ts_langs:
-                return None
-
-            lang = ts_langs.get_language(language)  # type: ignore[attr-defined]
+            lang = get_language(config.name)
             if lang is None:
                 return None
 
             source = filepath.read_bytes()
 
-            # tree-sitter >= 0.22 API
-            try:
-                from tree_sitter import Parser  # type: ignore[import-untyped]
+            from tree_sitter import Parser  # type: ignore[import-untyped]
 
-                parser = Parser(lang)
-            except (ImportError, TypeError):
-                # Older API
-                import tree_sitter as ts  # type: ignore[import-untyped]
+            parser = Parser(lang)  # type: ignore[arg-type]
 
-                parser = ts.Parser()
-                try:
-                    parser.set_language(lang)  # type: ignore[attr-defined]
-                except Exception:
-                    return None
-
-            tree = parser.parse(source)  # type: ignore[unreachable]
-            if tree is None:  # type: ignore[unreachable]
+            tree = parser.parse(source)
+            if tree is None:
                 return None  # type: ignore[unreachable]
 
             root = tree.root_node
             tags: list[Tag] = []
 
-            # Extract definitions
-            for category, query_str in _PYTHON_DEFINITION_QUERIES:
-                if language != "python":
-                    continue
+            # Extract definitions using per-language queries from config
+            for category, query_str in config.definition_queries:
                 try:
                     matches = self._run_ts_query(root, query_str, source)
                     for match in matches:
@@ -346,34 +271,33 @@ class RepoMap:
                     logger.debug(f"Query failed for {rel_path}: {e}")
                     continue
 
-            # Extract references (identifiers)
-            if language == "python":
-                for category, query_str in _PYTHON_REFERENCE_QUERIES:
-                    try:
-                        matches = self._run_ts_query(root, query_str, source)
-                        for match in matches:
-                            name = match.get("name")
-                            line = match.get("line")
-                            if name and line is not None:
-                                # Skip if already captured as a definition on same line
-                                if any(
-                                    t.name == name
-                                    and t.line == line
-                                    and t.kind == "definition"
-                                    for t in tags
-                                ):
-                                    continue
-                                tags.append(
-                                    Tag(
-                                        filepath=rel_path,
-                                        name=name,
-                                        kind="reference",
-                                        line=line,
-                                        category=category,
-                                    )
+            # Extract references using per-language queries from config
+            for category, query_str in config.reference_queries:
+                try:
+                    matches = self._run_ts_query(root, query_str, source)
+                    for match in matches:
+                        name = match.get("name")
+                        line = match.get("line")
+                        if name and line is not None:
+                            # Skip if already captured as a definition on same line
+                            if any(
+                                t.name == name
+                                and t.line == line
+                                and t.kind == "definition"
+                                for t in tags
+                            ):
+                                continue
+                            tags.append(
+                                Tag(
+                                    filepath=rel_path,
+                                    name=name,
+                                    kind="reference",
+                                    line=line,
+                                    category=category,
                                 )
-                    except Exception as e:
-                        logger.debug(f"Reference query failed for {rel_path}: {e}")
+                            )
+                except Exception as e:
+                    logger.debug(f"Reference query failed for {rel_path}: {e}")
 
             return tags if tags else None
 

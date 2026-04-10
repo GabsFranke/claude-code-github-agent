@@ -385,6 +385,7 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
 
         builder.with_memory_mcp(repo)
         builder.with_codebase_tools(workspace)
+        builder.with_semantic_search(repo)
 
         # Get parent span ID for trace linking (if enabled)
         parent_span_id = job_data.get("parent_span_id")
@@ -395,7 +396,7 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
             .with_full_toolset()
             .with_agents(AGENTS)
             .with_langfuse_hooks(parent_span_id=parent_span_id)
-            .with_transcript_staging(repo, workflow_name)
+            .with_transcript_staging(repo, workflow_name, ref=ref)
             .with_writable_dir(f"/home/bot/agent-memory/{repo}/memory")
             .with_system_prompt(system_context)  # Workflow-specific system context
             .with_repository_context(

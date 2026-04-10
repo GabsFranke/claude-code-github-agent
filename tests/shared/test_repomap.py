@@ -130,7 +130,7 @@ class TestRepoMapTagExtraction:
     @pytest.mark.asyncio
     async def test_regex_fallback(self, tmp_path: Path):
         """Test that regex fallback works for files without tree-sitter support."""
-        # Create a Go file (not in LANGUAGE_MAP)
+        # Create a Go file (tests regex fallback when tree-sitter-go is not installed)
         (tmp_path / "main.go").write_text(
             "package main\n\n"
             'import "fmt"\n\n'

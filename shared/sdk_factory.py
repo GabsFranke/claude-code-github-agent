@@ -222,6 +222,46 @@ class SDKOptionsBuilder:
         }
         return self
 
+    def with_semantic_search(self, repo: str) -> "SDKOptionsBuilder":
+        """Add semantic search MCP server for embedding-based code queries.
+
+        Only registers the server if indexing is enabled and both Qdrant
+        and Voyage API are configured. If unavailable, the tool gracefully
+        returns empty results.
+
+        Args:
+            repo: Repository identifier (e.g., "owner/repo") for collection lookup.
+
+        Returns:
+            Self for method chaining
+        """
+        indexing_enabled = os.getenv("INDEXING_ENABLED", "false").lower() == "true"
+        qdrant_url = os.getenv("QDRANT_URL")
+        gemini_key = os.getenv("GEMINI_API_KEY")
+
+        if indexing_enabled and qdrant_url and gemini_key:
+            self._mcp_servers["semantic-search"] = {
+                "type": "stdio",
+                "command": "python3",
+                "args": ["/app/mcp_servers/semantic_search/server.py"],
+                "env": {
+                    "REPO_PATH": self.cwd,
+                    "GITHUB_REPOSITORY": repo,
+                    "QDRANT_URL": qdrant_url,
+                    "GEMINI_API_KEY": gemini_key,
+                    "EMBEDDING_DIMENSION": os.getenv("EMBEDDING_DIMENSION", "1024"),
+                    "PYTHONPATH": "/app",
+                },
+            }
+            logger.info(f"Semantic search MCP registered for {repo}")
+        else:
+            logger.debug(
+                "Semantic search skipped: INDEXING_ENABLED not set or "
+                "Qdrant/Gemini not configured"
+            )
+
+        return self
+
     # Plugin methods (à la carte)
 
     def with_auto_discovered_plugins(self) -> "SDKOptionsBuilder":
@@ -293,6 +333,7 @@ class SDKOptionsBuilder:
             "mcp__codebase-tools__find_references",
             "mcp__codebase-tools__search_codebase",
             "mcp__codebase-tools__read_file_summary",
+            "mcp__semantic-search__semantic_search",
         )
 
     def with_retrospector_toolset(self) -> "SDKOptionsBuilder":
@@ -355,7 +396,7 @@ class SDKOptionsBuilder:
         return self
 
     def with_transcript_staging(
-        self, repo: str, workflow_name: str | None = None
+        self, repo: str, workflow_name: str | None = None, ref: str | None = None
     ) -> "SDKOptionsBuilder":
         """Add post-session hooks for transcript staging and job enqueueing.
 
@@ -365,6 +406,7 @@ class SDKOptionsBuilder:
         Args:
             repo: Repository identifier (e.g., "owner/repo")
             workflow_name: Optional workflow name for retrospection context
+            ref: Git ref that was indexed (e.g., "refs/heads/main")
 
         Returns:
             Self for method chaining
@@ -373,6 +415,9 @@ class SDKOptionsBuilder:
         retrospector_enabled = (
             os.getenv("RETROSPECTOR_ENABLED", "true").lower() == "true"
         )
+        indexing_enabled = os.getenv(
+            "INDEXING_ENABLED", "false"
+        ).lower() == "true" and bool(os.getenv("GEMINI_API_KEY"))
 
         # Capture context from builder for hooks to use
         repo_context = self._repo_context
@@ -434,6 +479,14 @@ class SDKOptionsBuilder:
                     except Exception as e:
                         logger.error(
                             f"Failed to enqueue retrospector job: {e}", exc_info=True
+                        )
+
+                if indexing_enabled:
+                    try:
+                        await _enqueue_indexing_job(repo, event, ref=ref)
+                    except Exception as e:
+                        logger.error(
+                            f"Failed to enqueue indexing job: {e}", exc_info=True
                         )
             return {"success": True}
 
@@ -939,3 +992,37 @@ async def _enqueue_retrospector_job(
             await rc.aclose()  # type: ignore[attr-defined]
     except Exception as e:
         logger.warning(f"Failed to enqueue retrospector job for {repo}: {e}")
+
+
+async def _enqueue_indexing_job(
+    repo: str, hook_event: str, ref: str | None = None
+) -> None:
+    """Enqueue a code indexing job for embedding-based semantic search.
+
+    Fires after agent sessions complete to keep the vector index up-to-date
+    with any code changes the agent (or external contributors) made.
+
+    Args:
+        repo: Repository identifier
+        hook_event: Hook event name (Stop or SubagentStop)
+        ref: Git ref to index (defaults to "main")
+    """
+    try:
+        import redis.asyncio as aioredis
+
+        pool = await _get_redis_pool()
+        rc = aioredis.Redis(connection_pool=pool)
+        try:
+            payload = json.dumps(
+                {
+                    "repo": repo,
+                    "ref": ref or "main",
+                    "trigger": f"job_{hook_event.lower()}",
+                }
+            )
+            await rc.rpush("agent:indexing:requests", payload)  # type: ignore[misc]
+            logger.info(f"Enqueued indexing job for {repo} [{hook_event}] ref={ref}")
+        finally:
+            await rc.aclose()  # type: ignore[attr-defined]
+    except Exception as e:
+        logger.warning(f"Failed to enqueue indexing job for {repo}: {e}")

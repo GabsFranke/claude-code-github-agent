@@ -98,6 +98,9 @@ services:
       - SDK_DEBUG=${SDK_DEBUG:-false}
       - MEMORY_WORKER_ENABLED=${MEMORY_WORKER_ENABLED:-true}
       - RETROSPECTOR_ENABLED=${RETROSPECTOR_ENABLED:-true}
+      - INDEXING_ENABLED=${INDEXING_ENABLED:-false}
+      - QDRANT_URL=http://qdrant:6333
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
     depends_on:
       redis:
         condition: service_healthy
@@ -356,6 +359,51 @@ services:
       retries: 3
       start_period: 10s
 
+  # Vector database for semantic code search
+  qdrant:
+    image: qdrant/qdrant:v1.17.1
+    volumes:
+      - qdrant-storage:/qdrant/storage
+    ports:
+      - "127.0.0.1:6333:6333"
+      - "127.0.0.1:6334:6334"
+    environment:
+      QDRANT__SERVICE__GRPC_PORT: 6334
+    healthcheck:
+      test: ["CMD-SHELL", "exit 0"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  # Background worker: chunks code, generates embeddings, stores in Qdrant
+  indexing_worker:
+    build:
+      context: .
+      dockerfile: services/indexing_worker/Dockerfile
+    command: python -m services.indexing_worker.indexing_worker
+    env_file: .env
+    volumes:
+      - repo-cache:/var/cache/repos:rw
+    environment:
+      - PYTHONPATH=/app
+      - REDIS_URL=redis://redis:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-myredissecret}
+      - QDRANT_URL=http://qdrant:6333
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - INDEXING_ENABLED=${INDEXING_ENABLED:-true}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-gemini-embedding-001}
+      - EMBEDDING_DIMENSION=${EMBEDDING_DIMENSION:-1024}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - GITHUB_APP_ID=${GITHUB_APP_ID}
+      - GITHUB_INSTALLATION_ID=${GITHUB_INSTALLATION_ID}
+      - GITHUB_PRIVATE_KEY=${GITHUB_PRIVATE_KEY}
+    depends_on:
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+
 volumes:
   agent-memory:
   repo-cache:
@@ -364,3 +412,4 @@ volumes:
   langfuse-clickhouse-data:
   langfuse-clickhouse-logs:
   langfuse-minio-data:
+  qdrant-storage:

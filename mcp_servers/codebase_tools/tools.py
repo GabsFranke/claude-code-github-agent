@@ -15,11 +15,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from shared.repomap import (
-    LANGUAGE_MAP,
-    Tag,
-    _get_ts_languages,
-)
+from shared.repomap import Tag
+from shared.ts_languages import EXTENSION_MAP, get_language
 
 logger = logging.getLogger(__name__)
 
@@ -146,31 +143,21 @@ def _get_or_parse(filepath: Path) -> tuple[Any, bytes | None]:
     if cache_key in _ast_cache:
         return _ast_cache[cache_key]
 
-    ts_langs = _get_ts_languages()
-    if not ts_langs:
-        return None, None
-
     ext = filepath.suffix.lower()
-    lang_name = LANGUAGE_MAP.get(ext)
+    lang_name = EXTENSION_MAP.get(ext)
     if not lang_name:
         return None, None
 
     try:
-        lang = ts_langs.get_language(lang_name)
+        lang = get_language(lang_name)
         if lang is None:
             return None, None
 
         source = filepath.read_bytes()
 
-        try:
-            from tree_sitter import Parser
+        from tree_sitter import Parser
 
-            parser = Parser(lang)
-        except (ImportError, TypeError):
-            import tree_sitter as ts
-
-            parser = ts.Parser()
-            parser.set_language(lang)
+        parser = Parser(lang)  # type: ignore[arg-type]
 
         tree = parser.parse(source)
         if tree is None:
@@ -482,7 +469,7 @@ def read_file_summary(file_path: str, max_lines: int = 80) -> dict[str, Any]:
         raise FileNotFoundError(f"File not found: {file_path}")
 
     ext = resolved.suffix.lower()
-    language = LANGUAGE_MAP.get(ext, "unknown")
+    language = EXTENSION_MAP.get(ext, "unknown")
 
     try:
         source_text = resolved.read_text(encoding="utf-8", errors="replace")
