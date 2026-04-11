@@ -27,6 +27,9 @@ logger = logging.getLogger(__name__)
 # Max lines per chunk before splitting at child boundaries
 DEFAULT_MAX_LINES = 150
 
+# Max lines per function before splitting at nested block boundaries
+MAX_FUNCTION_LINES = 200
+
 # ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------
@@ -44,6 +47,21 @@ class Chunk:
     end_line: int  # 1-based inclusive
     content: str  # Full source text of the chunk
     parent: str | None = None  # Enclosing class name for methods
+
+    @property
+    def embed_text(self) -> str:
+        """Content with structural context header for embedding.
+
+        The header gives the embedding model awareness of where this chunk
+        lives in the codebase structure, improving retrieval quality.
+        Stored content in Qdrant remains raw source (via self.content).
+        """
+        header = f"# {self.filepath}"
+        if self.parent:
+            header += f" | {self.kind}: {self.parent}.{self.name}"
+        else:
+            header += f" | {self.kind}: {self.name}"
+        return f"{header}\n{self.content}"
 
 
 # ---------------------------------------------------------------------------
@@ -225,15 +243,17 @@ def _extract_chunks(
             # Unwrap decorator to find actual definition
             for sub in child.children:
                 if sub.type in config.function_types:
-                    chunks.append(
-                        _make_chunk(sub, source, rel_path, config.name, wrapper=child)
+                    chunks.extend(
+                        _make_function_chunks(
+                            sub, source, rel_path, config.name, wrapper=child
+                        )
                     )
                 elif sub.type in config.class_types:
                     chunks.extend(
                         _make_class_chunks(sub, source, rel_path, config, wrapper=child)
                     )
         elif child.type in config.function_types:
-            chunks.append(_make_chunk(child, source, rel_path, config.name))
+            chunks.extend(_make_function_chunks(child, source, rel_path, config.name))
         elif child.type in config.class_types:
             chunks.extend(_make_class_chunks(child, source, rel_path, config))
 
@@ -334,6 +354,124 @@ def _make_chunk(
         start_line=start_line,
         end_line=end_line,
         content=content,
+    )
+
+
+def _make_function_chunks(
+    node: Any,
+    source: bytes,
+    rel_path: str,
+    language: str,
+    wrapper: Any | None = None,
+) -> list[Chunk]:
+    """Extract a function chunk, splitting oversized functions at block boundaries."""
+    start_node = wrapper if wrapper else node
+    start_line = start_node.start_point[0] + 1
+    end_line = node.end_point[0] + 1
+    span = end_line - start_line + 1
+
+    if span <= MAX_FUNCTION_LINES:
+        return [_make_chunk(node, source, rel_path, language, wrapper=wrapper)]
+
+    return _split_oversized_function(node, source, rel_path, language, wrapper=wrapper)
+
+
+# Block types that represent meaningful split points across languages
+_SPLIT_BLOCK_TYPES = frozenset(
+    {
+        "try_statement",
+        "if_statement",
+        "for_statement",
+        "while_statement",
+        "with_statement",
+        "match_statement",
+    }
+)
+
+
+def _split_oversized_function(
+    node: Any,
+    source: bytes,
+    rel_path: str,
+    language: str,
+    wrapper: Any | None = None,
+) -> list[Chunk]:
+    """Split an oversized function at nested block boundaries.
+
+    Looks for top-level block statements (try, if, for, while, with, match)
+    within the function body and splits at those boundaries. Each part
+    includes the function signature for context.
+
+    Falls back to a single chunk if there aren't enough split points.
+    """
+    start_node = wrapper if wrapper else node
+    start_line = start_node.start_point[0] + 1
+    end_line = node.end_point[0] + 1
+
+    func_name = _extract_name(node, source)
+
+    # Find direct children that are block statements
+    block_starts: list[tuple[int, int]] = []  # (start_line, end_line)
+    for child in node.children:
+        if child.type in _SPLIT_BLOCK_TYPES:
+            block_starts.append((child.start_point[0] + 1, child.end_point[0] + 1))
+
+    if len(block_starts) < 2:
+        # Not enough structure to split meaningfully
+        return [_make_chunk(node, source, rel_path, language, wrapper=wrapper)]
+
+    # Find the function body start (first line after signature)
+    # The first non-trivia child after the function name gives us the body
+    body_start = start_line
+    for child in node.children:
+        if child.type in ("block", "function_body", "statement_block"):
+            body_start = child.start_point[0] + 1
+            break
+
+    # Build split boundaries: [body_start, block1.start, block2.start, ..., end_line+1]
+    boundaries = [body_start]
+    for block_start, _ in block_starts:
+        if block_start > boundaries[-1]:
+            boundaries.append(block_start)
+    boundaries.append(end_line + 1)
+
+    lines = source.split(b"\n")
+
+    # Include the function signature as a prefix for each part
+    sig_lines = lines[start_line - 1 : body_start - 1]
+    sig_text = b"\n".join(sig_lines).decode("utf-8", errors="replace") + "\n"
+
+    chunks: list[Chunk] = []
+    for i in range(len(boundaries) - 1):
+        part_start = boundaries[i]
+        part_end = boundaries[i + 1] - 1
+
+        if part_start > part_end:
+            continue
+
+        # Each part includes the function signature for context
+        part_text = b"\n".join(lines[part_start - 1 : part_end]).decode(
+            "utf-8", errors="replace"
+        )
+        content = sig_text + part_text
+
+        part_num = i + 1
+        chunks.append(
+            Chunk(
+                filepath=rel_path,
+                name=f"{func_name} (part {part_num})",
+                kind="function",
+                language=language,
+                start_line=part_start,
+                end_line=part_end,
+                content=content,
+            )
+        )
+
+    return (
+        chunks
+        if chunks
+        else [_make_chunk(node, source, rel_path, language, wrapper=wrapper)]
     )
 
 

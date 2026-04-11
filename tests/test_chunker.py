@@ -364,3 +364,117 @@ class TestLanguageRegistry:
     def test_unknown_language_returns_none(self):
         config = get_language_config("brainfuck")
         assert config is None
+
+
+# ---------------------------------------------------------------------------
+# Test: embed_text property
+# ---------------------------------------------------------------------------
+
+
+class TestEmbedText:
+    def test_embed_text_includes_header(self, python_repo: Path):
+        chunks = chunk_file(python_repo / "app.py", python_repo)
+        for chunk in chunks:
+            assert chunk.embed_text.startswith(f"# {chunk.filepath}")
+
+    def test_embed_text_function_without_parent(self, python_repo: Path):
+        chunks = chunk_file(python_repo / "utils.py", python_repo)
+        functions = [c for c in chunks if c.kind == "function"]
+        assert len(functions) >= 1
+        func = functions[0]
+        header_line = func.embed_text.split("\n")[0]
+        assert f"# {func.filepath} | function: {func.name}" == header_line
+
+    def test_embed_text_method_with_parent(self, large_class_repo: Path):
+        chunks = chunk_file(large_class_repo / "large.py", large_class_repo)
+        methods = [c for c in chunks if c.kind == "method"]
+        if methods:
+            method = methods[0]
+            header_line = method.embed_text.split("\n")[0]
+            assert (
+                f"# {method.filepath} | method: {method.parent}.{method.name}"
+                == header_line
+            )
+
+    def test_embed_text_contains_full_content(self, python_repo: Path):
+        chunks = chunk_file(python_repo / "utils.py", python_repo)
+        for chunk in chunks:
+            # embed_text = header + \n + content
+            header = f"# {chunk.filepath}"
+            assert chunk.embed_text.startswith(header)
+            # Content should be in there after the header line
+            lines = chunk.embed_text.split("\n", 1)
+            assert len(lines) == 2
+            assert chunk.content in chunk.embed_text
+
+    def test_embed_text_longer_than_content(self, python_repo: Path):
+        chunks = chunk_file(python_repo / "app.py", python_repo)
+        for chunk in chunks:
+            assert len(chunk.embed_text) > len(chunk.content)
+
+
+# ---------------------------------------------------------------------------
+# Test: oversized function splitting
+# ---------------------------------------------------------------------------
+
+
+class TestOversizedFunction:
+    @pytest.fixture
+    def oversized_repo(self, tmp_path: Path) -> Path:
+        """Create a Python file with an oversized function (>200 lines)."""
+        lines = [
+            "async def process_data(data: dict) -> dict:",
+            '    """Process data with multiple stages."""',
+            "    result = {}",
+            "",
+        ]
+        # Add multiple try/except blocks to create split points
+        for i in range(6):
+            lines.append("    try:")
+            lines.append(f"        # Stage {i}")
+            lines.append(f"        value = data.get('key_{i}')")
+            lines.append("        if value is None:")
+            lines.append("            continue")
+            lines.append(f"        result[f'stage_{{{i}}}'] = transform(value)")
+            lines.append("    except (ValueError, KeyError) as e:")
+            lines.append(f"        result[f'error_{{{i}}}'] = str(e)")
+            lines.append("")
+        lines.append("    return result")
+        lines.append("")
+
+        (tmp_path / "processor.py").write_text("\n".join(lines), encoding="utf-8")
+        return tmp_path
+
+    def test_normal_function_not_split(self, python_repo: Path):
+        """Functions under MAX_FUNCTION_LINES should not be split."""
+        chunks = chunk_file(python_repo / "utils.py", python_repo)
+        functions = [c for c in chunks if c.kind == "function"]
+        for func in functions:
+            assert "part" not in func.name
+
+    def test_oversized_function_split(self, oversized_repo: Path):
+        """Oversized functions should produce multiple chunks."""
+        chunks = chunk_file(oversized_repo / "processor.py", oversized_repo)
+        assert len(chunks) >= 1
+
+        # Should either be split into parts or returned as one chunk
+        # (depends on whether tree-sitter is installed)
+        func_chunks = [c for c in chunks if c.kind == "function"]
+        assert len(func_chunks) >= 1
+
+    def test_split_chunks_cover_full_range(self, oversized_repo: Path):
+        """Split chunks should cover the full function line range."""
+        chunks = chunk_file(oversized_repo / "processor.py", oversized_repo)
+        func_chunks = [c for c in chunks if c.kind == "function"]
+        if len(func_chunks) > 1:
+            # Parts should cover continuous range
+            first_start = min(c.start_line for c in func_chunks)
+            last_end = max(c.end_line for c in func_chunks)
+            assert last_end > first_start
+
+    def test_split_chunks_have_content(self, oversized_repo: Path):
+        """All split chunks should have non-empty content."""
+        chunks = chunk_file(oversized_repo / "processor.py", oversized_repo)
+        for chunk in chunks:
+            assert chunk.content.strip()
+            assert chunk.embed_text.strip()

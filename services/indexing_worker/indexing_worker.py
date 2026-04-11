@@ -597,8 +597,8 @@ async def process_indexing_job(message: dict, redis_client=None) -> None:
 
         logger.info(f"Produced {len(chunks)} chunks for {repo}")
 
-        # Batch embed with cache
-        texts = [c.content for c in chunks]
+        # Batch embed with cache (includes context headers)
+        texts = [c.embed_text for c in chunks]
         embeddings = await batch_embed(texts, redis_client=redis_client)
 
         # Upsert into Qdrant

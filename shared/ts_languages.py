@@ -110,19 +110,42 @@ LANGUAGES: dict[str, LanguageConfig] = {
                 "(function_declaration name: (identifier) @name) @node",
             ),
             (
+                "function",
+                "(generator_function_declaration name: (identifier) @name) @node",
+            ),
+            (
+                "function",
+                "(export_statement (function_declaration name: (identifier) @name)) @node",
+            ),
+            (
+                "function",
+                "(variable_declarator name: (identifier) @name value: (arrow_function)) @node",
+            ),
+            (
                 "class",
                 "(class_declaration name: (identifier) @name) @node",
+            ),
+            (
+                "class",
+                "(export_statement (class_declaration name: (identifier) @name)) @node",
             ),
             (
                 "variable",
                 "(variable_declarator name: (identifier) @name) @node",
             ),
             (
+                "variable",
+                "(export_statement (lexical_declaration (variable_declarator name: (identifier) @name))) @node",
+            ),
+            (
                 "method",
                 "(method_definition name: (property_identifier) @name) @node",
             ),
         ),
-        reference_queries=(("identifier", "(identifier) @name"),),
+        reference_queries=(
+            ("identifier", "(identifier) @name"),
+            ("property", "(property_identifier) @name"),
+        ),
     ),
     "typescript": LanguageConfig(
         name="typescript",
@@ -145,8 +168,16 @@ LANGUAGES: dict[str, LanguageConfig] = {
                 "(function_declaration name: (identifier) @name) @node",
             ),
             (
+                "function",
+                "(export_statement (function_declaration name: (identifier) @name)) @node",
+            ),
+            (
+                "function",
+                "(variable_declarator name: (identifier) @name value: (arrow_function)) @node",
+            ),
+            (
                 "class",
-                "(class_declaration name: (identifier) @name) @node",
+                "(class_declaration name: (type_identifier) @name) @node",
             ),
             (
                 "interface",
@@ -157,16 +188,25 @@ LANGUAGES: dict[str, LanguageConfig] = {
                 "(type_alias_declaration name: (type_identifier) @name) @node",
             ),
             (
+                "enum",
+                "(enum_declaration name: (identifier) @name) @node",
+            ),
+            (
                 "method",
                 "(method_definition name: (property_identifier) @name) @node",
+            ),
+            (
+                "method",
+                "(abstract_method_signature name: (property_identifier) @name) @node",
+            ),
+            (
+                "namespace",
+                "(internal_module name: (identifier) @name) @node",
             ),
         ),
         reference_queries=(
             ("identifier", "(identifier) @name"),
-            (
-                "type_identifier",
-                "(type_identifier) @name",
-            ),
+            ("type_identifier", "(type_identifier) @name"),
         ),
     ),
     "tsx": LanguageConfig(
@@ -190,8 +230,16 @@ LANGUAGES: dict[str, LanguageConfig] = {
                 "(function_declaration name: (identifier) @name) @node",
             ),
             (
+                "function",
+                "(export_statement (function_declaration name: (identifier) @name)) @node",
+            ),
+            (
+                "function",
+                "(variable_declarator name: (identifier) @name value: (arrow_function)) @node",
+            ),
+            (
                 "class",
-                "(class_declaration name: (identifier) @name) @node",
+                "(class_declaration name: (type_identifier) @name) @node",
             ),
             (
                 "interface",
@@ -202,8 +250,20 @@ LANGUAGES: dict[str, LanguageConfig] = {
                 "(type_alias_declaration name: (type_identifier) @name) @node",
             ),
             (
+                "enum",
+                "(enum_declaration name: (identifier) @name) @node",
+            ),
+            (
                 "method",
                 "(method_definition name: (property_identifier) @name) @node",
+            ),
+            (
+                "method",
+                "(abstract_method_signature name: (property_identifier) @name) @node",
+            ),
+            (
+                "namespace",
+                "(internal_module name: (identifier) @name) @node",
             ),
         ),
         reference_queries=(
@@ -230,10 +290,33 @@ LANGUAGES: dict[str, LanguageConfig] = {
             ),
             (
                 "type",
-                "(type_declaration (type_identifier) @name) @node",
+                "(type_declaration (type_spec name: (type_identifier) @name)) @node",
+            ),
+            (
+                "type",
+                "(type_alias name: (type_identifier) @name) @node",
+            ),
+            (
+                "variable",
+                "(short_var_declaration left: (expression_list (identifier) @name)) @node",
+            ),
+            (
+                "variable",
+                "(var_spec name: (identifier) @name) @node",
+            ),
+            (
+                "constant",
+                "(const_spec name: (identifier) @name) @node",
+            ),
+            (
+                "method",
+                "(method_elem name: (field_identifier) @name) @node",
             ),
         ),
-        reference_queries=(("identifier", "(identifier) @name"),),
+        reference_queries=(
+            ("identifier", "(identifier) @name"),
+            ("field", "(field_identifier) @name"),
+        ),
     ),
     "rust": LanguageConfig(
         name="rust",
@@ -257,11 +340,42 @@ LANGUAGES: dict[str, LanguageConfig] = {
                 "(enum_item name: (type_identifier) @name) @node",
             ),
             (
+                "enum_variant",
+                "(enum_variant name: (identifier) @name) @node",
+            ),
+            (
                 "trait",
                 "(trait_item name: (type_identifier) @name) @node",
             ),
+            (
+                "impl",
+                "(impl_item type: (type_identifier) @name) @node",
+            ),
+            (
+                "constant",
+                "(const_item name: (identifier) @name) @node",
+            ),
+            (
+                "constant",
+                "(static_item name: (identifier) @name) @node",
+            ),
+            (
+                "type",
+                "(type_item name: (type_identifier) @name) @node",
+            ),
+            (
+                "module",
+                "(mod_item name: (identifier) @name) @node",
+            ),
+            (
+                "union",
+                "(union_item name: (type_identifier) @name) @node",
+            ),
         ),
-        reference_queries=(("identifier", "(identifier) @name"),),
+        reference_queries=(
+            ("identifier", "(identifier) @name"),
+            ("type_identifier", "(type_identifier) @name"),
+        ),
     ),
     "java": LanguageConfig(
         name="java",
@@ -287,6 +401,14 @@ LANGUAGES: dict[str, LanguageConfig] = {
                 "(interface_declaration name: (identifier) @name) @node",
             ),
             (
+                "enum",
+                "(enum_declaration name: (identifier) @name) @node",
+            ),
+            (
+                "enum_constant",
+                "(enum_body (enum_constant name: (identifier) @name)) @node",
+            ),
+            (
                 "method",
                 "(method_declaration name: (identifier) @name) @node",
             ),
@@ -294,8 +416,23 @@ LANGUAGES: dict[str, LanguageConfig] = {
                 "constructor",
                 "(constructor_declaration name: (identifier) @name) @node",
             ),
+            (
+                "field",
+                "(field_declaration declarator: (variable_declarator name: (identifier) @name)) @node",
+            ),
+            (
+                "annotation",
+                "(annotation_type_declaration name: (identifier) @name) @node",
+            ),
+            (
+                "record",
+                "(record_declaration name: (identifier) @name) @node",
+            ),
         ),
-        reference_queries=(("identifier", "(identifier) @name"),),
+        reference_queries=(
+            ("identifier", "(identifier) @name"),
+            ("type_identifier", "(type_identifier) @name"),
+        ),
     ),
     "c": LanguageConfig(
         name="c",
@@ -313,6 +450,26 @@ LANGUAGES: dict[str, LanguageConfig] = {
             (
                 "struct",
                 "(struct_specifier name: (type_identifier) @name) @node",
+            ),
+            (
+                "enum",
+                "(enum_specifier name: (type_identifier) @name) @node",
+            ),
+            (
+                "typedef",
+                "(type_definition declarator: (type_identifier) @name) @node",
+            ),
+            (
+                "macro",
+                "(preproc_def name: (identifier) @name) @node",
+            ),
+            (
+                "macro",
+                "(preproc_function_def name: (identifier) @name) @node",
+            ),
+            (
+                "union",
+                "(union_specifier name: (type_identifier) @name) @node",
             ),
         ),
         reference_queries=(
@@ -341,6 +498,34 @@ LANGUAGES: dict[str, LanguageConfig] = {
                 "struct",
                 "(struct_specifier name: (type_identifier) @name) @node",
             ),
+            (
+                "namespace",
+                "(namespace_definition name: (namespace_identifier) @name) @node",
+            ),
+            (
+                "enum",
+                "(enum_specifier name: (type_identifier) @name) @node",
+            ),
+            (
+                "typedef",
+                "(type_definition declarator: (type_identifier) @name) @node",
+            ),
+            (
+                "union",
+                "(union_specifier name: (type_identifier) @name) @node",
+            ),
+            (
+                "template_function",
+                "(template_declaration (function_definition declarator: (function_declarator declarator: (identifier) @name))) @node",
+            ),
+            (
+                "template_class",
+                "(template_declaration (class_specifier name: (type_identifier) @name)) @node",
+            ),
+            (
+                "using",
+                "(alias_declaration name: (type_identifier) @name) @node",
+            ),
         ),
         reference_queries=(
             ("identifier", "(identifier) @name"),
@@ -361,6 +546,10 @@ LANGUAGES: dict[str, LanguageConfig] = {
                 "(method name: (identifier) @name) @node",
             ),
             (
+                "method",
+                "(singleton_method name: (identifier) @name) @node",
+            ),
+            (
                 "class",
                 "(class name: (constant) @name) @node",
             ),
@@ -368,8 +557,15 @@ LANGUAGES: dict[str, LanguageConfig] = {
                 "module",
                 "(module name: (constant) @name) @node",
             ),
+            (
+                "constant",
+                "(assignment left: (constant) @name) @node",
+            ),
         ),
-        reference_queries=(("identifier", "(identifier) @name"),),
+        reference_queries=(
+            ("identifier", "(identifier) @name"),
+            ("constant", "(constant) @name"),
+        ),
     ),
 }
 

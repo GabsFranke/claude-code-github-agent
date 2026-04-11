@@ -249,7 +249,7 @@ class RepoMap:
             # Extract definitions using per-language queries from config
             for category, query_str in config.definition_queries:
                 try:
-                    matches = self._run_ts_query(root, query_str, source)
+                    matches = self._run_ts_query(lang, root, query_str, source)
                     for match in matches:
                         name_bytes = match.get("name")
                         node_bytes = match.get("node")
@@ -274,7 +274,7 @@ class RepoMap:
             # Extract references using per-language queries from config
             for category, query_str in config.reference_queries:
                 try:
-                    matches = self._run_ts_query(root, query_str, source)
+                    matches = self._run_ts_query(lang, root, query_str, source)
                     for match in matches:
                         name = match.get("name")
                         line = match.get("line")
@@ -306,50 +306,54 @@ class RepoMap:
             return None
 
     @staticmethod
-    def _run_ts_query(root_node, query_str: str, source: bytes) -> list[dict]:
+    def _run_ts_query(lang, root_node, query_str: str, source: bytes) -> list[dict]:
         """Execute a tree-sitter query and return matched captures.
+
+        Args:
+            lang: tree-sitter Language object (passed from caller).
+            root_node: Root node of the parsed tree.
+            query_str: Tree-sitter query string.
+            source: Original source bytes.
 
         Returns list of dicts with keys:
           - 'name': str value of the @name capture
           - 'node' | 'line': tuple (start_line, end_line) for @node, or int line for simple captures
         """
-        # We need the Language object to create the query
         results: list[dict] = []
         try:
-            # tree-sitter >= 0.22 API
-            from tree_sitter import Query  # type: ignore[import-untyped]
-
-            # Build query against the root's language
-            lang = root_node.language if hasattr(root_node, "language") else None
-            if lang is None:
-                return results
+            from tree_sitter import Query, QueryCursor  # type: ignore[import-untyped]
 
             q = Query(lang, query_str)
+            cursor = QueryCursor(q)
 
-            for match in q.matches(root_node):  # type: ignore[attr-defined]
-                capture_dict: dict[str, list] = {}
-                for node, name_list in match[
-                    1
-                ]:  # match[1] is list of (node, [capture_names])
-                    for cap_name in name_list:
-                        capture_dict.setdefault(cap_name, []).append(node)
+            # cursor.captures() returns dict[str, list[Node]]
+            # e.g. {'name': [Node, ...], 'node': [Node, ...]}
+            capture_dict = cursor.captures(root_node)
 
-                for name_node in capture_dict.get("name", []):
-                    text = source[name_node.start_byte : name_node.end_byte].decode(
-                        "utf-8", errors="replace"
+            # Type guard: ensure we got a dict back
+            if not capture_dict or not isinstance(capture_dict, dict):
+                return results
+
+            name_nodes = capture_dict.get("name", [])
+            node_nodes = capture_dict.get("node", [])
+
+            # Pair up name and node captures by index
+            for i, name_node in enumerate(name_nodes):
+                text = source[name_node.start_byte : name_node.end_byte].decode(
+                    "utf-8", errors="replace"
+                )
+                entry: dict = {"name": text}
+
+                if i < len(node_nodes):
+                    def_node = node_nodes[i]
+                    entry["node"] = (
+                        def_node.start_point[0] + 1,
+                        def_node.end_point[0] + 1,
                     )
-                    entry: dict = {"name": text}
+                else:
+                    entry["line"] = name_node.start_point[0] + 1
 
-                    if "node" in capture_dict:
-                        def_node = capture_dict["node"][0]
-                        entry["node"] = (
-                            def_node.start_point[0] + 1,
-                            def_node.end_point[0] + 1,
-                        )
-                    else:
-                        entry["line"] = name_node.start_point[0] + 1
-
-                    results.append(entry)
+                results.append(entry)
         except Exception as e:
             logger.debug(f"Query execution failed: {e}")
 
