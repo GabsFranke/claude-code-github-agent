@@ -33,7 +33,8 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
    - **all** - Run all applicable reviews (default)
 
 3. **Identify Changed Files**
-   - Run `git diff main --name-only` to see modified files in worktree
+   - Use `pull_request_read(method="get_files")` to get the PR's changed files from GitHub (preferred)
+   - Fallback: Run `git diff main --name-only` to see modified files in worktree
    - Agents can read files directly from the working directory
    - Identify file types and what reviews apply
 
@@ -104,7 +105,7 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
 
    **Option B: Full Review with Inline Comments**
    - Create pending review: `pull_request_review_write(method="create")`
-   - Add comments SEQUENTIALLY: `add_comment_to_pending_review()` for top 15-20 issues
+   - Add comments in PARALLEL: batch all `add_comment_to_pending_review()` calls in a single tool call block for top 15-20 issues
    - Submit review: `pull_request_review_write(method="submit_pending", event="COMMENT"/"REQUEST_CHANGES"/"APPROVE")`
 
    **If MCP not available:** Display results in console for manual review
