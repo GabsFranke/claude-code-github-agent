@@ -39,10 +39,6 @@ RUN chmod +x /app/hooks/langfuse_hook.py
 COPY services/sandbox_executor/requirements.txt ./
 RUN pip3 install --no-cache-dir -r requirements.txt
 
-# Try to install claude-agent-sdk directly as it might be required
-# If it's a private repo, we might need a requirements.txt with the correct index
-RUN pip3 install uvicorn fastapi pydantic httpx langfuse
-
 # Sandbox Executor source code
 COPY services/sandbox_executor/ /app/services/sandbox_executor/
 
@@ -57,8 +53,8 @@ RUN mkdir -p /var/cache/repos && chown -R bot:bot /var/cache/repos
 # Create agent memory directory structure and set ownership to bot user
 RUN mkdir -p /home/bot/.claude/projects && chown -R bot:bot /home/bot/.claude/projects
 
-# Create agent memory directory for persistent transcripts and set ownership to bot user
-RUN mkdir -p /home/bot/agent-memory && chown -R bot:bot /home/bot/agent-memory
+# Create agent memory directory and transcript staging directory
+RUN mkdir -p /home/bot/agent-memory /home/bot/transcripts && chown -R bot:bot /home/bot/agent-memory /home/bot/transcripts
 
 # Set ownership to bot user
 RUN chown -R bot:bot /app /home/bot/.claude
@@ -73,7 +69,6 @@ ENV USER=bot
 USER bot
 
 WORKDIR /app
-EXPOSE 8000
 
-# Run uvicorn using the top-level module path so Python can find both 'services' and 'subagents'
-CMD ["uvicorn", "services.sandbox_executor.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Default command runs the sandbox worker (docker-compose overrides this)
+CMD ["python", "-m", "services.sandbox_executor.sandbox_worker"]

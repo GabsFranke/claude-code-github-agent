@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import sys
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -343,3 +344,23 @@ class RepoSetupEngine:
             List of repository names
         """
         return list(self.config.repositories.keys())
+
+
+@lru_cache(maxsize=1)
+def get_repo_setup_engine(config_path: str | None = None) -> RepoSetupEngine:
+    """Get cached RepoSetupEngine instance (singleton per config path).
+
+    The engine is cached to avoid repeatedly parsing and validating repo-setup.yaml.
+    Since repository setup configuration is static during runtime, caching provides
+    performance benefits with no downsides.
+
+    Args:
+        config_path: Path to repo-setup.yaml file (defaults to repo-setup.yaml in project root)
+
+    Returns:
+        Cached RepoSetupEngine instance
+
+    Note:
+        Changes to repo-setup.yaml require a process restart to take effect.
+    """
+    return RepoSetupEngine(config_path)

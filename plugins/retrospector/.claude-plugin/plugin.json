@@ -1,0 +1,4 @@
+{
+  "name": "retrospector",
+  "description": "Analyses completed agent session transcripts for failures and missed opportunities, then proposes targeted improvements to agent instructions via a PR to develop"
+}
