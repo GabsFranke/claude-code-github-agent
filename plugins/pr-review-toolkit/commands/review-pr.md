@@ -33,8 +33,8 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
    - **all** - Run all applicable reviews (default)
 
 3. **Identify Changed Files**
-   - Run `git diff main --name-only` to see modified files in worktree
-   - Run `git diff main --stat` to understand the size/scope of changes
+   - Use `pull_request_read(method="get_files")` to get the PR's changed files from GitHub (preferred)
+   - Fallback: Run `git diff main --name-only` to see modified files in worktree
    - Agents can read files directly from the working directory
    - Identify file types and what reviews apply
 
