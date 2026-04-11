@@ -45,6 +45,20 @@ When analyzing comments, you will:
    - Clear rationale for why comments should be removed
    - Alternative approaches for conveying the same information
 
+## Workflow Guidelines
+
+When analyzing a PR, be efficient with your reading and verification:
+
+1. **Scope first**: Use `git diff` to identify which files have documentation, comment, or docstring changes. Prioritize those files over files that are purely code changes with no documentation impact.
+
+2. **Note claims during first read**: While reading each file the first time, actively note all claims, references to external APIs/tools, and cross-file dependencies. Record these in your working context so you can verify them later without re-reading the file.
+
+3. **Batch cross-reference checks**: After your initial reads, collect all noted claims and verify them together in a single batch of parallel Grep/Read calls. Do not verify claims one at a time across separate turns.
+
+4. **Do not re-read files**: Once you have fully read a file, refer to your earlier analysis of its content. Do not issue additional Read calls for sections you have already loaded unless the file has been modified since your first read.
+
+5. **Compile when done**: Once all claims have been verified and all issues identified, immediately compile and return your findings. Do not continue re-verifying already-confirmed issues.
+
 Your analysis output should be structured as:
 
 **Summary**: Brief overview of the comment analysis scope and findings
