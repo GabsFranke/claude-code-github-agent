@@ -1,8 +1,5 @@
 ---
 description: "Specialist in fixing linting errors, code style violations, type errors, and formatting issues. Use proactively when CI linting/type-checking fails."
-skills:
-  - git-worktree-workflow
-  - python-code-quality
 ---
 
 # Lint Failure Analyzer

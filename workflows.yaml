@@ -59,6 +59,19 @@ workflows:
       priority_focus: ["build_system", "test_structure"]
     skip_self: true # Explicitly set - don't auto-fix CI failures on bot's own PRs
 
+  test-toolkit:
+    triggers:
+      commands:
+        - /test
+    prompt:
+      template: "/test-toolkit:test {user_query}"
+      # Uses commands/test.md — same layout as pr-review-toolkit and ci-failure-toolkit
+    description: "Run a generic task via test-toolkit plugin to verify tool/skill inheritance"
+    context:
+      repomap_budget: 2048
+      personalized: false
+    skip_self: false
+
   generic:
     triggers:
       commands:
