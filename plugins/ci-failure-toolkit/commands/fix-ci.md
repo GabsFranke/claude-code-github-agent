@@ -132,11 +132,17 @@ Extract from $ARGUMENTS:
 
 **Your goal in this step: Gather complete log information to pass to specialist agents.**
 
+**⚠️ IMPORTANT: The run ID is a WORKFLOW RUN ID, NOT a commit SHA.**
+Do NOT pass it to `mcp__github__get_commit` or any tool expecting a commit SHA.
+Use ONLY the `mcp__github-actions__*` tools (or the REST API fallback below) with this ID.
+
 **CRITICAL: DO NOT use Read or Bash to access logs! They will fail with "Output too large".**
 
 **Use the GitHub Actions MCP tools - they fetch logs via API and handle size limits:**
 
 All tools use the `mcp__github-actions__` prefix. Call them directly as MCP tools.
+
+**If `mcp__github-actions__*` tools are not available** (no such tool error), use the REST API fallback below. Do NOT fall back to `gh` CLI — it is not installed in the sandbox.
 
 **IMPORTANT: You are ONLY gathering information here. Do NOT attempt to fix anything yourself.**
 
@@ -232,6 +238,87 @@ Useful for finding specific errors in very long logs
 - Read in 500-line chunks - manageable size
 - Errors are usually at the END, so start there
 - You can read the entire log by paginating through it
+
+#### REST API Fallback (when `mcp__github-actions__*` tools are unavailable)
+
+If calling any `mcp__github-actions__*` tool returns "no such tool" or similar, use the GitHub REST API
+directly via Python. The `GITHUB_TOKEN` environment variable is available in the sandbox.
+
+**Step A: Get workflow run summary and failed job IDs**
+
+```bash
+python3 -c "
+import os, json, urllib.request
+token = os.environ['GITHUB_TOKEN']
+owner = 'OWNER'
+repo = 'REPO'
+run_id = 'RUN_ID'
+headers = {'Authorization': f'Bearer {token}', 'Accept': 'application/vnd.github+json'}
+
+# Get run info
+req = urllib.request.Request(f'https://api.github.com/repos/{owner}/{repo}/actions/runs/{run_id}', headers=headers)
+run = json.loads(urllib.request.urlopen(req).read())
+print(f'Status: {run[\"status\"]} | Conclusion: {run[\"conclusion\"]} | Branch: {run[\"head_branch\"]}')
+
+# Get jobs for this run
+req2 = urllib.request.Request(f'https://api.github.com/repos/{owner}/{repo}/actions/runs/{run_id}/jobs', headers=headers)
+jobs = json.loads(urllib.request.urlopen(req2).read())
+for j in jobs['jobs']:
+    print(f'Job: {j[\"name\"]} | Status: {j[\"status\"]} | Conclusion: {j[\"conclusion\"]}')
+    if j['conclusion'] == 'failure':
+        for step in j['steps']:
+            if step['conclusion'] == 'failure':
+                print(f'  Step: {step[\"name\"]} | {step[\"conclusion\"]}')
+        print(f'  Job ID: {j[\"id\"]}')
+"
+```
+
+**Step B: Download and read job logs**
+
+Use the job ID from Step A to download logs. The logs endpoint returns a redirect to Azure blob storage — use `http.client` to follow it and pass the GitHub token as a query parameter:
+
+```bash
+python3 -c "
+import os, json, http.client
+token = os.environ['GITHUB_TOKEN']
+owner = 'OWNER'
+repo = 'REPO'
+job_id = 'JOB_ID'
+
+# Step 1: Get log download URL (returns 302 redirect)
+conn = http.client.HTTPSConnection('api.github.com')
+conn.request('GET', f'/repos/{owner}/{repo}/actions/jobs/{job_id}/logs', headers={
+    'Authorization': f'Bearer {token}',
+    'Accept': 'application/vnd.github+json'
+})
+resp = conn.getresponse()
+if resp.status == 302:
+    location = resp.getheader('Location')
+    # Step 2: Follow redirect to blob storage (no auth needed on redirect URL)
+    import urllib.request
+    log_data = urllib.request.urlopen(location).read().decode('utf-8', errors='replace')
+    lines = log_data.splitlines()
+    print(f'Total lines: {len(lines)}')
+    # Print last 200 lines (where errors usually are)
+    for line in lines[-200:]:
+        print(line)
+else:
+    print(f'Error: {resp.status}')
+    print(resp.read().decode())
+"
+```
+
+**Step C: Search logs for specific patterns (optional)**
+
+If you need to find specific errors in a large log, save the log to a file first, then grep:
+
+```bash
+# Save full log first (modify Step B to write to file instead of printing)
+python3 -c "..." > /tmp/job_logs.txt
+
+# Search for errors
+grep -n -i 'FAILED\|ERROR\|AssertionError\|Traceback' /tmp/job_logs.txt
+```
 
 ### Step 3: Analyze Failure Scope and Type
 
