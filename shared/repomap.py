@@ -337,18 +337,34 @@ class RepoMap:
             name_nodes = capture_dict.get("name", [])
             node_nodes = capture_dict.get("node", [])
 
-            # Pair up name and node captures by index
-            for i, name_node in enumerate(name_nodes):
+            # Pair each @name capture with its corresponding @node by
+            # checking byte-range containment: the name identifier is a
+            # descendant of the definition node, so its byte range falls
+            # inside the node's range.  Index-based pairing is unreliable
+            # because tree-sitter may return captures in different orders.
+            node_pool = list(node_nodes)  # copy so we can consume
+
+            for name_node in name_nodes:
                 text = source[name_node.start_byte : name_node.end_byte].decode(
                     "utf-8", errors="replace"
                 )
                 entry: dict = {"name": text}
 
-                if i < len(node_nodes):
-                    def_node = node_nodes[i]
+                # Find the @node whose byte range contains this @name
+                matched_node = None
+                for j, cand in enumerate(node_pool):
+                    if (
+                        cand.start_byte <= name_node.start_byte
+                        and name_node.end_byte <= cand.end_byte
+                    ):
+                        matched_node = cand
+                        node_pool.pop(j)
+                        break
+
+                if matched_node is not None:
                     entry["node"] = (
-                        def_node.start_point[0] + 1,
-                        def_node.end_point[0] + 1,
+                        matched_node.start_point[0] + 1,
+                        matched_node.end_point[0] + 1,
                     )
                 else:
                     entry["line"] = name_node.start_point[0] + 1
