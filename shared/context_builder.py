@@ -214,19 +214,12 @@ def _generate_repomap_sync(
     """Synchronous repomap generation (runs in thread pool)."""
     try:
         rm = RepoMap(repo_path)
-        # Run async method in a new event loop (we're in a thread)
-        loop = asyncio.new_event_loop()
-        try:
-            return loop.run_until_complete(
-                rm.get_repo_map(
-                    mentioned_files=mentioned_files,
-                    mentioned_idents=mentioned_idents,
-                    token_budget=token_budget,
-                    include_test_files=include_test_files,
-                )
-            )
-        finally:
-            loop.close()
+        return rm.get_repo_map(
+            mentioned_files=mentioned_files,
+            mentioned_idents=mentioned_idents,
+            token_budget=token_budget,
+            include_test_files=include_test_files,
+        )
     except Exception as e:
         logger.error(f"Repomap generation failed: {e}", exc_info=True)
         return ""

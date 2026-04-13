@@ -15,8 +15,9 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
-from .file_tree import EXCLUDE_DIRS, EXCLUDE_FILES, EXCLUDE_SUFFIXES, _load_ignore_spec
+from .file_tree import EXCLUDE_DIRS, EXCLUDE_FILES, EXCLUDE_SUFFIXES, load_ignore_spec
 from .ts_languages import (
     EXTENSION_MAP,
     LanguageConfig,
@@ -26,9 +27,16 @@ from .ts_languages import (
 
 logger = logging.getLogger(__name__)
 
+# Track which file extensions have already logged a tree-sitter warning
+# to avoid spamming logs for every file of an unsupported language.
+_warned_ts_failures: set[str] = set()
+
 # ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------
+
+
+TagKind = Literal["definition", "reference"]
 
 
 @dataclass
@@ -37,7 +45,7 @@ class Tag:
 
     filepath: str
     name: str
-    kind: str  # "definition" | "reference"
+    kind: TagKind
     line: int
     category: str  # "function", "class", "method", "variable", "import", etc.
     end_line: int = 0  # For definitions, the last line
@@ -105,9 +113,9 @@ class RepoMap:
     def __init__(self, repo_path: Path):
         self.repo_path = Path(repo_path)
         self._tags: list[Tag] = []
-        self._ignore_spec = _load_ignore_spec(self.repo_path)
+        self._ignore_spec = load_ignore_spec(self.repo_path)
 
-    async def get_repo_map(
+    def get_repo_map(
         self,
         mentioned_files: list[str] | None = None,
         mentioned_idents: list[str] | None = None,
@@ -147,6 +155,14 @@ class RepoMap:
     # ------------------------------------------------------------------
     # Tag extraction
     # ------------------------------------------------------------------
+
+    def extract_tags(self) -> list[Tag]:
+        """Extract tags from all source files in the repo.
+
+        Public API for callers that need the raw tag list (e.g.,
+        codebase_tools MCP server for find_definitions/find_references).
+        """
+        return self._extract_all_tags()
 
     def _extract_all_tags(self) -> list[Tag]:
         """Extract tags from all source files in the repo."""
@@ -302,7 +318,17 @@ class RepoMap:
             return tags if tags else None
 
         except Exception as e:
-            logger.debug(f"Tree-sitter failed for {rel_path}: {e}")
+            # Log first failure per extension at WARNING, subsequent at DEBUG
+            ext = filepath.suffix.lower()
+            if ext not in _warned_ts_failures:
+                _warned_ts_failures.add(ext)
+                logger.warning(
+                    f"Tree-sitter parsing failed for {ext} file "
+                    f"({rel_path}): {e}. Subsequent failures for {ext} "
+                    f"files will be logged at DEBUG."
+                )
+            else:
+                logger.debug(f"Tree-sitter failed for {rel_path}: {e}")
             return None
 
     @staticmethod

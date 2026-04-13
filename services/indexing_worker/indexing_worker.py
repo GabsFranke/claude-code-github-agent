@@ -21,6 +21,7 @@ from pathlib import Path
 
 from shared import setup_graceful_shutdown
 from shared.chunker import chunk_repo
+from shared.file_tree import collection_name_for_repo
 from shared.logging_utils import setup_logging
 from shared.queue import RedisQueue
 
@@ -28,16 +29,37 @@ from shared.queue import RedisQueue
 setup_logging(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 
-# Configuration
-INDEXING_ENABLED = os.getenv("INDEXING_ENABLED", "true").lower() == "true"
-QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "gemini-embedding-001")
-EMBEDDING_DIMENSION = int(os.getenv("EMBEDDING_DIMENSION", "1024"))
-EMBEDDING_BATCH_SIZE = int(os.getenv("EMBEDDING_BATCH_SIZE", "20"))
+# Configuration — use IndexingConfig for consistent defaults
+from shared.config import IndexingConfig  # noqa: E402
+
+try:
+    _indexing_config = IndexingConfig()
+except Exception:
+    # Fallback to raw env vars if config validation fails (e.g., in tests)
+    _indexing_config = None
+
+if _indexing_config:
+    INDEXING_ENABLED = _indexing_config.indexing_enabled
+    QDRANT_URL = _indexing_config.qdrant_url
+    GEMINI_API_KEY = _indexing_config.gemini_api_key
+    EMBEDDING_MODEL = _indexing_config.embedding_model
+    EMBEDDING_DIMENSION = _indexing_config.embedding_dimension
+    EMBEDDING_BATCH_SIZE = _indexing_config.embedding_batch_size
+else:
+    INDEXING_ENABLED = os.getenv("INDEXING_ENABLED", "true").lower() == "true"
+    QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+    EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "gemini-embedding-001")
+    EMBEDDING_DIMENSION = int(os.getenv("EMBEDDING_DIMENSION", "1024"))
+    EMBEDDING_BATCH_SIZE = int(os.getenv("EMBEDDING_BATCH_SIZE", "20"))
 
 # Global state
 shutdown_event = asyncio.Event()
+
+# Dead-letter queue configuration
+MAX_JOB_RETRIES = 3
+_DLQ_KEY = "agent:indexing:dead_letter"
+_QUEUE_KEY = "agent:indexing:requests"
 
 # Redis key patterns
 _META_KEY = "agent:indexing:meta:{repo}"  # Hash: field=ref, value=JSON
@@ -53,7 +75,7 @@ _CACHE_KEY = (
 
 def _collection_name(repo: str) -> str:
     """Convert repo slug to Qdrant collection name."""
-    return repo.replace("/", "__")
+    return collection_name_for_repo(repo)
 
 
 async def ensure_collection(repo: str) -> str:
@@ -172,10 +194,32 @@ async def _embed_texts(texts: list[str]) -> list[list[float]]:
                         output_dimensionality=EMBEDDING_DIMENSION,
                     ),
                 )
-                embeddings = [e.values for e in (result.embeddings or []) if e.values]
+                # Preserve count alignment: replace None embeddings with
+                # zero vectors so len(all_embeddings) always matches len(texts).
+                # This prevents IndexError in batch_embed's merge loop.
+                embeddings: list[list[float]] = []
+                for j, e in enumerate(result.embeddings or []):
+                    if e.values:
+                        embeddings.append(e.values)
+                    else:
+                        logger.warning(
+                            f"Empty embedding at index {j} in batch "
+                            f"{i // EMBEDDING_BATCH_SIZE + 1}, using zero vector"
+                        )
+                        embeddings.append([0.0] * EMBEDDING_DIMENSION)
+
+                # Pad if API returned fewer embeddings than inputs
+                while len(embeddings) < len(batch):
+                    logger.warning(
+                        f"Missing embedding at index {len(embeddings)} in batch "
+                        f"{i // EMBEDDING_BATCH_SIZE + 1}, using zero vector"
+                    )
+                    embeddings.append([0.0] * EMBEDDING_DIMENSION)
+
                 all_embeddings.extend(embeddings)
                 logger.debug(
-                    f"Embedded batch {i // EMBEDDING_BATCH_SIZE + 1}: {len(batch)} texts"
+                    f"Embedded batch {i // EMBEDDING_BATCH_SIZE + 1}: "
+                    f"{len(batch)} texts ({len(embeddings)} embeddings)"
                 )
                 break
             except Exception as e:
@@ -225,6 +269,13 @@ async def batch_embed(texts: list[str], redis_client=None) -> list[list[float]]:
             f"preview={preview!r}..."
         )
     new_embeddings = await _embed_texts(miss_texts)
+
+    # Validate count alignment to prevent IndexError in merge loop
+    if len(new_embeddings) != len(miss_texts):
+        raise ValueError(
+            f"Embedding count mismatch: expected {len(miss_texts)}, "
+            f"got {len(new_embeddings)}. Aborting to prevent data corruption."
+        )
 
     # Store new embeddings in cache
     if redis_client and new_embeddings:
@@ -463,8 +514,8 @@ async def _migrate_meta_key(redis_client, key: str) -> None:
     try:
         await redis_client.delete(key)
         logger.info(f"Migrated metadata key {key} from string to hash")
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Metadata migration failed for {key}: {e}")
 
 
 async def _get_previous_commit(redis_client, repo: str, ref: str) -> str | None:
@@ -550,8 +601,13 @@ async def process_indexing_job(message: dict, redis_client=None) -> None:
             logger.error(f"Could not create worktree for {repo}")
             return
 
-        # Get commit hash
-        commit_hash = await _get_commit_hash(worktree)
+        # Get commit hash (raises RuntimeError if unavailable — abort to
+        # prevent "unknown" sentinel from destroying the index)
+        try:
+            commit_hash = await _get_commit_hash(worktree)
+        except RuntimeError as e:
+            logger.error(f"Cannot index {repo}: {e}")
+            return
 
         # Check for previous index to determine incremental vs full
         previous_commit = await _get_previous_commit(redis_client, repo, ref)
@@ -697,14 +753,20 @@ async def _cleanup_worktree(repo: str, worktree: str) -> None:
             stderr=asyncio.subprocess.PIPE,
         )
         await proc.communicate()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Worktree git cleanup failed for {worktree}: {e}")
 
     shutil.rmtree(worktree, ignore_errors=True)
 
 
 async def _get_commit_hash(worktree: str) -> str:
-    """Get the HEAD commit hash from a worktree."""
+    """Get the HEAD commit hash from a worktree.
+
+    Raises:
+        RuntimeError: If the commit hash cannot be determined. This prevents
+            the "unknown" sentinel from being used as a commit hash, which
+            would cause upsert_chunks() to delete the entire index.
+    """
     try:
         proc = await asyncio.create_subprocess_exec(
             "git",
@@ -717,9 +779,88 @@ async def _get_commit_hash(worktree: str) -> str:
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
         if proc.returncode == 0:
             return stdout.decode().strip()
+    except Exception as e:
+        raise RuntimeError(f"Failed to get commit hash from {worktree}: {e}") from e
+    raise RuntimeError(
+        f"git rev-parse HEAD failed in {worktree} (exit code {proc.returncode})"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Dead-letter queue helpers
+# ---------------------------------------------------------------------------
+
+
+def _is_transient_error(exc: Exception) -> bool:
+    """Check if an error is transient and worth retrying.
+
+    Non-transient errors (config issues, missing API keys, validation)
+    should go straight to the DLQ without retry.
+    """
+    transient_markers = (
+        "timeout",
+        "connection",
+        "reset",
+        "429",
+        "RESOURCE_EXHAUSTED",
+        "503",
+        "502",
+        "ECONNREFUSED",
+        "ECONNRESET",
+        "ETIMEDOUT",
+    )
+    msg = str(exc).lower()
+    return any(marker.lower() in msg for marker in transient_markers)
+
+
+async def _enqueue_for_retry(redis_client, message: dict, exc: Exception) -> None:
+    """Re-enqueue a failed job with incremented attempts, or push to DLQ."""
+    attempts = message.get("attempts", 0) + 1
+    message["attempts"] = attempts
+    message["last_error"] = f"{type(exc).__name__}: {exc}"
+
+    if attempts >= MAX_JOB_RETRIES:
+        # Max retries exceeded — push to dead-letter queue
+        dlq_entry = json.dumps(
+            {
+                "repo": message.get("repo", "unknown"),
+                "ref": message.get("ref", "unknown"),
+                "trigger": message.get("trigger", "unknown"),
+                "reason": "max_retries_exceeded",
+                "last_error": message["last_error"],
+                "attempts": attempts,
+                "timestamp": __import__("time").time(),
+            }
+        )
+        await redis_client.rpush(_DLQ_KEY, dlq_entry)  # type: ignore[misc]
+        logger.error(
+            f"Job for {message.get('repo', 'unknown')} exceeded "
+            f"{MAX_JOB_RETRIES} retries, sent to DLQ: {exc}"
+        )
+    else:
+        # Re-enqueue for retry
+        await redis_client.rpush(_QUEUE_KEY, json.dumps(message))  # type: ignore[misc]
+        logger.warning(
+            f"Re-enqueued job for {message.get('repo', 'unknown')} "
+            f"(attempt {attempts}/{MAX_JOB_RETRIES}): {exc}"
+        )
+
+
+async def get_dlq_count(redis_client) -> int:
+    """Get number of entries in the indexing dead-letter queue."""
+    try:
+        return int(await redis_client.llen(_DLQ_KEY))  # type: ignore[no-any-return]
     except Exception:
-        pass
-    return "unknown"
+        return 0
+
+
+async def inspect_dlq(redis_client, limit: int = 10) -> list[dict]:
+    """Inspect dead-letter queue entries."""
+    try:
+        entries = await redis_client.lrange(_DLQ_KEY, 0, limit - 1)
+        return [json.loads(e) for e in entries]
+    except Exception:
+        return []
 
 
 # ---------------------------------------------------------------------------
@@ -810,11 +951,34 @@ async def main() -> None:
 
                 _, raw_message = result
                 message = json.loads(raw_message)
-                logger.info(
-                    f"Processing indexing job for {message.get('repo', 'unknown')}"
-                )
+                repo = message.get("repo", "unknown")
+                logger.info(f"Processing indexing job for {repo}")
 
-                await process_indexing_job(message, redis_client)
+                try:
+                    await process_indexing_job(message, redis_client)
+                except Exception as e:
+                    # Transient errors get retried; permanent errors go to DLQ
+                    if _is_transient_error(e):
+                        await _enqueue_for_retry(redis_client, message, e)
+                    else:
+                        logger.error(
+                            f"Non-transient error for {repo}, sending to DLQ: {e}",
+                            exc_info=True,
+                        )
+                        message["attempts"] = message.get("attempts", 0) + 1
+                        message["last_error"] = f"{type(e).__name__}: {e}"
+                        dlq_entry = json.dumps(
+                            {
+                                "repo": repo,
+                                "ref": message.get("ref", "unknown"),
+                                "trigger": message.get("trigger", "unknown"),
+                                "reason": "non_transient_error",
+                                "last_error": message["last_error"],
+                                "attempts": message["attempts"],
+                                "timestamp": __import__("time").time(),
+                            }
+                        )
+                        await redis_client.rpush(_DLQ_KEY, dlq_entry)  # type: ignore[misc]
 
             except json.JSONDecodeError as e:
                 logger.error(f"Invalid JSON in indexing request: {e}")

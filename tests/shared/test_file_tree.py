@@ -5,10 +5,10 @@ from pathlib import Path
 import pytest
 
 from shared.file_tree import (
-    _load_ignore_spec,
     _should_exclude_dir,
     _should_exclude_file,
     generate_file_tree,
+    load_ignore_spec,
 )
 
 
@@ -229,12 +229,12 @@ class TestGitignoreSupport:
 
 class TestLoadIgnoreSpec:
     def test_returns_none_for_no_ignore_files(self, tmp_path: Path):
-        spec = _load_ignore_spec(tmp_path)
+        spec = load_ignore_spec(tmp_path)
         assert spec is None
 
     def test_returns_spec_for_gitignore(self, tmp_path: Path):
         (tmp_path / ".gitignore").write_text("*.log\nbuild/\n")
-        spec = _load_ignore_spec(tmp_path)
+        spec = load_ignore_spec(tmp_path)
         assert spec is not None
         assert spec.match_file("debug.log")
         assert spec.match_file("build/")
@@ -242,14 +242,14 @@ class TestLoadIgnoreSpec:
     def test_combines_gitignore_and_ignore(self, tmp_path: Path):
         (tmp_path / ".gitignore").write_text("*.log\n")
         (tmp_path / ".ignore").write_text("*.tmp\n")
-        spec = _load_ignore_spec(tmp_path)
+        spec = load_ignore_spec(tmp_path)
         assert spec is not None
         assert spec.match_file("debug.log")
         assert spec.match_file("temp.tmp")
 
     def test_handles_empty_ignore_file(self, tmp_path: Path):
         (tmp_path / ".gitignore").write_text("")
-        spec = _load_ignore_spec(tmp_path)
+        spec = load_ignore_spec(tmp_path)
         # Empty file means no patterns -> spec is still created but matches nothing
         # Actually, pathspec with empty lines returns a spec that matches nothing
         # But our function returns None for no lines
@@ -257,6 +257,6 @@ class TestLoadIgnoreSpec:
 
     def test_handles_comment_only_gitignore(self, tmp_path: Path):
         (tmp_path / ".gitignore").write_text("# just a comment\n")
-        spec = _load_ignore_spec(tmp_path)
+        spec = load_ignore_spec(tmp_path)
         assert spec is not None
         assert not spec.match_file("any_file.txt")

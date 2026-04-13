@@ -250,14 +250,16 @@ An MCP server that provides AST-based code search and file summaries for the cur
 ```
 mcp_servers/codebase_tools/
 ├── server.py    # stdio-based MCP server
-├── tools.py     # search_code / file_summary implementations
+├── tools.py     # search_codebase / read_file_summary implementations
 └── __init__.py
 ```
 
 **Tools provided**:
 
-- `search_code(query, max_results)` - Tree-sitter query-based code search across the worktree
-- `file_summary(filepath)` - Structured analysis of a source file (definitions, imports, structure)
+- `find_definitions(symbol_name)` - Find where a symbol (class, function, method) is defined
+- `find_references(symbol_name)` - Find all references to a symbol across the codebase
+- `search_codebase(pattern, file_type, max_results)` - Regex-based code search with ripgrep or Python fallback
+- `read_file_summary(filepath, max_lines)` - Structured analysis of a source file (definitions, imports, structure)
 
 Uses the shared tree-sitter language registry (`shared/ts_languages.py`) for multi-language support (10 languages with regex fallback).
 

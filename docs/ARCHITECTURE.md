@@ -499,8 +499,10 @@ Python, JavaScript, TypeScript, TSX, Go, Rust, Java, C, C++, Ruby — via per-la
 **Layer 2 — Code Tools MCP**:
 
 - `mcp_servers/codebase_tools/` — MCP server for AST-based code search and file summaries
-- Provides `search_code()` for tree-sitter query-based search across the worktree
-- Provides `file_summary()` for structured file analysis
+- Provides `search_codebase()` for regex-based code search across the worktree
+- Provides `read_file_summary()` for structured file analysis
+- Provides `find_definitions()` to locate symbol definitions
+- Provides `find_references()` to find all references to a symbol
 - Available to agents as registered MCP tools during sandbox execution
 
 **Layer 3 — Semantic Search**:

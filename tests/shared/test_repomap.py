@@ -94,8 +94,7 @@ class TestTokenCount:
 
 
 class TestRepoMapTagExtraction:
-    @pytest.mark.asyncio
-    async def test_extracts_python_definitions(self, python_repo: Path):
+    def test_extracts_python_definitions(self, python_repo: Path):
         rm = RepoMap(python_repo)
         tags = rm._extract_all_tags()
 
@@ -105,8 +104,7 @@ class TestRepoMapTagExtraction:
         assert "Database" in def_names
         assert "helper" in def_names
 
-    @pytest.mark.asyncio
-    async def test_excludes_noise_dirs(self, python_repo: Path):
+    def test_excludes_noise_dirs(self, python_repo: Path):
         # Add noise
         (python_repo / "__pycache__").mkdir()
         (python_repo / "__pycache__" / "app.cpython-311.pyc").write_text("bytecode")
@@ -127,8 +125,7 @@ class TestRepoMapTagExtraction:
         assert not RepoMap._should_skip_file("main.py")
         assert not RepoMap._should_skip_file("app.ts")
 
-    @pytest.mark.asyncio
-    async def test_regex_fallback(self, tmp_path: Path):
+    def test_regex_fallback(self, tmp_path: Path):
         """Test that regex fallback works for files without tree-sitter support."""
         # Create a Go file (tests regex fallback when tree-sitter-go is not installed)
         (tmp_path / "main.go").write_text(
@@ -151,8 +148,7 @@ class TestRepoMapTagExtraction:
 
 
 class TestRepoMapRanking:
-    @pytest.mark.asyncio
-    async def test_ranking_mentions(self, python_repo: Path):
+    def test_ranking_mentions(self, python_repo: Path):
         """Tags from mentioned files should rank higher."""
         rm = RepoMap(python_repo)
         tags = rm._extract_all_tags()
@@ -170,8 +166,7 @@ class TestRepoMapRanking:
         db_related = {"Database", "connect", "query"}
         assert bool(db_related & set(top_names)) or "Database" in str(ranked)
 
-    @pytest.mark.asyncio
-    async def test_simple_rank_fallback(self, python_repo: Path):
+    def test_simple_rank_fallback(self, python_repo: Path):
         """Simple ranking should work without networkx."""
         rm = RepoMap(python_repo)
         tags = rm._extract_all_tags()
@@ -193,8 +188,7 @@ class TestRepoMapRanking:
 class TestIncludeTestFiles:
     """Tests for the include_test_files ranking behavior."""
 
-    @pytest.mark.asyncio
-    async def test_boost_test_files_when_enabled(self, python_repo: Path):
+    def test_boost_test_files_when_enabled(self, python_repo: Path):
         """Test files should be boosted when include_test_files=True."""
         rm = RepoMap(python_repo)
         tags = rm._extract_all_tags()
@@ -233,11 +227,10 @@ class TestIncludeTestFiles:
             # When included, test files should score higher than when excluded
             assert boost_score > penalty_score
 
-    @pytest.mark.asyncio
-    async def test_default_includes_test_files(self, python_repo: Path):
+    def test_default_includes_test_files(self, python_repo: Path):
         """By default, include_test_files should be True."""
         rm = RepoMap(python_repo)
-        result = await rm.get_repo_map(token_budget=4000)
+        result = rm.get_repo_map(token_budget=4000)
 
         # Should include test definitions by default
         if result:
@@ -246,36 +239,32 @@ class TestIncludeTestFiles:
 
 
 class TestRepoMapRendering:
-    @pytest.mark.asyncio
-    async def test_renders_compact_map(self, python_repo: Path):
+    def test_renders_compact_map(self, python_repo: Path):
         rm = RepoMap(python_repo)
-        result = await rm.get_repo_map(token_budget=2000)
+        result = rm.get_repo_map(token_budget=2000)
 
         assert result
         assert "Application" in result or "Database" in result
 
-    @pytest.mark.asyncio
-    async def test_respects_token_budget(self, python_repo: Path):
+    def test_respects_token_budget(self, python_repo: Path):
         rm = RepoMap(python_repo)
 
         # Small budget
-        small = await rm.get_repo_map(token_budget=100)
-        large = await rm.get_repo_map(token_budget=4000)
+        small = rm.get_repo_map(token_budget=100)
+        large = rm.get_repo_map(token_budget=4000)
 
         if small and large:
             assert _token_count(small) <= _token_count(large)
 
-    @pytest.mark.asyncio
-    async def test_empty_repo(self, tmp_path: Path):
+    def test_empty_repo(self, tmp_path: Path):
         rm = RepoMap(tmp_path)
-        result = await rm.get_repo_map()
+        result = rm.get_repo_map()
         assert result == ""
 
-    @pytest.mark.asyncio
-    async def test_file_grouping(self, python_repo: Path):
+    def test_file_grouping(self, python_repo: Path):
         """Output should group entries by file."""
         rm = RepoMap(python_repo)
-        result = await rm.get_repo_map(token_budget=4000)
+        result = rm.get_repo_map(token_budget=4000)
 
         if result:
             # Should show file paths as headers
@@ -283,11 +272,10 @@ class TestRepoMapRendering:
 
 
 class TestRepoMapIntegration:
-    @pytest.mark.asyncio
-    async def test_full_pipeline(self, python_repo: Path):
+    def test_full_pipeline(self, python_repo: Path):
         """End-to-end test of repomap generation."""
         rm = RepoMap(python_repo)
-        result = await rm.get_repo_map(
+        result = rm.get_repo_map(
             mentioned_files=["app.py"],
             token_budget=2048,
         )
@@ -300,8 +288,7 @@ class TestRepoMapIntegration:
 
 
 class TestRepoMapGitignore:
-    @pytest.mark.asyncio
-    async def test_gitignore_excludes_files(self, python_repo: Path):
+    def test_gitignore_excludes_files(self, python_repo: Path):
         """Repomap should respect .gitignore patterns."""
         # Add a file that would normally be parsed
         (python_repo / "generated.py").write_text("class GeneratedModel:\n    pass\n")
@@ -309,18 +296,17 @@ class TestRepoMapGitignore:
         (python_repo / ".gitignore").write_text("generated.py\n")
 
         rm = RepoMap(python_repo)
-        result = await rm.get_repo_map(token_budget=4000)
+        result = rm.get_repo_map(token_budget=4000)
         assert result
         assert "GeneratedModel" not in result
 
-    @pytest.mark.asyncio
-    async def test_gitignore_excludes_directory(self, python_repo: Path):
+    def test_gitignore_excludes_directory(self, python_repo: Path):
         """Repomap should exclude entire directories listed in .gitignore."""
         (python_repo / "vendor").mkdir()
         (python_repo / "vendor" / "lib.py").write_text("class VendorLib:\n    pass\n")
         (python_repo / ".gitignore").write_text("vendor/\n")
 
         rm = RepoMap(python_repo)
-        result = await rm.get_repo_map(token_budget=4000)
+        result = rm.get_repo_map(token_budget=4000)
         assert result
         assert "VendorLib" not in result

@@ -15,6 +15,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from shared.file_tree import EXCLUDE_DIRS
 from shared.repomap import Tag
 from shared.ts_languages import EXTENSION_MAP, get_language
 
@@ -27,6 +28,7 @@ logger = logging.getLogger(__name__)
 _repo_path: Path | None = None
 _tags_cache: list[Tag] = []
 _ast_cache: dict[tuple[str, float], tuple[Any, bytes]] = {}
+_AST_CACHE_MAX_SIZE = 500
 
 # File type aliases for ripgrep
 _FILE_TYPE_MAP: dict[str, str] = {
@@ -83,7 +85,7 @@ def init_repo(repo_path: str) -> None:
 
     # Extract and cache all tags for find_definitions / find_references
     rm = RepoMap(_repo_path)
-    _tags_cache = rm._extract_all_tags()
+    _tags_cache = rm.extract_tags()
     logger.info(
         f"Initialized codebase tools for {_repo_path} "
         f"({len(_tags_cache)} tags cached)"
@@ -138,6 +140,11 @@ def _get_or_parse(filepath: Path) -> tuple[Any, bytes | None]:
         mtime = filepath.stat().st_mtime
     except OSError:
         return None, None
+
+    # Evict entire cache if it exceeds max size (simple but effective
+    # for MCP server sessions where file access is bounded)
+    if len(_ast_cache) > _AST_CACHE_MAX_SIZE:
+        _ast_cache.clear()
 
     cache_key = (str(filepath), mtime)
     if cache_key in _ast_cache:
@@ -412,7 +419,11 @@ def _search_with_re(
 
     results: list[dict[str, Any]] = []
 
-    for root, _dirs, filenames in os.walk(_repo_path):
+    for root, dirs, filenames in os.walk(_repo_path):
+        # Filter excluded directories in-place to avoid walking into
+        # .git, node_modules, __pycache__, etc.
+        dirs[:] = [d for d in sorted(dirs) if d not in EXCLUDE_DIRS and not d.startswith(".")]
+
         for name in filenames:
             if len(results) >= max_results:
                 break

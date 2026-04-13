@@ -226,7 +226,7 @@ class SDKOptionsBuilder:
         """Add semantic search MCP server for embedding-based code queries.
 
         Only registers the server if indexing is enabled and both Qdrant
-        and Voyage API are configured. If unavailable, the tool gracefully
+        and Gemini API are configured. If unavailable, the tool gracefully
         returns empty results.
 
         Args:
@@ -235,9 +235,21 @@ class SDKOptionsBuilder:
         Returns:
             Self for method chaining
         """
-        indexing_enabled = os.getenv("INDEXING_ENABLED", "false").lower() == "true"
-        qdrant_url = os.getenv("QDRANT_URL")
-        gemini_key = os.getenv("GEMINI_API_KEY")
+        from shared.config import IndexingConfig
+
+        try:
+            cfg = IndexingConfig()
+        except Exception:
+            cfg = None
+
+        if cfg:
+            indexing_enabled = cfg.is_enabled
+            qdrant_url = cfg.qdrant_url
+            gemini_key = cfg.gemini_api_key
+        else:
+            indexing_enabled = os.getenv("INDEXING_ENABLED", "false").lower() == "true"
+            qdrant_url = os.getenv("QDRANT_URL")
+            gemini_key = os.getenv("GEMINI_API_KEY")
 
         if indexing_enabled and qdrant_url and gemini_key:
             self._mcp_servers["semantic-search"] = {
@@ -415,9 +427,14 @@ class SDKOptionsBuilder:
         retrospector_enabled = (
             os.getenv("RETROSPECTOR_ENABLED", "true").lower() == "true"
         )
-        indexing_enabled = os.getenv(
-            "INDEXING_ENABLED", "false"
-        ).lower() == "true" and bool(os.getenv("GEMINI_API_KEY"))
+        try:
+            from shared.config import IndexingConfig
+
+            indexing_enabled = IndexingConfig().is_enabled
+        except Exception:
+            indexing_enabled = os.getenv(
+                "INDEXING_ENABLED", "false"
+            ).lower() == "true" and bool(os.getenv("GEMINI_API_KEY"))
 
         # Capture context from builder for hooks to use
         repo_context = self._repo_context

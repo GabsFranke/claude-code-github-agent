@@ -12,9 +12,9 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from .file_tree import EXCLUDE_DIRS, EXCLUDE_FILES, EXCLUDE_SUFFIXES, _load_ignore_spec
+from .file_tree import EXCLUDE_DIRS, EXCLUDE_FILES, EXCLUDE_SUFFIXES, load_ignore_spec
 from .ts_languages import (
     EXTENSION_MAP,
     LanguageConfig,
@@ -35,13 +35,16 @@ MAX_FUNCTION_LINES = 200
 # ---------------------------------------------------------------------------
 
 
+ChunkKind = Literal["function", "class", "method", "module"]
+
+
 @dataclass
 class Chunk:
     """A semantic unit of source code produced by the chunker."""
 
     filepath: str  # Relative path from repo root, forward slashes
     name: str  # Symbol name (function/class/method)
-    kind: str  # "function", "class", "method", "module_docstring"
+    kind: ChunkKind  # "function", "class", "method", "module"
     language: str  # Tree-sitter language name or "unknown"
     start_line: int  # 1-based inclusive
     end_line: int  # 1-based inclusive
@@ -142,7 +145,7 @@ def chunk_repo(
         List of Chunk instances.
     """
     repo_path = Path(repo_path)
-    ignore_spec = _load_ignore_spec(repo_path)
+    ignore_spec = load_ignore_spec(repo_path)
 
     if changed_files is not None and len(changed_files) == 0:
         return []
@@ -545,7 +548,7 @@ def _chunk_with_regex(
             Chunk(
                 filepath=rel_path,
                 name=name,
-                kind=kind,
+                kind=kind,  # type: ignore[arg-type]
                 language=language,
                 start_line=start_idx + 1,
                 end_line=end_idx + 1,

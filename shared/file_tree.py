@@ -8,6 +8,12 @@ to skip noise directories and generated files.
 import os
 from pathlib import Path
 
+
+def collection_name_for_repo(repo: str) -> str:
+    """Convert a repo slug (owner/repo) to a Qdrant-safe collection name."""
+    return repo.replace("/", "__")
+
+
 try:
     import pathspec  # type: ignore[import-untyped]
 
@@ -76,7 +82,7 @@ EXCLUDE_SUFFIXES = frozenset(
 )
 
 
-def _load_ignore_spec(repo_path: Path) -> "pathspec.PathSpec | None":
+def load_ignore_spec(repo_path: Path) -> "pathspec.PathSpec | None":
     """Load gitignore-style patterns from .gitignore and .ignore at repo root.
 
     Returns a PathSpec for matching, or None if no ignore files exist or
@@ -135,7 +141,7 @@ def generate_file_tree(
     if not repo_path.is_dir():
         return ""
 
-    ignore_spec = _load_ignore_spec(repo_path)
+    ignore_spec = load_ignore_spec(repo_path)
 
     lines: list[str] = []
     entry_count = 0
