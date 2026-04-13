@@ -1,23 +1,6 @@
 ---
 description: "Analyze and fix CI/CD failures using specialized agents"
 argument-hint: "[owner/repo] [run-id-or-pr-number] [failure-type]"
-skills:
-  - git-worktree-workflow
-  - python-code-quality
-allowed-tools:
-  [
-    "Task",
-    "Bash",
-    "Glob",
-    "Grep",
-    "Read",
-    "Write",
-    "Edit",
-    "List",
-    "Search",
-    "mcp__github__*",
-    "mcp__github-actions__*",
-  ]
 ---
 
 # CI/CD Failure Analysis and Fix

@@ -17,6 +17,9 @@ from shared.langfuse_hooks import setup_langfuse_hooks
 
 logger = logging.getLogger(__name__)
 
+# Total system prompt budget in tokens
+SYSTEM_PROMPT_BUDGET = 12_000
+
 # Module-level Redis connection pool for reuse across hook invocations
 _redis_pool = None
 
@@ -69,6 +72,7 @@ class SDKOptionsBuilder:
         self._system_prompt: str | None = None
         self._agents: dict | None = None
         self._repo_context: dict = {}  # Store context for hooks
+        self._structural_context: str | None = None  # File tree + repomap
 
     # Model selection methods
 
@@ -195,6 +199,81 @@ class SDKOptionsBuilder:
         }
         return self
 
+    def with_codebase_tools(self, worktree_path: str) -> "SDKOptionsBuilder":
+        """Add codebase tools MCP server for structured code search.
+
+        Provides find_definitions, find_references, search_codebase, and
+        read_file_summary tools that reuse Phase 1's tree-sitter infrastructure.
+
+        Args:
+            worktree_path: Absolute path to the git worktree.
+
+        Returns:
+            Self for method chaining
+        """
+        self._mcp_servers["codebase-tools"] = {
+            "type": "stdio",
+            "command": "python3",
+            "args": ["/app/mcp_servers/codebase_tools/server.py"],
+            "env": {
+                "REPO_PATH": worktree_path,
+                "PYTHONPATH": "/app",
+            },
+        }
+        return self
+
+    def with_semantic_search(self, repo: str) -> "SDKOptionsBuilder":
+        """Add semantic search MCP server for embedding-based code queries.
+
+        Only registers the server if indexing is enabled and both Qdrant
+        and Gemini API are configured. If unavailable, the tool gracefully
+        returns empty results.
+
+        Args:
+            repo: Repository identifier (e.g., "owner/repo") for collection lookup.
+
+        Returns:
+            Self for method chaining
+        """
+        from shared.config import IndexingConfig
+
+        try:
+            cfg = IndexingConfig()
+        except Exception:
+            cfg = None
+
+        if cfg:
+            indexing_enabled = cfg.is_enabled
+            qdrant_url = cfg.qdrant_url
+            gemini_key = cfg.gemini_api_key
+        else:
+            indexing_enabled = os.getenv("INDEXING_ENABLED", "false").lower() == "true"
+            qdrant_url = os.getenv("QDRANT_URL")
+            gemini_key = os.getenv("GEMINI_API_KEY")
+
+        if indexing_enabled and qdrant_url and gemini_key:
+            self._mcp_servers["semantic-search"] = {
+                "type": "stdio",
+                "command": "python3",
+                "args": ["/app/mcp_servers/semantic_search/server.py"],
+                "env": {
+                    "REPO_PATH": self.cwd,
+                    "GITHUB_REPOSITORY": repo,
+                    "QDRANT_URL": qdrant_url,
+                    "GEMINI_API_KEY": gemini_key,
+                    "EMBEDDING_DIMENSION": os.getenv("EMBEDDING_DIMENSION", "1024"),
+                    "PYTHONPATH": "/app",
+                },
+            }
+            logger.info(f"Semantic search MCP registered for {repo}")
+        else:
+            logger.debug(
+                "Semantic search skipped: INDEXING_ENABLED not set or "
+                "Qdrant/Gemini not configured"
+            )
+
+        return self
+
     # Plugin methods (à la carte)
 
     def with_auto_discovered_plugins(self) -> "SDKOptionsBuilder":
@@ -262,6 +341,11 @@ class SDKOptionsBuilder:
             "mcp__github__*",
             "mcp__github-actions__*",
             "mcp__memory__memory_read",
+            "mcp__codebase-tools__find_definitions",
+            "mcp__codebase-tools__find_references",
+            "mcp__codebase-tools__search_codebase",
+            "mcp__codebase-tools__read_file_summary",
+            "mcp__semantic-search__semantic_search",
         )
 
     def with_retrospector_toolset(self) -> "SDKOptionsBuilder":
@@ -324,7 +408,7 @@ class SDKOptionsBuilder:
         return self
 
     def with_transcript_staging(
-        self, repo: str, workflow_name: str | None = None
+        self, repo: str, workflow_name: str | None = None, ref: str | None = None
     ) -> "SDKOptionsBuilder":
         """Add post-session hooks for transcript staging and job enqueueing.
 
@@ -334,6 +418,7 @@ class SDKOptionsBuilder:
         Args:
             repo: Repository identifier (e.g., "owner/repo")
             workflow_name: Optional workflow name for retrospection context
+            ref: Git ref that was indexed (e.g., "refs/heads/main")
 
         Returns:
             Self for method chaining
@@ -342,6 +427,14 @@ class SDKOptionsBuilder:
         retrospector_enabled = (
             os.getenv("RETROSPECTOR_ENABLED", "true").lower() == "true"
         )
+        try:
+            from shared.config import IndexingConfig
+
+            indexing_enabled = IndexingConfig().is_enabled
+        except Exception:
+            indexing_enabled = os.getenv(
+                "INDEXING_ENABLED", "false"
+            ).lower() == "true" and bool(os.getenv("GEMINI_API_KEY"))
 
         # Capture context from builder for hooks to use
         repo_context = self._repo_context
@@ -403,6 +496,14 @@ class SDKOptionsBuilder:
                     except Exception as e:
                         logger.error(
                             f"Failed to enqueue retrospector job: {e}", exc_info=True
+                        )
+
+                if indexing_enabled:
+                    try:
+                        await _enqueue_indexing_job(repo, event, ref=ref)
+                    except Exception as e:
+                        logger.error(
+                            f"Failed to enqueue indexing job: {e}", exc_info=True
                         )
             return {"success": True}
 
@@ -493,6 +594,32 @@ class SDKOptionsBuilder:
 
         return self
 
+    def with_structural_context(
+        self, file_tree: str | None = None, repomap: str | None = None
+    ) -> "SDKOptionsBuilder":
+        """Inject pre-built structural context into system prompt.
+
+        Structural context (file tree + repomap) is the lowest priority
+        component and will be truncated first if the total system prompt
+        exceeds the budget.
+
+        Args:
+            file_tree: Pre-built file tree text.
+            repomap: Pre-built repomap text.
+
+        Returns:
+            Self for method chaining
+        """
+        parts = []
+        if file_tree and file_tree.strip():
+            parts.append(f"<repo_structure>\n{file_tree.strip()}\n</repo_structure>")
+        if repomap and repomap.strip():
+            parts.append(f"<repo_map>\n{repomap.strip()}\n</repo_map>")
+
+        if parts:
+            self._structural_context = "\n\n".join(parts)
+        return self
+
     async def with_repository_context_auto(
         self, repo: str, fetch_claude_md: bool = True, fetch_memory: bool = True
     ) -> "SDKOptionsBuilder":
@@ -556,6 +683,13 @@ class SDKOptionsBuilder:
     def build(self) -> ClaudeAgentOptions:
         """Build the final ClaudeAgentOptions object.
 
+        Enforces a total system prompt budget (~12K tokens). Components
+        are truncated by priority if the budget is exceeded:
+          1. Workflow context (never truncated)
+          2. CLAUDE.md (truncated from bottom)
+          3. Memory index (truncate oldest entries)
+          4. Structural context (truncated first)
+
         Returns:
             Configured ClaudeAgentOptions instance
         """
@@ -565,14 +699,18 @@ class SDKOptionsBuilder:
                 "ANTHROPIC_DEFAULT_SONNET_MODEL", "claude-sonnet-4-20250514"
             )
 
+        # Assemble final system prompt with budget enforcement
+        self._system_prompt = self._assemble_system_prompt()
+
         # Log system prompt for debugging (only if SDK_DEBUG is enabled)
         if os.getenv("SDK_DEBUG", "false").lower() == "true" and self._system_prompt:
             logger.debug("=" * 80)
             logger.debug("SYSTEM PROMPT BEING PASSED TO SDK:")
             logger.debug("-" * 80)
+            # Print first 1000 chars to see structural context + repomap
             logger.debug(
-                self._system_prompt[:500] + "..."
-                if len(self._system_prompt) > 500
+                self._system_prompt[:1000] + "..."
+                if len(self._system_prompt) > 1000
                 else self._system_prompt
             )
             logger.debug("=" * 80)
@@ -591,6 +729,137 @@ class SDKOptionsBuilder:
             stderr=lambda msg: logger.warning(f"SDK stderr: {msg}"),
             system_prompt=self._system_prompt,
         )
+
+    def _assemble_system_prompt(self) -> str | None:
+        """Assemble the final system prompt with budget enforcement.
+
+        Components in priority order (highest first):
+          1. Workflow context (from system_context / prompts/*.md)
+          2. CLAUDE.md (repository-specific instructions)
+          3. Memory index (accumulated knowledge)
+          4. Structural context (file tree + repomap)
+
+        Lowest-priority components are truncated first if the total
+        exceeds SYSTEM_PROMPT_BUDGET tokens.
+        """
+        # Collect components with their token costs
+        components: list[tuple[str, str]] = []  # (label, text)
+
+        if self._structural_context and self._structural_context.strip():
+            components.append(("structural", self._structural_context.strip()))
+
+        if self._system_prompt and self._system_prompt.strip():
+            components.append(("prompt", self._system_prompt.strip()))
+
+        if not components:
+            return None
+
+        # Calculate total tokens
+        def _estimate_tokens(text: str) -> int:
+            return max(1, int(len(text.split()) * 1.3))
+
+        total = sum(_estimate_tokens(text) for _, text in components)
+
+        if total <= SYSTEM_PROMPT_BUDGET:
+            # Everything fits, join all components
+            return "\n\n".join(text for _, text in components)
+
+        # Budget exceeded — truncate lowest priority first
+        logger.warning(
+            f"System prompt budget exceeded: {total} > {SYSTEM_PROMPT_BUDGET} tokens. "
+            "Truncating by priority."
+        )
+
+        # Re-order: structural (truncate first), then prompt content
+        ordered: list[tuple[str, bool]] = []
+
+        # Structural context is lowest priority — truncate first
+        structural_parts = []
+        prompt_parts = []
+        for label, text in components:
+            if label == "structural":
+                structural_parts.append(text)
+            else:
+                prompt_parts.append(text)
+
+        budget_remaining = SYSTEM_PROMPT_BUDGET
+
+        # Add prompt content first (highest priority)
+        for text in prompt_parts:
+            tokens = _estimate_tokens(text)
+            if tokens <= budget_remaining:
+                ordered.append((text, False))
+                budget_remaining -= tokens
+            else:
+                # Truncate prompt content to fit
+                truncated = _truncate_text(text, budget_remaining)
+                if truncated:
+                    ordered.append((truncated, True))
+                    budget_remaining = 0
+                break
+
+        # Add structural context with remaining budget
+        if budget_remaining > 0 and structural_parts:
+            structural_text = "\n\n".join(structural_parts)
+            tokens = _estimate_tokens(structural_text)
+            if tokens <= budget_remaining:
+                ordered.append((structural_text, False))
+            else:
+                truncated = _truncate_text(structural_text, budget_remaining)
+                if truncated:
+                    ordered.append((truncated, True))
+
+        # Combine: structural first (it's context), then prompt content
+        final_parts = []
+        for text, _was_truncated in ordered:
+            final_parts.append(text)
+
+        if not final_parts:
+            return None
+
+        result = "\n\n".join(final_parts)
+        final_tokens = _estimate_tokens(result)
+        logger.info(
+            f"Assembled system prompt: {final_tokens}/{SYSTEM_PROMPT_BUDGET} tokens"
+        )
+        return result
+
+
+def _truncate_text(text: str, max_tokens: int) -> str | None:
+    """Truncate text to fit within a token budget by removing lines from the end.
+
+    Args:
+        text: Text to truncate.
+        max_tokens: Maximum tokens allowed.
+
+    Returns:
+        Truncated text, or None if even one line exceeds the budget.
+    """
+
+    def _estimate(text: str) -> int:
+        return max(1, int(len(text.split()) * 1.3))
+
+    # Check if full text already fits
+    if _estimate(text) <= max_tokens:
+        return text
+
+    lines = text.split("\n")
+    result_lines: list[str] = []
+
+    for line in lines:
+        candidate = "\n".join(result_lines + [line])
+        if _estimate(candidate) > max_tokens:
+            break
+        result_lines.append(line)
+
+    if not result_lines:
+        return None
+
+    result = "\n".join(result_lines)
+    if _estimate(result) > max_tokens:
+        return None
+
+    return result + "\n... (truncated)"
 
 
 # Helper functions for transcript staging (used by with_transcript_staging)
@@ -740,3 +1009,37 @@ async def _enqueue_retrospector_job(
             await rc.aclose()  # type: ignore[attr-defined]
     except Exception as e:
         logger.warning(f"Failed to enqueue retrospector job for {repo}: {e}")
+
+
+async def _enqueue_indexing_job(
+    repo: str, hook_event: str, ref: str | None = None
+) -> None:
+    """Enqueue a code indexing job for embedding-based semantic search.
+
+    Fires after agent sessions complete to keep the vector index up-to-date
+    with any code changes the agent (or external contributors) made.
+
+    Args:
+        repo: Repository identifier
+        hook_event: Hook event name (Stop or SubagentStop)
+        ref: Git ref to index (defaults to "main")
+    """
+    try:
+        import redis.asyncio as aioredis
+
+        pool = await _get_redis_pool()
+        rc = aioredis.Redis(connection_pool=pool)
+        try:
+            payload = json.dumps(
+                {
+                    "repo": repo,
+                    "ref": ref or "main",
+                    "trigger": f"job_{hook_event.lower()}",
+                }
+            )
+            await rc.rpush("agent:indexing:requests", payload)  # type: ignore[misc]
+            logger.info(f"Enqueued indexing job for {repo} [{hook_event}] ref={ref}")
+        finally:
+            await rc.aclose()  # type: ignore[attr-defined]
+    except Exception as e:
+        logger.warning(f"Failed to enqueue indexing job for {repo}: {e}")

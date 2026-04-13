@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 # Create non-root user early
 RUN useradd -m -u 1000 -s /bin/bash bot
@@ -17,6 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     unzip \
     zip \
     sudo \
+    ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
 # The sandbox needs the shared agent definitions and shared utilities

@@ -8,6 +8,7 @@ import shutil
 import sys
 import tempfile
 import uuid
+from pathlib import Path
 
 from repo_setup import RepoSetupEngine  # noqa: E402
 from shared import (  # noqa: E402
@@ -18,6 +19,10 @@ from shared import (  # noqa: E402
     WorktreeCreationError,
     execute_git_command,
     setup_graceful_shutdown,
+)
+from shared.context_builder import (  # noqa: E402
+    find_priority_focus_files,
+    generate_structural_context,
 )
 from shared.logging_utils import setup_logging  # noqa: E402
 from shared.sdk_executor import execute_sdk  # noqa: E402
@@ -276,6 +281,84 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
             )
             # Don't fail the job if setup fails - agent can still work with source code
 
+        # Generate structural context (file tree + repomap)
+        # This is an async step outside the synchronous builder
+        file_tree_text = ""
+        repomap_text = ""
+        try:
+            # Determine personalization from workflow context
+            mentioned_files = []
+            context_budget = 4096  # Default repomap budget
+            include_test_files = True  # Default: include test files
+
+            # Get context profile from job data (set by WorkflowEngine)
+            context_profile = job_data.get("context_profile", {})
+            if context_profile:
+                context_budget = context_profile.get("repomap_budget", 4096)
+                include_test_files = context_profile.get("include_test_files", True)
+
+            # Personalize repomap toward relevant files when configured
+            workflow_name = job_data.get("workflow_name")
+            if context_profile.get("personalized", False):
+                # Strategy 1: Fetch PR changed files (works for PR-triggered workflows)
+                issue_number = job_data.get("issue_number")
+                github_token = job_data.get("github_token")
+                if issue_number and github_token:
+                    try:
+                        import httpx
+
+                        async with httpx.AsyncClient() as client:
+                            url = f"https://api.github.com/repos/{repo}/pulls/{issue_number}/files"
+                            headers = {
+                                "Authorization": f"Bearer {github_token}",
+                                "Accept": "application/vnd.github.v3+json",
+                            }
+                            resp = await client.get(url, headers=headers, timeout=10.0)
+                            if resp.status_code == 200:
+                                files = resp.json()
+                                mentioned_files = [
+                                    f["path"] for f in files if "path" in f
+                                ]
+                                logger.info(
+                                    f"Personalizing repomap toward {len(mentioned_files)} changed files"
+                                )
+                    except Exception as e:
+                        logger.debug(
+                            f"PR file fetch skipped (not a PR or API error): {e}"
+                        )
+
+                # Strategy 2: Add files matching priority_focus patterns
+                priority_focus = context_profile.get("priority_focus", [])
+                if priority_focus:
+                    focus_files = find_priority_focus_files(
+                        Path(workspace), priority_focus
+                    )
+                    mentioned_files.extend(focus_files)
+                    if focus_files:
+                        logger.info(
+                            f"Added {len(focus_files)} priority focus files "
+                            f"for areas: {priority_focus}"
+                        )
+
+            file_tree_text, repomap_text = await generate_structural_context(
+                repo_path=Path(workspace),
+                repo=repo,
+                mentioned_files=mentioned_files,
+                token_budget=context_budget,
+                include_test_files=include_test_files,
+                cache_dir=Path("/home/bot/agent-memory"),
+            )
+            logger.info(
+                f"Generated structural context: "
+                f"file_tree={len(file_tree_text)} chars, "
+                f"repomap={len(repomap_text)} chars"
+            )
+        except Exception as e:
+            logger.warning(
+                f"Structural context generation failed, continuing without: {e}",
+                exc_info=True,
+            )
+
         # Build SDK options using the factory builder
         model = os.getenv("ANTHROPIC_DEFAULT_SONNET_MODEL", "claude-sonnet-4-20250514")
         github_token = job_data["github_token"]
@@ -301,6 +384,8 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
             builder.with_github_mcp(github_token).with_github_actions_mcp(github_token)
 
         builder.with_memory_mcp(repo)
+        builder.with_codebase_tools(workspace)
+        builder.with_semantic_search(repo)
 
         # Get parent span ID for trace linking (if enabled)
         parent_span_id = job_data.get("parent_span_id")
@@ -311,12 +396,15 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
             .with_full_toolset()
             .with_agents(AGENTS)
             .with_langfuse_hooks(parent_span_id=parent_span_id)
-            .with_transcript_staging(repo, workflow_name)
+            .with_transcript_staging(repo, workflow_name, ref=ref)
             .with_writable_dir(f"/home/bot/agent-memory/{repo}/memory")
             .with_system_prompt(system_context)  # Workflow-specific system context
             .with_repository_context(
                 claude_md=claude_md, memory_index=memory_index
             )  # Repository context (prepended to system prompt)
+            .with_structural_context(
+                file_tree=file_tree_text, repomap=repomap_text
+            )  # Structural context (file tree + repomap)
         )
 
         # Execute via centralized executor with retry

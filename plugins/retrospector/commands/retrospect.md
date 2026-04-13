@@ -1,9 +1,6 @@
 ---
 description: "Analyse a session transcript and improve agent instructions via a PR to develop"
 argument-hint: "<transcript_summary_path> <workflow_name> <target_repo> [num_turns] [is_error]"
-skills:
-  - git-worktree-workflow
-allowed-tools: ["Bash", "Glob", "Grep", "Read", "Edit", "mcp__github__*"]
 ---
 
 # Retrospector

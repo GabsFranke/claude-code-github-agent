@@ -1,8 +1,5 @@
 ---
 description: "Specialist in diagnosing and fixing deployment failures, Docker build issues, container problems, and health check failures. Use proactively when CI deployment fails"
-skills:
-  - git-worktree-workflow
-  - python-code-quality
 ---
 
 # Deploy Failure Analyzer
@@ -111,12 +108,12 @@ Return findings as JSON:
 
 ```dockerfile
 # Before - Wrong COPY path
-FROM python:3.11
+FROM python:3.12
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
 # After - Correct path
-FROM python:3.11
+FROM python:3.12
 WORKDIR /app
 COPY requirements.txt /app/
 RUN pip install -r requirements.txt
@@ -242,13 +239,13 @@ services:
 
 ```dockerfile
 # Before - Wrong command
-FROM python:3.11
+FROM python:3.12
 COPY . /app
 WORKDIR /app
 CMD python app.py
 
 # After - Proper entrypoint
-FROM python:3.11
+FROM python:3.12
 COPY . /app
 WORKDIR /app
 ENTRYPOINT ["python"]

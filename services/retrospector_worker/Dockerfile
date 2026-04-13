@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 # Create non-root user matching the agent-memory volume ownership
 RUN useradd -m -u 1000 -s /bin/bash bot
