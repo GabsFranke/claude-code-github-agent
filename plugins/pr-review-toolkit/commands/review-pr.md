@@ -34,6 +34,7 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
 
 3. **Identify Changed Files**
    - Run `git diff main --name-only` to see modified files in worktree
+   - **Always use local git commands for file listing** — do NOT parse large MCP `get_files` responses for this purpose. MCP file list responses can be very large (80KB+) and require fragile parsing. Local `git diff` gives you the same information in one fast command.
    - Agents can read files directly from the working directory
    - Identify file types and what reviews apply
 
@@ -104,7 +105,7 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
 
    **Option B: Full Review with Inline Comments**
    - Create pending review: `pull_request_review_write(method="create")`
-   - Add comments SEQUENTIALLY: `add_comment_to_pending_review()` for top 15-20 issues
+   - Add comments in PARALLEL: send all `add_comment_to_pending_review()` calls in one batch for top 15-20 issues
    - Submit review: `pull_request_review_write(method="submit_pending", event="COMMENT"/"REQUEST_CHANGES"/"APPROVE")`
 
    **If MCP not available:** Display results in console for manual review
@@ -190,6 +191,7 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
 - **Address critical first**: Fix high-priority issues before lower priority
 - **Re-run after fixes**: Can be manually triggered again after pushing fixes
 - **Use specific reviews**: Target specific aspects when you know the concern
+- **Local git > MCP for file stats**: When you need file lists or change stats, use local `git diff`/`git log` commands. MCP `get_files` and `get_diff` can return large persisted outputs that are fragile to parse. Use MCP for PR metadata (title, body, state) but local git for diff analysis.
 
 ## Workflow Integration:
 
