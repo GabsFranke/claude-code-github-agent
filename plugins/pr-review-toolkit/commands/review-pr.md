@@ -34,6 +34,8 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
 
 3. **Identify Changed Files**
    - Run `git diff main --name-only` to see modified files in worktree
+   - For file statistics use `git diff main --stat` (do NOT parse persisted `get_files` JSON output)
+   - **Large tool results:** When `get_files` or `get_diff` returns a persisted output (too large for inline display), the preview text is sufficient to identify file names. Do not attempt to parse the full persisted JSON for statistics.
    - Agents can read files directly from the working directory
    - Identify file types and what reviews apply
 
