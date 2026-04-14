@@ -34,8 +34,10 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
 
 3. **Identify Changed Files**
    - Run `git diff main --name-only` to see modified files in worktree
+   - Run `git diff --stat main` to get per-file addition/deletion counts (prefer this over parsing MCP API responses)
    - Agents can read files directly from the working directory
    - Identify file types and what reviews apply
+   - **Prefer local git commands over MCP API for file listing and statistics** — MCP `get_files` returns large JSON that is hard to parse; `git diff --stat main` is faster and more reliable
 
 4. **Determine Applicable Reviews**
 
@@ -104,8 +106,9 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
 
    **Option B: Full Review with Inline Comments**
    - Create pending review: `pull_request_review_write(method="create")`
-   - Add comments SEQUENTIALLY: `add_comment_to_pending_review()` for top 15-20 issues
+   - Add comments in PARALLEL BATCHES: issue multiple `add_comment_to_pending_review()` calls at once for top 15-20 issues
    - Submit review: `pull_request_review_write(method="submit_pending", event="COMMENT"/"REQUEST_CHANGES"/"APPROVE")`
+   - **Use `get_diff` sparingly** — in worktree context, reading files directly with the Read tool is preferred. Only use `get_diff` when you need to see the actual diff markers (additions vs deletions).
 
    **If MCP not available:** Display results in console for manual review
 
