@@ -5,6 +5,7 @@ import re
 import sys
 
 from fastapi import FastAPI, HTTPException, Request
+from payload_extractor import PayloadExtractor
 from validators import verify_signature
 
 from shared import get_queue
@@ -42,6 +43,9 @@ except Exception as e:
     print("\nFATAL ERROR: Failed to load workflows.yaml", file=sys.stderr)
     print(f"Error: {e}", file=sys.stderr)
     sys.exit(1)
+
+# Initialize payload extractor for generic field extraction
+extractor = PayloadExtractor()
 
 
 @app.get("/")
@@ -103,22 +107,11 @@ async def webhook(request: Request):
             "action": action,
         }
         user_query = ""
-        issue_number = None
-        ref = "main"
-
-        # Check if it's a comment with a command
         command = None
+
+        # --- Overlay: command parsing for issue_comment events ---
         if event_type == "issue_comment" and action == "created":
             body = data.get("comment", {}).get("body", "")
-            issue_number = data.get("issue", {}).get("number")
-
-            # Validate issue_number exists
-            if issue_number is None:
-                logger.warning("Issue comment event missing issue number")
-                return {
-                    "status": "error",
-                    "message": "Invalid issue comment: missing issue number",
-                }
 
             # Parse command from comment
             match = re.match(r"^(/\S+)\s*(.*)", body.strip())
@@ -143,94 +136,45 @@ async def webhook(request: Request):
 
                 event_data["command"] = command
 
-                # Determine ref for PRs
-                if "pull_request" in data.get("issue", {}):
-                    ref = f"refs/pull/{issue_number}/head"
-
                 logger.info(
                     "Command '%s' on issue #%s with query: %s",
                     command,
-                    issue_number,
+                    data.get("issue", {}).get("number"),
                     user_query[:50] if user_query else "(none)",
                 )
             else:
                 logger.debug("Comment does not contain a command")  # type: ignore[unreachable]
                 return {"status": "ignored", "message": "No command found in comment"}
-        elif event_type == "pull_request":
-            # For PR events, extract PR number
-            issue_number = data.get("pull_request", {}).get("number")
-            if issue_number is None:
-                logger.warning("Pull request event missing PR number")
-                return {
-                    "status": "error",
-                    "message": "Invalid pull request: missing PR number",
-                }
+
+        # --- Generic extraction for all event types ---
+        try:
+            fields = extractor.extract(event_type, action, data)
+        except ValueError as e:
+            logger.warning("Failed to extract fields: %s", e)
+            return {"status": "error", "message": str(e)}
+
+        issue_number = fields.issue_number
+        ref = fields.ref
+
+        # For issue_comment on a PR, compute the PR head ref
+        if (
+            event_type == "issue_comment"
+            and "pull_request" in data.get("issue", {})
+            and issue_number
+        ):
             ref = f"refs/pull/{issue_number}/head"
-            logger.info("Event %s.%s for issue #%s", event_type, action, issue_number)
-        elif event_type == "issues":
-            # For issue events, extract issue number
-            issue_number = data.get("issue", {}).get("number")
-            if issue_number is None:
-                logger.warning("Issue event missing issue number")
-                return {
-                    "status": "error",
-                    "message": "Invalid issue: missing issue number",
-                }
-            logger.info("Event %s.%s for issue #%s", event_type, action, issue_number)
-        elif event_type == "workflow_job" and action == "completed":
-            # For workflow job events, check if it failed
-            conclusion = data.get("workflow_job", {}).get("conclusion")
-            if conclusion != "failure":
-                logger.info(
-                    "Workflow job completed with conclusion '%s' - ignoring",
-                    conclusion,
-                )
-                return {
-                    "status": "ignored",
-                    "message": f"Workflow job conclusion is '{conclusion}', not 'failure'",
-                }
 
-            # Extract workflow run information
-            run_id = data.get("workflow_job", {}).get("run_id")
-            workflow_name_gh = data.get("workflow_job", {}).get("workflow_name")
-            job_name = data.get("workflow_job", {}).get("name")
+        # Merge extra fields into event_data
+        event_data.update(fields.extra)
 
-            # Extract the branch/ref where the workflow ran
-            # This is needed to target the correct branch for fixes
-            head_branch = data.get("workflow_job", {}).get("head_branch")
-            if head_branch:
-                ref = f"refs/heads/{head_branch}"
-                logger.info(f"Workflow ran on branch: {head_branch}")
-            else:
-                ref = "main"
-                logger.warning(
-                    "Could not determine branch from workflow_job, defaulting to main"
-                )
-
-            if run_id is None:
-                logger.warning("Workflow job event missing run_id")
-                return {
-                    "status": "error",
-                    "message": "Invalid workflow job: missing run_id",
-                }
-
-            # Use run_id as issue_number for routing
-            issue_number = run_id
-
-            logger.info(
-                "Workflow job failed: workflow='%s', job='%s', run_id=%s, branch=%s",
-                workflow_name_gh,
-                job_name,
-                run_id,
-                head_branch or "unknown",
-            )
-
-            # Store additional context for CI failure analysis
-            event_data["run_id"] = run_id
-            event_data["workflow_name_gh"] = workflow_name_gh
-            event_data["job_name"] = job_name
-            event_data["conclusion"] = conclusion
-            event_data["head_branch"] = head_branch
+        logger.info(
+            "Extracted: event=%s.%s issue=%s ref=%s user=%s",
+            event_type,
+            action,
+            issue_number,
+            ref,
+            fields.user,
+        )
 
         # Check if we have a workflow configured for this event/command
         workflow_name = None
@@ -250,14 +194,19 @@ async def webhook(request: Request):
                 "message": "No workflow configured for this event",
             }
 
-        # Get user who triggered this
-        user = "unknown"
-        if event_type == "issue_comment":
-            user = data.get("comment", {}).get("user", {}).get("login", "unknown")
-        elif event_type == "pull_request":
-            user = data.get("pull_request", {}).get("user", {}).get("login", "unknown")
-        elif event_type == "issues":
-            user = data.get("issue", {}).get("user", {}).get("login", "unknown")
+        # Check declarative payload filters
+        if not workflow_engine.check_filters(workflow_name, data):
+            logger.info(
+                "Workflow '%s' filters did not match payload - ignoring",
+                workflow_name,
+            )
+            return {
+                "status": "ignored",
+                "message": f"Payload did not match filters for workflow '{workflow_name}'",
+            }
+
+        # Get user who triggered this (from extractor)
+        user = fields.user
 
         # Check if we should skip events from the bot itself
         # The 'sender' field in GitHub webhooks is always the user who triggered the event

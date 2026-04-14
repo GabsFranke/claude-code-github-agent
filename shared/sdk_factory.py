@@ -248,8 +248,8 @@ class SDKOptionsBuilder:
             gemini_key = cfg.gemini_api_key
         else:
             indexing_enabled = os.getenv("INDEXING_ENABLED", "false").lower() == "true"
-            qdrant_url = os.getenv("QDRANT_URL")
-            gemini_key = os.getenv("GEMINI_API_KEY")
+            qdrant_url = os.getenv("QDRANT_URL") or ""
+            gemini_key = os.getenv("GEMINI_API_KEY") or ""
 
         if indexing_enabled and qdrant_url and gemini_key:
             self._mcp_servers["semantic-search"] = {

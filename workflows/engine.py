@@ -9,6 +9,8 @@ from typing import Any
 import yaml  # type: ignore[import-untyped]
 from pydantic import BaseModel, Field, ValidationError
 
+from shared.utils import resolve_path
+
 logger = logging.getLogger(__name__)
 
 
@@ -26,6 +28,11 @@ class TriggersConfig(BaseModel):
 
     events: list[str] = Field(default_factory=list, description="GitHub event triggers")
     commands: list[str] = Field(default_factory=list, description="Command triggers")
+    filters: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Payload field filters (dot-path: expected_value). "
+        "All filters must match for the workflow to trigger.",
+    )
 
 
 class ContextProfile(BaseModel):
@@ -35,7 +42,8 @@ class ContextProfile(BaseModel):
         default=2048, description="Token budget for the repomap"
     )
     personalized: bool = Field(
-        default=False, description="Whether to personalize repomap toward mentioned files"
+        default=False,
+        description="Whether to personalize repomap toward mentioned files",
     )
     include_test_files: bool = Field(
         default=True, description="Whether to include test files in personalization"
@@ -293,6 +301,50 @@ class WorkflowEngine:
             Workflow name or None if command not recognized
         """
         return self._command_map.get(command)
+
+    def check_filters(self, workflow_name: str, payload: dict) -> bool:
+        """Check if a payload matches the workflow's declarative filters.
+
+        Each filter is a dot-path key and expected value. If the expected
+        value is a list, the actual value must be in that list. Otherwise
+        exact equality is checked. All filters must pass (AND logic).
+
+        Args:
+            workflow_name: Name of the workflow.
+            payload: The parsed webhook payload dict.
+
+        Returns:
+            True if all filters match (or no filters defined), False otherwise.
+        """
+        if workflow_name not in self.workflows:
+            return False
+
+        filters = self.workflows[workflow_name].triggers.filters
+        if not filters:
+            return True
+
+        for dot_path, expected in filters.items():
+            actual = resolve_path(payload, dot_path)
+            if isinstance(expected, list):
+                if actual not in expected:
+                    logger.debug(
+                        "Filter '%s' mismatch: got %r, expected one of %s",
+                        dot_path,
+                        actual,
+                        expected,
+                    )
+                    return False
+            else:
+                if actual != expected:
+                    logger.debug(
+                        "Filter '%s' mismatch: got %r, expected %r",
+                        dot_path,
+                        actual,
+                        expected,
+                    )
+                    return False
+
+        return True
 
     def build_prompt(
         self,
