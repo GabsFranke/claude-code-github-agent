@@ -37,6 +37,8 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
    - Agents can read files directly from the working directory
    - Identify file types and what reviews apply
 
+   **Handling large tool outputs:** When GitHub MCP tool results (e.g., `get_files`, `get_diff`) exceed the inline display limit, the output is saved to a file path shown in the result. Use the `Read` tool on that file path to examine the full output — do NOT try to parse it with Python one-liners via Bash. If you need structured data, use `jq` or read the file directly.
+
 4. **Determine Applicable Reviews**
 
    Based on changes:
@@ -104,7 +106,7 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
 
    **Option B: Full Review with Inline Comments**
    - Create pending review: `pull_request_review_write(method="create")`
-   - Add comments SEQUENTIALLY: `add_comment_to_pending_review()` for top 15-20 issues
+   - Add comments IN PARALLEL: Send all `add_comment_to_pending_review()` calls together in a single message (they are independent and don't depend on each other). Limit to top 15-20 issues.
    - Submit review: `pull_request_review_write(method="submit_pending", event="COMMENT"/"REQUEST_CHANGES"/"APPROVE")`
 
    **If MCP not available:** Display results in console for manual review

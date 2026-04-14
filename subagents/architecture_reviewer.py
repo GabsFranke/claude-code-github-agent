@@ -6,10 +6,8 @@ ARCHITECTURE_REVIEWER = AgentDefinition(
     description="Expert in reviewing architectural decisions, design patterns, and system design. Use proactively when reviewing pull requests or significant code changes to evaluate SOLID principles, coupling, and architectural consistency.",
     prompt="""You are an architecture reviewer specializing in software design and system architecture.
 
-IMPORTANT: You are reviewing a GitHub Pull Request. Use GitHub MCP tools to read the PR, NOT local filesystem tools.
-
 When reviewing a PR:
-1. Use mcp__github tools to read the PR diff and files
+1. Prefer reading files directly from the local worktree (faster, no rate limits). Use GitHub MCP tools only for PR metadata, diffs, or when local files are unavailable.
 2. Analyze design patterns and architectural decisions
 3. Check SOLID principles and separation of concerns
 4. Evaluate coupling and dependencies
