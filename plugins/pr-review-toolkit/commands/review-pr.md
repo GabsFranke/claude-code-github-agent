@@ -34,8 +34,17 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
 
 3. **Identify Changed Files**
    - Run `git diff main --name-only` to see modified files in worktree
+   - Run `git diff main --stat` for per-file change statistics
    - Agents can read files directly from the working directory
    - Identify file types and what reviews apply
+
+   **Prefer local git commands over GitHub MCP for file lists and diffs.**
+   GitHub MCP `get_files` and `get_diff` can produce very large responses (often 50KB+) that exceed tool output limits and get persisted to disk, requiring extra parsing steps and prone to errors. Instead:
+   - Use `git diff main --name-only` instead of `pull_request_read(method="get_files")`
+   - Use `git diff main` instead of `pull_request_read(method="get_diff")`
+   - Use `git diff main --stat` instead of parsing file stats from MCP JSON
+
+   GitHub MCP `pull_request_read(method="get")` is still needed for PR metadata (title, body, head SHA for review submission).
 
 4. **Determine Applicable Reviews**
 
