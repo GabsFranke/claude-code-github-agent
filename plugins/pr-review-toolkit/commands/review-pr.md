@@ -33,7 +33,11 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
    - **all** - Run all applicable reviews (default)
 
 3. **Identify Changed Files**
-   - Run `git diff main --name-only` to see modified files in worktree
+   - **Use local git commands for file discovery and diff analysis** (faster, no rate limits, concise output):
+     - `git diff main --stat` — summary of changes (additions/deletions per file)
+     - `git diff main --name-only` — just the file list
+   - **Do NOT use `get_files` or `get_diff` via GitHub MCP for file identification** — those return large JSON payloads that get persisted to files and are hard to parse. Local git gives the same information instantly.
+   - Use GitHub MCP `get` only for PR metadata (title, body, commit SHA, author)
    - Agents can read files directly from the working directory
    - Identify file types and what reviews apply
 
@@ -104,7 +108,7 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
 
    **Option B: Full Review with Inline Comments**
    - Create pending review: `pull_request_review_write(method="create")`
-   - Add comments SEQUENTIALLY: `add_comment_to_pending_review()` for top 15-20 issues
+   - Add comments IN PARALLEL BATCHES: `add_comment_to_pending_review()` for top 15-20 issues, posting multiple comments per batch for efficiency
    - Submit review: `pull_request_review_write(method="submit_pending", event="COMMENT"/"REQUEST_CHANGES"/"APPROVE")`
 
    **If MCP not available:** Display results in console for manual review
@@ -190,6 +194,7 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
 - **Address critical first**: Fix high-priority issues before lower priority
 - **Re-run after fixes**: Can be manually triggered again after pushing fixes
 - **Use specific reviews**: Target specific aspects when you know the concern
+- **When tool output is too large**: If a tool result is persisted to a file (output too large), use the `Read` tool on the output file path rather than `cat | python3` — it handles large content natively
 
 ## Workflow Integration:
 
