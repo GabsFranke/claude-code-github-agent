@@ -11,6 +11,7 @@ Analyze GitHub Actions workflow failures and coordinate specialized agents to im
 
 - First argument: Repository (owner/repo format, required)
 - Second argument: Workflow run ID or PR number (required)
+  **IMPORTANT:** A workflow run ID (e.g., `24425975972`) is NOT a commit SHA. It is a GitHub Actions run identifier — use it ONLY with `mcp__github-actions__*` tools (e.g., `get_workflow_run_summary`). Never pass it to `mcp__github__get_commit` or any tool that expects a commit SHA.
 - Third argument: Failure type (optional: build, test, lint, deploy, all)
 
 **Context Variables Available:**
@@ -43,6 +44,7 @@ You are the main coordinator with these responsibilities:
 - **Subagents implement ALL fixes** - They work in your branch and commit their changes
 - **YOU create the PR** - After all fixes are committed by agents
 - **YOU post the final summary** - Comprehensive results to GitHub
+- **`gh` CLI is NOT available** - Never attempt `gh` commands; use `mcp__github__*` and `mcp__github-actions__*` tools exclusively
 
 **CRITICAL - Your Job is Coordination, NOT Implementation:**
 
@@ -219,6 +221,27 @@ Useful for finding specific errors in very long logs
 - Read in 500-line chunks - manageable size
 - Errors are usually at the END, so start there
 - You can read the entire log by paginating through it
+
+**Fallback: When GitHub Actions MCP Tools Are Unavailable**
+
+If `mcp__github-actions__*` tools are not available or return errors, use this alternative approach to gather failure information:
+
+1. **Find the associated PR** using `mcp__github__search_pull_requests` with the head branch name from your context
+2. **Get check run details** using `mcp__github__pull_request_read` with `method: "get_check_runs"` — this shows which jobs passed/failed and their IDs
+3. **Check annotations** from check runs for error summaries (may be limited but often enough for simple failures)
+4. **Run the failing tests locally** to reproduce and identify exact failures:
+   ```bash
+   # Install dependencies if needed
+   pip install -r requirements-dev.txt
+
+   # Run the test suite
+   python3 -m pytest tests/ -v --tb=short
+   ```
+5. Use the local test output to identify exact failures, then delegate to specialist agents with the local output
+
+**Why this works:** Running tests locally is the most reliable fallback when CI logs are inaccessible. The local test suite matches CI, so failures reproduced locally directly correspond to CI failures.
+
+**When to use this fallback:** Only when `mcp__github-actions__*` tools are genuinely unavailable. Always try the primary approach first — it provides richer context (logs, stack traces, timing info) that local runs may not surface.
 
 ### Step 3: Analyze Failure Scope and Type
 
