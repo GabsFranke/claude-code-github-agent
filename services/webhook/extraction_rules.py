@@ -34,6 +34,7 @@ EXTRACTION_RULES: dict[str, EventExtractionConfig] = {
     ),
     "pull_request_review_thread": EventExtractionConfig(
         issue_number=ExtractionRule(path="pull_request.number", required=True),
+        ref=ExtractionRule(path="pull_request.number"),
         user=ExtractionRule(path="sender.login"),
     ),
     # --- Issue events ---

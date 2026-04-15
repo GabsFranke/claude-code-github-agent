@@ -654,7 +654,7 @@ class TestNewEventTypes:
             "sender": {"login": "github-merge-queue"},
         }
         result = self.extractor.extract("merge_group", "checks_requested", data)
-        assert result.ref == "refs/heads/refs/heads/gh-readonly-queue/main/abc"
+        assert result.ref == "refs/heads/gh-readonly-queue/main/abc"
         assert result.user == "github-merge-queue"
         assert result.extra["base_ref"] == "main"
 

@@ -160,6 +160,12 @@ class PayloadExtractor:
 
         raw_ref: Any = self._extract_field(ref_rule, data)
         if raw_ref is None:
+            logger.debug(
+                "Ref rule path '%s' resolved to None for event '%s', "
+                "falling back to 'main'",
+                ref_rule.path,
+                event_type,
+            )
             return "main"
 
         # PR events: ref is the issue number, build PR head ref
@@ -184,17 +190,18 @@ class PayloadExtractor:
             "check_suite",
             "deployment",
             "deployment_status",
-            "merge_group",
         ):
             return f"refs/heads/{raw_ref}"
 
-        # Push / create / delete / workflow_dispatch: ref is already qualified
-        # or is a branch name that should be prefixed
-        if event_type == "push":
+        # Push / merge_group: ref is already fully qualified
+        if event_type in ("push", "merge_group"):
             return str(raw_ref)
 
-        # create / delete: ref is a branch/tag name
+        # create / delete: ref is a branch or tag name
         if event_type in ("create", "delete"):
+            ref_type = data.get("ref_type", "branch")
+            if ref_type == "tag":
+                return f"refs/tags/{raw_ref}"
             return f"refs/heads/{raw_ref}"
 
         # repository_dispatch: ref is the branch name

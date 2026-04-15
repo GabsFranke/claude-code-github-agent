@@ -73,6 +73,9 @@ class SDKOptionsBuilder:
         self._agents: dict | None = None
         self._repo_context: dict = {}  # Store context for hooks
         self._structural_context: str | None = None  # File tree + repomap
+        self._pending_post_jobs: list[dict] = (
+            []
+        )  # Buffered during session, flushed after
 
     # Model selection methods
 
@@ -410,10 +413,14 @@ class SDKOptionsBuilder:
     def with_transcript_staging(
         self, repo: str, workflow_name: str | None = None, ref: str | None = None
     ) -> "SDKOptionsBuilder":
-        """Add post-session hooks for transcript staging and job enqueueing.
+        """Add post-session hooks for transcript staging and job buffering.
 
-        This hook stages transcripts to the shared volume and enqueues
-        memory extraction and retrospection jobs after agent sessions complete.
+        This hook stages transcripts to the shared volume and buffers
+        post-processing jobs (memory, retrospector, indexing) in
+        ``_pending_post_jobs``. Jobs are NOT enqueued immediately — the
+        SDK may fire Stop/SubagentStop multiple times per session. The
+        caller must invoke ``flush_pending_post_jobs()`` after the SDK
+        session ends to deduplicate and enqueue the final set of jobs.
 
         Args:
             repo: Repository identifier (e.g., "owner/repo")
@@ -438,87 +445,159 @@ class SDKOptionsBuilder:
 
         # Capture context from builder for hooks to use
         repo_context = self._repo_context
+        pending = self._pending_post_jobs
 
-        async def capture_and_enqueue(input_data, _tool_use_id, _context):
-            """Stage transcript and enqueue post-processing jobs."""
-            transcript = (
-                input_data.get("agent_transcript_path")
-                or input_data.get("transcriptPath")
-                or input_data.get("transcript_path")
+        async def capture_and_buffer(input_data, _tool_use_id, _context):
+            """Stage transcript and buffer post-processing jobs for later flush."""
+            event = input_data.get("hook_event_name", "Stop")
+
+            # Select the correct transcript source based on event type.
+            if event == "SubagentStop":
+                transcript = input_data.get("agent_transcript_path")
+            else:
+                transcript = input_data.get("transcriptPath") or input_data.get(
+                    "transcript_path"
+                )
+
+            if not transcript:
+                return {"success": True}
+
+            logger.debug(f"Post-session hook triggered: {transcript} ({event})")
+
+            # Copy to shared volume for post-processing workers
+            staged_path = await _stage_transcript_with_retry(
+                repo,
+                transcript,
+                hook_event=event,
+                agent_id=input_data.get("agent_id"),
+                workflow_name=workflow_name,
             )
-            if transcript:
-                event = input_data.get("hook_event_name", "Stop")
-                logger.debug(f"Post-session hook triggered: {transcript} ({event})")
+            if not staged_path:
+                logger.error(
+                    f"Failed to stage transcript {transcript} after retries, "
+                    "skipping post-processing"
+                )
+                return {"success": False, "error": "transcript_staging_failed"}
 
-                # Copy to shared volume for post-processing workers
-                staged_path = await _stage_transcript_with_retry(repo, transcript)
-                if not staged_path:
-                    logger.error(
-                        f"Failed to stage transcript {transcript} after retries, "
-                        "skipping post-processing"
-                    )
-                    return {"success": False, "error": "transcript_staging_failed"}
+            # Buffer the job — don't enqueue yet
+            if memory_enabled:
+                pending.append(
+                    {
+                        "type": "memory",
+                        "repo": repo,
+                        "staged_path": staged_path,
+                        "event": event,
+                        "claude_md": repo_context.get("claude_md"),
+                        "memory_index": repo_context.get("memory_index"),
+                    }
+                )
 
-                # Enqueue jobs with error handling, passing pre-fetched context
-                if memory_enabled:
-                    try:
-                        await _enqueue_memory_job(
-                            repo,
-                            staged_path,
-                            event,
-                            claude_md=repo_context.get("claude_md"),
-                            memory_index=repo_context.get("memory_index"),
-                        )
-                    except Exception as e:
-                        logger.error(
-                            f"Failed to enqueue memory job: {e}", exc_info=True
-                        )
+            if retrospector_enabled:
+                pending.append(
+                    {
+                        "type": "retrospector",
+                        "repo": repo,
+                        "staged_path": staged_path,
+                        "event": event,
+                        "workflow_name": workflow_name,
+                        "session_meta": {
+                            "num_turns": input_data.get("num_turns", 0),
+                            "is_error": input_data.get("is_error", False),
+                            "duration_ms": input_data.get("duration_ms", 0),
+                            "agent_id": input_data.get("agent_id"),
+                            "agent_type": input_data.get("agent_type"),
+                        },
+                    }
+                )
 
-                if retrospector_enabled:
-                    try:
-                        # Extract agent metadata for SubagentStop events
-                        agent_id = input_data.get("agent_id")
-                        agent_type = input_data.get("agent_type")
+            if indexing_enabled:
+                pending.append(
+                    {
+                        "type": "indexing",
+                        "repo": repo,
+                        "event": event,
+                        "ref": ref,
+                    }
+                )
 
-                        await _enqueue_retrospector_job(
-                            repo,
-                            staged_path,
-                            event,
-                            workflow_name,
-                            {
-                                "num_turns": input_data.get("num_turns", 0),
-                                "is_error": input_data.get("is_error", False),
-                                "duration_ms": input_data.get("duration_ms", 0),
-                                "agent_id": agent_id,
-                                "agent_type": agent_type,
-                            },
-                        )
-                    except Exception as e:
-                        logger.error(
-                            f"Failed to enqueue retrospector job: {e}", exc_info=True
-                        )
-
-                if indexing_enabled:
-                    try:
-                        await _enqueue_indexing_job(repo, event, ref=ref)
-                    except Exception as e:
-                        logger.error(
-                            f"Failed to enqueue indexing job: {e}", exc_info=True
-                        )
             return {"success": True}
 
         if memory_enabled or retrospector_enabled:
             for event in ("Stop", "SubagentStop"):
                 if event in self._hooks:
                     self._hooks[event].append(
-                        HookMatcher(matcher="*", hooks=[capture_and_enqueue])
+                        HookMatcher(matcher="*", hooks=[capture_and_buffer])
                     )
                 else:
                     self._hooks[event] = [
-                        HookMatcher(matcher="*", hooks=[capture_and_enqueue])
+                        HookMatcher(matcher="*", hooks=[capture_and_buffer])
                     ]
 
         return self
+
+    async def flush_pending_post_jobs(self) -> None:
+        """Flush buffered post-processing jobs after the SDK session ends.
+
+        Deduplicates buffered jobs by (staged_path, event, type) — keeping
+        only the last occurrence — then enqueues them to the respective
+        Redis queues. Must be called after ``execute_sdk()`` returns.
+
+        Safe to call even if no jobs were buffered (no-op).
+        """
+        pending = self._pending_post_jobs
+        if not pending:
+            return
+
+        # Dedup: for the same (staged_path, event, type), keep only the
+        # last entry. This handles the case where the SDK fires Stop
+        # multiple times per session — each subsequent fire appends a
+        # newer entry, and we want the latest metadata.
+        seen: dict[tuple, dict] = {}
+        for job in pending:
+            key = (job.get("staged_path", ""), job.get("event"), job["type"])
+            seen[key] = job  # Last one wins
+
+        deduped = list(seen.values())
+        total = len(pending)
+        removed = total - len(deduped)
+        if removed:
+            logger.info(
+                f"Flush: deduped {removed} duplicate post-processing jobs "
+                f"({total} -> {len(deduped)})"
+            )
+
+        # Clear the buffer so a reused builder doesn't double-flush
+        self._pending_post_jobs = []
+
+        # Enqueue each job
+        for job in deduped:
+            try:
+                job_type = job["type"]
+                if job_type == "memory":
+                    await _enqueue_memory_job(
+                        job["repo"],
+                        job["staged_path"],
+                        job["event"],
+                        claude_md=job.get("claude_md"),
+                        memory_index=job.get("memory_index"),
+                    )
+                elif job_type == "retrospector":
+                    await _enqueue_retrospector_job(
+                        job["repo"],
+                        job["staged_path"],
+                        job["event"],
+                        job.get("workflow_name"),
+                        job.get("session_meta", {}),
+                    )
+                elif job_type == "indexing":
+                    await _enqueue_indexing_job(
+                        job["repo"], job["event"], ref=job.get("ref")
+                    )
+            except Exception as e:
+                logger.error(
+                    f"Failed to enqueue {job['type']} job during flush: {e}",
+                    exc_info=True,
+                )
 
     # Directory methods
 
@@ -866,7 +945,12 @@ def _truncate_text(text: str, max_tokens: int) -> str | None:
 
 
 async def _stage_transcript_with_retry(
-    repo: str, transcript_path: str, max_retries: int = 3
+    repo: str,
+    transcript_path: str,
+    max_retries: int = 3,
+    hook_event: str | None = None,
+    agent_id: str | None = None,
+    workflow_name: str | None = None,
 ) -> str | None:
     """Stage transcript with exponential backoff retry.
 
@@ -874,12 +958,21 @@ async def _stage_transcript_with_retry(
         repo: Repository identifier
         transcript_path: Path to transcript file
         max_retries: Maximum number of retry attempts (default: 3)
+        hook_event: Hook event name (passed to _stage_transcript for naming)
+        agent_id: Subagent identifier (passed to _stage_transcript for naming)
+        workflow_name: Workflow name (passed to _stage_transcript for naming)
 
     Returns:
         Staged path on success, None on failure after all retries
     """
     for attempt in range(max_retries):
-        result = await _stage_transcript(repo, transcript_path)
+        result = await _stage_transcript(
+            repo,
+            transcript_path,
+            hook_event=hook_event,
+            agent_id=agent_id,
+            workflow_name=workflow_name,
+        )
         if result:
             return result
 
@@ -893,14 +986,27 @@ async def _stage_transcript_with_retry(
     return None
 
 
-async def _stage_transcript(repo: str, transcript_path: str) -> str | None:
+async def _stage_transcript(
+    repo: str,
+    transcript_path: str,
+    hook_event: str | None = None,
+    agent_id: str | None = None,
+    workflow_name: str | None = None,
+) -> str | None:
     """Copy transcript to the shared transcripts volume for post-processing workers.
 
     The transcript is persisted permanently for future analysis and debugging.
+    Files are named descriptively for easy identification:
+
+    - Main session: ``{workflow_name}_{timestamp}.jsonl``
+    - Subagent: ``subagent_{agent_id}_{timestamp}.jsonl``
 
     Args:
         repo: Repository identifier
         transcript_path: Path to transcript file
+        hook_event: Hook event name (Stop or SubagentStop)
+        agent_id: Subagent identifier (e.g., "comment-analyzer")
+        workflow_name: Workflow name (e.g., "review-pr")
 
     Returns:
         Staged path on success, None on failure
@@ -911,10 +1017,23 @@ async def _stage_transcript(repo: str, transcript_path: str) -> str | None:
         return None
 
     staged_dir = f"/home/bot/transcripts/{repo}"
-
-    # Use asyncio.to_thread for blocking I/O operations
     await asyncio.to_thread(os.makedirs, staged_dir, exist_ok=True)
-    staged_path = os.path.join(staged_dir, transcript_file.name)
+
+    # Build a descriptive filename. Use the original transcript's
+    # stem as a session identifier so multiple hook fires for the
+    # same session overwrite the same staged file (keeping the
+    # latest/most-complete version). The descriptive prefix makes
+    # it easy to identify which session/subagent produced it.
+    suffix = transcript_file.suffix or ".jsonl"
+    session_stem = transcript_file.stem  # e.g., "session-abc123"
+
+    if hook_event == "SubagentStop" and agent_id:
+        filename = f"subagent_{agent_id}_{session_stem}{suffix}"
+    else:
+        name = workflow_name or "session"
+        filename = f"{name}_{session_stem}{suffix}"
+
+    staged_path = os.path.join(staged_dir, filename)
     try:
         await asyncio.to_thread(shutil.copy2, transcript_path, staged_path)
         logger.info(f"Transcript staged: {staged_path}")
@@ -972,10 +1091,10 @@ async def _enqueue_retrospector_job(
     workflow_name: str | None,
     session_meta: dict,
 ) -> None:
-    """Enqueue a retrospection job — fires after Stop/SubagentStop hooks.
+    """Enqueue a retrospection job for an already-persisted transcript.
 
-    Both Stop (main agent) and SubagentStop events trigger retrospection.
-    Each subagent session gets its own analysis to improve subagent instructions.
+    Called by ``flush_pending_post_jobs()`` after deduplication, not
+    directly from SDK hooks.
 
     Args:
         repo: Repository identifier
@@ -1005,7 +1124,6 @@ async def _enqueue_retrospector_job(
                 f"[{workflow_name or 'unknown'}] [{hook_event}]"
             )
         finally:
-            # Don't close the connection, just release it back to pool
             await rc.aclose()  # type: ignore[attr-defined]
     except Exception as e:
         logger.warning(f"Failed to enqueue retrospector job for {repo}: {e}")

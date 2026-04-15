@@ -167,8 +167,10 @@ The bot uses a payload extraction registry to support any GitHub event type. The
 | `label` | `user` | Label name/color in extras |
 | `milestone` | `user` | Milestone title in extras |
 | `star` | `user` | |
+| `watch` | `user` | |
 | `fork` | `user` | Fork full name in extras |
 | `member` | `user` | Member login in extras |
+| `repository` | `user` | |
 | `branch_protection_configuration` | `user` | |
 | `branch_protection_rule` | `user` | Rule name in extras |
 | `team` | `user` | |

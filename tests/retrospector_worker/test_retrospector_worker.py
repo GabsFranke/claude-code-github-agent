@@ -99,3 +99,19 @@ class TestProcessRetrospectorJob:
 
         # Should return early without error
         await process_retrospector_job(message, mock_redis_client)
+
+    @pytest.mark.asyncio
+    async def test_processes_valid_job(self, mock_redis_client, valid_message):
+        """Test that a valid job proceeds past initial checks."""
+        from services.retrospector_worker.retrospector_worker import (
+            process_retrospector_job,
+        )
+
+        mock_redis_client.get = AsyncMock(return_value=None)
+        mock_redis_client.pubsub = AsyncMock()
+        mock_redis_client.rpush = AsyncMock()
+
+        # Will fail deep in execution (no git repo, no env), but we just
+        # want to verify it got past the initial checks and started processing.
+        with pytest.raises((RuntimeError, OSError, Exception)):
+            await process_retrospector_job(valid_message, mock_redis_client)

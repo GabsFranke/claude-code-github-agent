@@ -151,7 +151,7 @@ async def webhook(request: Request):
             fields = extractor.extract(event_type, action, data)
         except ValueError as e:
             logger.warning("Failed to extract fields: %s", e)
-            return {"status": "error", "message": str(e)}
+            raise HTTPException(status_code=422, detail=str(e)) from e
 
         issue_number = fields.issue_number
         ref = fields.ref
