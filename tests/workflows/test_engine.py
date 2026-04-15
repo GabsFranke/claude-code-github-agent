@@ -5,7 +5,57 @@ from pathlib import Path
 import pytest
 import yaml
 
-from workflows.engine import WorkflowEngine
+from workflows.engine import WorkflowEngine, get_workflow_engine
+
+
+class TestGetWorkflowEngine:
+    """Test get_workflow_engine factory function with caching."""
+
+    def test_returns_workflow_engine_instance(self, tmp_path):
+        """Test that factory returns a WorkflowEngine instance."""
+        config_file = tmp_path / "workflows.yaml"
+        config_file.write_text(
+            yaml.dump(
+                {
+                    "workflows": {
+                        "my-workflow": {
+                            "triggers": {"commands": ["/test"]},
+                            "prompt": {"template": "test"},
+                        }
+                    }
+                }
+            )
+        )
+
+        engine = get_workflow_engine(str(config_file))
+        assert isinstance(engine, WorkflowEngine)
+
+    def test_returns_cached_instance(self, tmp_path):
+        """Test that factory returns the same cached instance."""
+        config_file = tmp_path / "workflows.yaml"
+        config_file.write_text(
+            yaml.dump(
+                {
+                    "workflows": {
+                        "my-workflow": {
+                            "triggers": {"commands": ["/test"]},
+                            "prompt": {"template": "test"},
+                        }
+                    }
+                }
+            )
+        )
+
+        engine1 = get_workflow_engine(str(config_file))
+        engine2 = get_workflow_engine(str(config_file))
+
+        # Should be the exact same object (cached)
+        assert engine1 is engine2
+
+    def test_cache_has_info(self):
+        """Test that the factory function has cache_info (is cached)."""
+        assert hasattr(get_workflow_engine, "cache_info")
+        assert hasattr(get_workflow_engine, "cache_clear")
 
 
 class TestWorkflowEngine:
@@ -536,3 +586,131 @@ class TestWorkflowEngineIntegration:
 
         with pytest.raises(ValueError, match="empty template"):
             WorkflowEngine(workflow_file)
+
+
+class TestCheckFilters:
+    """Test the declarative payload filter matching."""
+
+    @pytest.fixture
+    def engine_with_filters(self, tmp_path):
+        """Create an engine with workflows that have filters."""
+        workflows_yaml = {
+            "workflows": {
+                "fix-ci": {
+                    "triggers": {
+                        "events": ["workflow_job.completed"],
+                        "filters": {"workflow_job.conclusion": "failure"},
+                        "commands": ["/fix-ci"],
+                    },
+                    "prompt": {"template": "fix {repo}"},
+                },
+                "label-review": {
+                    "triggers": {
+                        "events": ["label.created"],
+                        "filters": {"label.name": "review"},
+                        "commands": ["/label-review"],
+                    },
+                    "prompt": {"template": "label {repo}"},
+                },
+                "multi-filter": {
+                    "triggers": {
+                        "events": ["workflow_job.completed"],
+                        "filters": {
+                            "workflow_job.conclusion": "failure",
+                            "workflow_job.head_branch": "develop",
+                        },
+                        "commands": ["/multi"],
+                    },
+                    "prompt": {"template": "multi {repo}"},
+                },
+                "list-filter": {
+                    "triggers": {
+                        "events": ["label.created"],
+                        "filters": {"label.name": ["bug", "review", "enhancement"]},
+                        "commands": ["/list-filter"],
+                    },
+                    "prompt": {"template": "list {repo}"},
+                },
+                "no-filter": {
+                    "triggers": {
+                        "events": ["issues.opened"],
+                        "commands": ["/no-filter"],
+                    },
+                    "prompt": {"template": "nofilter {repo}"},
+                },
+            }
+        }
+        workflow_file = tmp_path / "workflows.yaml"
+        with open(workflow_file, "w", encoding="utf-8") as f:
+            yaml.dump(workflows_yaml, f)
+        return WorkflowEngine(workflow_file)
+
+    def test_single_filter_matches(self, engine_with_filters):
+        """Payload matching a single filter passes."""
+        payload = {
+            "workflow_job": {"conclusion": "failure", "head_branch": "main"},
+        }
+        assert engine_with_filters.check_filters("fix-ci", payload) is True
+
+    def test_single_filter_no_match(self, engine_with_filters):
+        """Payload not matching a single filter is rejected."""
+        payload = {
+            "workflow_job": {"conclusion": "success", "head_branch": "main"},
+        }
+        assert engine_with_filters.check_filters("fix-ci", payload) is False
+
+    def test_filter_missing_field(self, engine_with_filters):
+        """Payload missing the filtered field is rejected."""
+        payload = {"workflow_job": {}}
+        assert engine_with_filters.check_filters("fix-ci", payload) is False
+
+    def test_no_filters_always_passes(self, engine_with_filters):
+        """Workflow without filters always passes."""
+        payload = {"issue": {"number": 1}}
+        assert engine_with_filters.check_filters("no-filter", payload) is True
+
+    def test_no_filters_empty_payload(self, engine_with_filters):
+        """Workflow without filters passes even with empty payload."""
+        assert engine_with_filters.check_filters("no-filter", {}) is True
+
+    def test_multiple_filters_all_match(self, engine_with_filters):
+        """All filters must match (AND logic)."""
+        payload = {
+            "workflow_job": {
+                "conclusion": "failure",
+                "head_branch": "develop",
+            },
+        }
+        assert engine_with_filters.check_filters("multi-filter", payload) is True
+
+    def test_multiple_filters_partial_match(self, engine_with_filters):
+        """If one filter fails, the whole check fails."""
+        payload = {
+            "workflow_job": {
+                "conclusion": "failure",
+                "head_branch": "main",
+            },
+        }
+        assert engine_with_filters.check_filters("multi-filter", payload) is False
+
+    def test_list_filter_value_matches(self, engine_with_filters):
+        """Filter with list value matches when actual is in the list."""
+        payload = {"label": {"name": "bug"}}
+        assert engine_with_filters.check_filters("list-filter", payload) is True
+
+    def test_list_filter_value_no_match(self, engine_with_filters):
+        """Filter with list value rejects when actual is not in list."""
+        payload = {"label": {"name": "wontfix"}}
+        assert engine_with_filters.check_filters("list-filter", payload) is False
+
+    def test_unknown_workflow_returns_false(self, engine_with_filters):
+        """Unknown workflow name returns False."""
+        assert engine_with_filters.check_filters("nonexistent", {}) is False
+
+    def test_label_name_filter(self, engine_with_filters):
+        """Filter on label.name for the review-on-label workflow."""
+        payload = {"label": {"name": "review"}}
+        assert engine_with_filters.check_filters("label-review", payload) is True
+
+        payload = {"label": {"name": "enhancement"}}
+        assert engine_with_filters.check_filters("label-review", payload) is False

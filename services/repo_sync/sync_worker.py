@@ -141,8 +141,9 @@ async def process_sync_request(message: dict, redis_client):
                 await redis_client.publish(completion_channel, error_event)
                 return
 
-        # Publish completion signal with shorter TTL to avoid Redis bloat
-        await redis_client.set(complete_key, "1", ex=300)  # Expires in 5 minutes
+        # Publish completion signal with TTL longer than max job duration
+        # This ensures queued jobs can still see the completion even if previous jobs take time
+        await redis_client.set(complete_key, "1", ex=3600)  # Expires in 1 hour
 
         # Publish completion event to pub/sub channel for waiting workers
         completion_channel = "agent:sync:events"

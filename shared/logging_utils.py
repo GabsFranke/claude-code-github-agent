@@ -2,13 +2,26 @@
 
 import logging
 
+# Third-party loggers that are noisy at DEBUG/INFO and should be quieted.
+_NOISY_LOGGERS = (
+    "httpcore",
+    "httpx",
+    "urllib3",
+    "google_genai",
+    "google.auth",
+    "qdrant_client",
+    "redis",
+    "asyncio",
+    "filelock",
+)
 
-def setup_logging(level: str | int = "INFO", silence_noisy: bool = False) -> None:
+
+def setup_logging(level: str | int = "INFO", silence_noisy: bool = True) -> None:
     """Setup logging with consistent format across all services.
 
     Args:
         level: Log level (string like "INFO" or int like logging.INFO)
-        silence_noisy: Whether to silence noisy HTTP/network loggers
+        silence_noisy: Whether to silence noisy third-party loggers (default True).
     """
     # Convert string level to int if needed
     if isinstance(level, str):
@@ -17,15 +30,13 @@ def setup_logging(level: str | int = "INFO", silence_noisy: bool = False) -> Non
         numeric_level = level
 
     # Configure basic logging
-    # Note: basicConfig only works on first call, so we also set root logger directly
     logging.basicConfig(
         level=numeric_level,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        force=True,  # Force reconfiguration (Python 3.8+)
+        force=True,
     )
 
-    # Silence noisy loggers if requested
+    # Silence noisy third-party loggers unless explicitly disabled
     if silence_noisy:
-        logging.getLogger("httpcore").setLevel(logging.INFO)
-        logging.getLogger("httpx").setLevel(logging.INFO)
-        logging.getLogger("urllib3").setLevel(logging.INFO)
+        for name in _NOISY_LOGGERS:
+            logging.getLogger(name).setLevel(logging.WARNING)

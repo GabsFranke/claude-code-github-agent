@@ -21,23 +21,25 @@ All code must pass these checks before being committed.
 
 ## Quick Fix Command
 
-The project has a bash script for code quality checks:
+The project has a bash script for code quality checks.
+
+**NOTE:** The script is not executable in git. Always invoke it with `bash`:
 
 ```bash
 # Check code quality (read-only)
-./check-code.sh
+bash ./check-code.sh
 
 # Auto-fix formatting and imports
-./check-code.sh --fix
+bash ./check-code.sh --fix
 
 # Fast mode (skip mypy)
-./check-code.sh --fast
+bash ./check-code.sh --fast
 
 # Skip type checking
-./check-code.sh --skip-mypy
+bash ./check-code.sh --skip-mypy
 
 # Verbose output
-./check-code.sh --verbose
+bash ./check-code.sh --verbose
 ```
 
 **For CI fixes, always run with `--fix` to auto-fix issues before committing.**
@@ -67,7 +69,7 @@ After auto-fixing, verify all checks pass:
 
 ```bash
 # Run all checks
-./check-code.sh
+bash ./check-code.sh
 
 # Or manually:
 black --check services/ shared/ subagents/ hooks/ plugins/ tests/
@@ -222,7 +224,7 @@ When fixing CI lint failures:
 2. **Verify fixes:**
 
    ```bash
-   ./check-code.sh
+   bash ./check-code.sh
    ```
 
 3. **Fix remaining issues manually** (if any)
@@ -317,7 +319,7 @@ def process(data: Any) -> Any:
 ## Best Practices
 
 1. **Always run auto-fixers first** - Don't manually format code
-2. **Use the check-code.sh script** - It runs all checks in the right order
+2. **Use the check-code.sh script** - Run it with `bash ./check-code.sh` (the script lacks execute permission in git)
 3. **Fix issues before committing** - Don't push code that fails checks
 4. **Add type hints** - Help mypy catch errors early
 5. **Follow async patterns** - Use async/await for I/O operations
@@ -335,7 +337,7 @@ isort services/ shared/ subagents/ hooks/ plugins/ tests/
 ruff check --fix services/ shared/ subagents/ hooks/ plugins/ tests/
 
 # 2. Verify
-./check-code.sh
+bash ./check-code.sh
 
 # 3. Commit and push
 git add .

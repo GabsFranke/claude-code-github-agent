@@ -266,7 +266,7 @@ Test your setup commands in a similar environment:
 
 ```bash
 # Start a Python 3.11 container
-docker run -it --rm python:3.11-slim bash
+docker run -it --rm python:3.12-slim bash
 
 # Install sudo
 apt-get update && apt-get install -y sudo

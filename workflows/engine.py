@@ -2,11 +2,14 @@
 
 import logging
 import string
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 import yaml  # type: ignore[import-untyped]
 from pydantic import BaseModel, Field, ValidationError
+
+from shared.utils import resolve_path
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +28,30 @@ class TriggersConfig(BaseModel):
 
     events: list[str] = Field(default_factory=list, description="GitHub event triggers")
     commands: list[str] = Field(default_factory=list, description="Command triggers")
+    filters: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Payload field filters (dot-path: expected_value). "
+        "All filters must match for the workflow to trigger.",
+    )
+
+
+class ContextProfile(BaseModel):
+    """Context configuration for structural context generation."""
+
+    repomap_budget: int = Field(
+        default=2048, description="Token budget for the repomap"
+    )
+    personalized: bool = Field(
+        default=False,
+        description="Whether to personalize repomap toward mentioned files",
+    )
+    include_test_files: bool = Field(
+        default=True, description="Whether to include test files in personalization"
+    )
+    priority_focus: list[str] = Field(
+        default_factory=list,
+        description="Focus areas for repomap ranking (e.g., ['build_system', 'test_structure'])",
+    )
 
 
 class WorkflowConfig(BaseModel):
@@ -36,6 +63,10 @@ class WorkflowConfig(BaseModel):
     skip_self: bool = Field(
         default=True,
         description="Skip events triggered by the bot itself (default: true)",
+    )
+    context: ContextProfile = Field(
+        default_factory=ContextProfile,
+        description="Context profile for structural context generation",
     )
 
 
@@ -271,6 +302,50 @@ class WorkflowEngine:
         """
         return self._command_map.get(command)
 
+    def check_filters(self, workflow_name: str, payload: dict) -> bool:
+        """Check if a payload matches the workflow's declarative filters.
+
+        Each filter is a dot-path key and expected value. If the expected
+        value is a list, the actual value must be in that list. Otherwise
+        exact equality is checked. All filters must pass (AND logic).
+
+        Args:
+            workflow_name: Name of the workflow.
+            payload: The parsed webhook payload dict.
+
+        Returns:
+            True if all filters match (or no filters defined), False otherwise.
+        """
+        if workflow_name not in self.workflows:
+            return False
+
+        filters = self.workflows[workflow_name].triggers.filters
+        if not filters:
+            return True
+
+        for dot_path, expected in filters.items():
+            actual = resolve_path(payload, dot_path)
+            if isinstance(expected, list):
+                if actual not in expected:
+                    logger.debug(
+                        "Filter '%s' mismatch: got %r, expected one of %s",
+                        dot_path,
+                        actual,
+                        expected,
+                    )
+                    return False
+            else:
+                if actual != expected:
+                    logger.debug(
+                        "Filter '%s' mismatch: got %r, expected %r",
+                        dot_path,
+                        actual,
+                        expected,
+                    )
+                    return False
+
+        return True
+
     def build_prompt(
         self,
         workflow_name: str,
@@ -412,3 +487,43 @@ class WorkflowEngine:
             name: workflow.description or "No description"
             for name, workflow in self.workflows.items()
         }
+
+    def get_context_profile(self, workflow_name: str) -> dict:
+        """Get the context profile for a workflow.
+
+        Args:
+            workflow_name: Name of the workflow.
+
+        Returns:
+            Dict with context profile settings (repomap_budget, personalized, etc.)
+        """
+        if workflow_name not in self.workflows:
+            return {}
+
+        profile = self.workflows[workflow_name].context
+        return {
+            "repomap_budget": profile.repomap_budget,
+            "personalized": profile.personalized,
+            "include_test_files": profile.include_test_files,
+            "priority_focus": profile.priority_focus,
+        }
+
+
+@lru_cache(maxsize=1)
+def get_workflow_engine(config_path: str | None = None) -> WorkflowEngine:
+    """Get cached WorkflowEngine instance (singleton per config path).
+
+    The engine is cached to avoid repeatedly parsing and validating workflows.yaml.
+    Since workflow configuration is static during runtime, caching provides
+    significant performance benefits with no downsides.
+
+    Args:
+        config_path: Path to workflows.yaml file (defaults to workflows.yaml in project root)
+
+    Returns:
+        Cached WorkflowEngine instance
+
+    Note:
+        Changes to workflows.yaml require a process restart to take effect.
+    """
+    return WorkflowEngine(config_path)
