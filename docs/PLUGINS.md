@@ -217,6 +217,89 @@ You can use both:
 
 Both are available via the Task tool.
 
+## MCP Servers
+
+Custom MCP servers can be added alongside the GitHub MCP. These are defined as part of the Claude Agent SDK configuration.
+
+### Memory MCP Server
+
+A built-in MCP server that provides persistent knowledge storage for repositories:
+
+```
+mcp_servers/memory/
+├── server.py    # stdio-based MCP server
+├── tools.py     # memory_read / memory_write implementations
+└── __init__.py
+```
+
+**Tools provided**:
+
+- `memory_read(file_path?)` - List or read memory files for the current repository
+- `memory_write(file_path, content)` - Create or update memory files
+
+The Memory MCP server is used by:
+1. **Sandbox workers** - Read memory at startup to get context from prior sessions
+2. **Memory worker** - Write extracted knowledge after session completion
+
+Memory files are stored in the shared `agent-memory` Docker volume at `/home/bot/agent-memory/{repo}/memory/`.
+
+### Codebase Tools MCP Server
+
+An MCP server that provides AST-based code search and file summaries for the current worktree:
+
+```
+mcp_servers/codebase_tools/
+├── server.py    # stdio-based MCP server
+├── tools.py     # search_codebase / read_file_summary implementations
+└── __init__.py
+```
+
+**Tools provided**:
+
+- `find_definitions(symbol_name)` - Find where a symbol (class, function, method) is defined
+- `find_references(symbol_name)` - Find all references to a symbol across the codebase
+- `search_codebase(pattern, file_type, max_results)` - Regex-based code search with ripgrep or Python fallback
+- `read_file_summary(filepath, max_lines)` - Structured analysis of a source file (definitions, imports, structure)
+
+Uses the shared tree-sitter language registry (`shared/ts_languages.py`) for multi-language support (10 languages with regex fallback).
+
+### Semantic Search MCP Server
+
+An MCP server that provides embedding-based semantic code search via Qdrant:
+
+```
+mcp_servers/semantic_search/
+├── server.py    # stdio-based MCP server
+├── tools.py     # semantic_search implementation
+└── __init__.py
+```
+
+**Tools provided**:
+
+- `semantic_search(query, max_results, file_filter, kind_filter)` - Natural language code search using Gemini embeddings and Qdrant vector similarity
+
+Requires prior indexing by the Indexing Worker. Connects to Qdrant and uses `gemini-embedding-001` for query embedding. Supports filtering by filepath pattern and chunk kind (function, class, method).
+
+### Adding a Custom MCP Server
+
+MCP servers can be configured in `ClaudeAgentOptions`:
+
+```python
+options = ClaudeAgentOptions(
+    mcp_servers={
+        "my-server": {
+            "type": "stdio",
+            "command": "python3",
+            "args": ["/app/mcp_servers/my_server/server.py"],
+            "env": {"KEY": "value"},
+        }
+    },
+    # ... other options
+)
+```
+
+See the Memory MCP server implementation in `mcp_servers/memory/` as a reference.
+
 ## Troubleshooting
 
 **Plugin not loading:**

@@ -18,9 +18,18 @@ flowchart LR
 
     JQ --> SW[Sandbox<br/>Workers]
     CACHE -.->|worktree| SW
+    CACHE -.->|worktree| IDX
 
-    SW --> |Local Files| SW
     SW --> |GitHub API| MCP[GitHub<br/>MCP]
+    SW --> |transcript| MEMQ[(Memory<br/>Queue)]
+    SW -.->|semantic search| QDRANT
+
+    MEMQ --> MW[Memory<br/>Worker]
+    MW --> |memory_read/write| MEM_MCP[Memory<br/>MCP]
+    MW --> MEM_VOL[(Agent<br/>Memory)]
+
+    RS --> |sync complete| IDX[Indexing<br/>Worker]
+    IDX --> |embeddings| QDRANT[(Qdrant<br/>Vector DB)]
 
     MCP --> GH
 
@@ -31,6 +40,12 @@ flowchart LR
     style SW fill:#e8f5e9
     style CACHE fill:#fce4ec
     style MCP fill:#e0f2f1
+    style MW fill:#fff9c4
+    style MEM_MCP fill:#fff9c4
+    style MEM_VOL fill:#fff9c4
+    style MEMQ fill:#fff9c4
+    style IDX fill:#f3e5f5
+    style QDRANT fill:#e8eaf6
 ```
 
 **Architecture Flow:**
@@ -42,6 +57,9 @@ flowchart LR
 5. **Sandbox Workers** → Execute Claude SDK in isolated worktrees
 6. **Claude SDK** → Local file operations + GitHub MCP for API calls
 7. **Results** → Posted back to GitHub via MCP
+8. **Memory Worker** → Extracts knowledge from session transcripts via `@memory-extractor` subagent
+9. **Indexing Worker** → Chunks repos, generates embeddings, stores in Qdrant for semantic search
+10. **Qdrant** → Vector database for embedding-based code search
 
 ## Workflow System
 
@@ -360,6 +378,151 @@ async with GitHubAuthService(app_id, private_key, installation_id) as auth:
 - Better token lifecycle management
 - Shared across all services
 
+### 8. Memory Worker
+
+**Technology**: Python + Claude Agent SDK (Haiku)
+**Purpose**: Extracts persistent knowledge from session transcripts
+
+**Responsibilities**:
+
+- Listens for memory extraction jobs on Redis queue (`agent:memory:requests`)
+- Reads persisted session transcripts from the `agent-memory` volume
+- Invokes the `@memory-extractor` subagent (runs on Haiku for cost efficiency)
+- Updates memory files (index.md + detailed files) via Memory MCP server
+- Serializes access per-repo using asyncio.Lock to prevent concurrent write races
+- Cleans up transcript files after processing
+- Optional Langfuse observability for memory extraction sessions
+
+**Key Files**:
+
+- `services/memory_worker/memory_worker.py`
+- `subagents/memory_extractor.py`
+- `mcp_servers/memory/server.py`
+- `mcp_servers/memory/tools.py`
+
+**Memory Storage**:
+
+```
+/home/bot/agent-memory/
+├── owner/repo/
+│   ├── memory/                # Persistent knowledge
+│   │   ├── index.md           # Table of contents (100 lines max)
+│   │   ├── architecture/      # System design notes
+│   │   ├── issues/            # Known bugs and workarounds
+│   │   ├── workflows/         # Development workflows
+│   │   ├── commands.md        # Operational commands
+│   │   └── decisions.md       # Architectural decision records
+│   └── transcripts/           # Session transcripts (cleaned up after extraction)
+```
+
+**Memory Extraction Flow**:
+
+1. Sandbox worker session completes (Stop/SubagentStop hook)
+2. Transcript persisted to `agent-memory` volume
+3. Job enqueued to `agent:memory:requests` Redis queue
+4. Memory worker picks up job
+5. Transcript parsed into clean conversation text (strips metadata, thinking blocks)
+6. `@memory-extractor` subagent invoked with conversation text
+7. Subagent reads existing memory, extracts new facts, updates memory files
+8. Transcript cleaned up after processing
+
+**Memory MCP Server**:
+
+A lightweight stdio-based MCP server that provides two tools:
+
+- `memory_read(file_path?)` - List or read memory files (scoped per repo)
+- `memory_write(file_path, content)` - Create or update memory files (scoped per repo)
+
+Both tools validate paths to prevent directory traversal attacks.
+
+**Per-Repo Locking**:
+
+Memory jobs are serialized per repository to prevent concurrent writes to `index.md`:
+
+```python
+_repo_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+
+async with _repo_locks[repo]:
+    # Process memory extraction for this repo
+```
+
+### 9. Indexing Worker
+
+**Technology**: Python + Gemini Embedding API + Qdrant
+**Purpose**: Background worker that chunks repos, generates embeddings, and stores in Qdrant for semantic code search
+
+**Responsibilities**:
+
+- Subscribes to sync completion events (`agent:sync:events` pub/sub) to trigger indexing after repo updates
+- Processes explicit indexing requests from the `agent:indexing:requests` list
+- Chunks source files into semantic units (functions, classes, methods) using tree-sitter
+- Generates embeddings via Google Gemini (`gemini-embedding-001`)
+- Stores vectors in Qdrant with metadata (filepath, name, kind, language, line numbers)
+- Supports incremental indexing via git diff — only re-embeds changed files
+- Caches embeddings in Redis to avoid re-embedding unchanged content
+- Cleans up stale points from previous commits
+
+**Key Files**:
+
+- `services/indexing_worker/indexing_worker.py` — Main worker loop and indexing pipeline
+- `shared/chunker.py` — Tree-sitter-based semantic code chunker (10 languages)
+- `shared/ts_languages.py` — Language registry with dynamic loading
+
+**Supported Languages**:
+
+Python, JavaScript, TypeScript, TSX, Go, Rust, Java, C, C++, Ruby — via per-language tree-sitter packages with regex fallback.
+
+**Indexing Flow**:
+
+1. Repo sync completes → event published to `agent:sync:events`
+2. Indexing worker receives event → enqueues indexing job
+3. Creates worktree from bare repo cache
+4. Checks previous commit for incremental diff (or full index if first time)
+5. Chunks changed files via tree-sitter (or regex fallback)
+6. Embeds chunk content via Gemini API (with Redis embedding cache)
+7. Upserts vectors into per-repo Qdrant collection
+8. Cleans up stale points from previous commits
+9. Updates indexing metadata in Redis
+
+### 10. Codebase Context System
+
+**Purpose**: Three-layer context system that gives agents structural awareness of codebases
+
+**Layer 1 — Structural Context (Repomap)**:
+
+- `shared/repomap.py` — Aider-style repomap using tree-sitter + PageRank
+- Generates compact "table of contents" of a codebase within a token budget
+- Ranks definitions by importance using reference graph analysis
+- Three-tier fallback: full tree-sitter → regex → file tree only
+- Personalized ranking based on mentioned files and identifiers
+
+**Layer 2 — Code Tools MCP**:
+
+- `mcp_servers/codebase_tools/` — MCP server for AST-based code search and file summaries
+- Provides `search_codebase()` for regex-based code search across the worktree
+- Provides `read_file_summary()` for structured file analysis
+- Provides `find_definitions()` to locate symbol definitions
+- Provides `find_references()` to find all references to a symbol
+- Available to agents as registered MCP tools during sandbox execution
+
+**Layer 3 — Semantic Search**:
+
+- `mcp_servers/semantic_search/` — MCP server for embedding-based code search
+- Provides `semantic_search()` for natural language queries against indexed code
+- Connects to Qdrant vector database with Gemini embeddings
+- Supports file and kind filtering (e.g., search only functions in a specific path)
+- Requires prior indexing by the Indexing Worker
+
+**Language Support**:
+
+All layers share `shared/ts_languages.py` — a central language registry with dynamic loading:
+
+- 10 languages with full tree-sitter support
+- Per-language node type mappings for generic AST walking
+- Per-language tree-sitter queries for definition and reference extraction
+- Dynamic loading — only installed language packages are used
+- Regex fallback for languages without tree-sitter packages
+
 ## Data Flow
 
 ### Automatic PR Review
@@ -409,6 +572,33 @@ async with GitHubAuthService(app_id, private_key, installation_id) as auth:
 4. Repo sync service updates cached bare repository
 5. Future jobs for this repo start faster (no sync wait)
 
+### Memory Extraction (Automatic)
+
+1. Sandbox worker session completes (Stop/SubagentStop hook fires)
+2. Session transcript persisted to `agent-memory` volume (`/home/bot/agent-memory/{repo}/transcripts/`)
+3. Memory extraction job enqueued to `agent:memory:requests` Redis queue
+4. Memory worker picks up job from queue
+5. Transcript parsed — metadata, thinking blocks, and queue telemetry stripped
+6. `@memory-extractor` subagent (Haiku) invoked with clean conversation text
+7. Subagent reads existing `index.md`, extracts new facts, organizes into memory files
+8. Memory files updated via Memory MCP (`memory_read` / `memory_write`)
+9. Transcript cleaned up after processing (valuable info now in memory files)
+10. Future sessions receive memory context at startup via `<memory>` tags in prompt
+
+### Indexing Flow (Semantic Search)
+
+1. Repo sync completes → publishes `agent:sync:events` with `status: complete`
+2. Indexing worker receives event → enqueues indexing job to `agent:indexing:requests`
+3. Worker creates worktree from bare repo cache
+4. Gets current commit hash, checks previous indexed commit in Redis metadata
+5. If incremental: runs `git diff` to find changed/removed files
+6. Chunks changed files via tree-sitter (functions, classes, methods) or regex fallback
+7. Checks Redis embedding cache — only embeds new/changed chunks via Gemini API
+8. Upserts embeddings into per-repo Qdrant collection
+9. Cleans up stale points from previous commits
+10. Updates indexing metadata (commit hash, chunk count) in Redis
+11. Agent can now search indexed code via `semantic_search()` MCP tool
+
 ## Job Queue Architecture
 
 ### Redis Keys
@@ -431,12 +621,23 @@ async with GitHubAuthService(app_id, private_key, installation_id) as auth:
 - `agent:sync:lock:{repo}` - Lock for preventing concurrent syncs
 - `agent:sync:complete:{repo}:{ref}` - Completion signal (TTL: 5 minutes)
 
+**Memory Extraction**:
+
+- `agent:memory:requests` - Memory extraction job queue (transcript paths + repo info)
+
+**Indexing**:
+
+- `agent:indexing:requests` - Indexing job queue (repo, ref, trigger)
+- `agent:indexing:meta:{repo}` - Hash: field=ref, value=JSON (indexed_commit, chunk_count, collection_name)
+- `agent:indexing:cache:{model}` - Hash: field=content_hash, value=JSON (embedding vector cache)
+
 ### Benefits
 
 1. **Workspace Isolation**: Each job in clean temporary directory
 2. **Independent Scaling**: Scale sandbox workers separately
 3. **Job Persistence**: Jobs survive worker crashes
 4. **Observability**: Clear job states and metrics
+5. **Persistent Memory**: Knowledge extracted across sessions via shared `agent-memory` volume
 
 ## Scaling
 
@@ -487,6 +688,8 @@ docker-compose exec redis redis-cli -a myredissecret GET "agent:sync:complete:ow
 # View logs
 docker-compose logs -f sandbox_worker
 docker-compose logs -f repo_sync
+docker-compose logs -f memory_worker
+docker-compose logs -f indexing_worker
 ```
 
 ## Rate Limiting
@@ -660,9 +863,9 @@ docker-compose exec sandbox_worker cat /root/.claude/state/langfuse_hook.log
 docker-compose -f docker-compose.minimal.yml up --build -d
 ```
 
-Components: webhook + worker + sandbox_worker + repo_sync + Redis
+Components: webhook + worker + sandbox_worker + repo_sync + memory_worker + Redis
 
-Volumes: repo-cache (shared bare repositories)
+Volumes: repo-cache (shared bare repositories) + agent-memory (persistent memory)
 
 ### Full Setup
 
@@ -670,9 +873,11 @@ Volumes: repo-cache (shared bare repositories)
 docker-compose up --build -d
 ```
 
-Components: Minimal + Langfuse (PostgreSQL, ClickHouse, MinIO)
+Components: Minimal + Langfuse (PostgreSQL, ClickHouse, MinIO) + Qdrant (vector DB) + Indexing Worker
 
-Volumes: repo-cache + langfuse-db-data + langfuse-clickhouse-data + langfuse-clickhouse-logs + langfuse-minio-data
+Volumes: repo-cache + langfuse-db-data + langfuse-clickhouse-data + langfuse-clickhouse-logs + langfuse-minio-data + qdrant-storage
+
+**Semantic Search**: Enabled by default in the full setup. Set `INDEXING_ENABLED=true` and `GEMINI_API_KEY` to activate the indexing worker.
 
 ### Scaling Strategy
 
@@ -720,6 +925,10 @@ Specialized agents for focused tasks:
 - context-gatherer - Codebase exploration
 - bug-investigator - Root cause analysis
 - test-writer - Test generation
+
+**Memory**:
+
+- memory-extractor - Extracts facts from session transcripts to build repository knowledge
 
 See [SUBAGENTS.md](SUBAGENTS.md) for details.
 

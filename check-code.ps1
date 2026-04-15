@@ -52,7 +52,7 @@ Write-Host "  Code Quality Check"
 Write-Host "========================================"
 Write-Host ""
 
-$paths = "services/", "shared/", "subagents/", "hooks/", "plugins/", "tests/"
+$paths = "services/", "shared/", "subagents/", "hooks/", "plugins/", "mcp_servers/", "tests/"
 $hasErrors = $false
 
 # Black
