@@ -104,8 +104,10 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
 
    **Option B: Full Review with Inline Comments**
    - Create pending review: `pull_request_review_write(method="create")`
-   - Add comments SEQUENTIALLY: `add_comment_to_pending_review()` for top 15-20 issues
+   - **Validate line numbers before posting**: Fetch the PR diff with `pull_request_read(method="get_diff")` and verify that each file:line you plan to comment on exists in the diff. Subagent findings use line numbers from local file reads, which may not match the PR diff — especially for large PRs with many additions/deletions.
+   - Add comments (parallel is fine): `add_comment_to_pending_review()` for top 15-20 issues
    - Submit review: `pull_request_review_write(method="submit_pending", event="COMMENT"/"REQUEST_CHANGES"/"APPROVE")`
+   - **Fallback for failed comments**: If any `add_comment_to_pending_review` calls fail (line not in diff), include those findings in a follow-up `add_issue_comment` on the PR with file path and description.
 
    **If MCP not available:** Display results in console for manual review
 
