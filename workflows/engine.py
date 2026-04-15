@@ -2,6 +2,7 @@
 
 import logging
 import string
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,24 @@ class TriggersConfig(BaseModel):
     commands: list[str] = Field(default_factory=list, description="Command triggers")
 
 
+class ContextProfile(BaseModel):
+    """Context configuration for structural context generation."""
+
+    repomap_budget: int = Field(
+        default=2048, description="Token budget for the repomap"
+    )
+    personalized: bool = Field(
+        default=False, description="Whether to personalize repomap toward mentioned files"
+    )
+    include_test_files: bool = Field(
+        default=True, description="Whether to include test files in personalization"
+    )
+    priority_focus: list[str] = Field(
+        default_factory=list,
+        description="Focus areas for repomap ranking (e.g., ['build_system', 'test_structure'])",
+    )
+
+
 class WorkflowConfig(BaseModel):
     """Configuration for a single workflow."""
 
@@ -36,6 +55,10 @@ class WorkflowConfig(BaseModel):
     skip_self: bool = Field(
         default=True,
         description="Skip events triggered by the bot itself (default: true)",
+    )
+    context: ContextProfile = Field(
+        default_factory=ContextProfile,
+        description="Context profile for structural context generation",
     )
 
 
@@ -412,3 +435,43 @@ class WorkflowEngine:
             name: workflow.description or "No description"
             for name, workflow in self.workflows.items()
         }
+
+    def get_context_profile(self, workflow_name: str) -> dict:
+        """Get the context profile for a workflow.
+
+        Args:
+            workflow_name: Name of the workflow.
+
+        Returns:
+            Dict with context profile settings (repomap_budget, personalized, etc.)
+        """
+        if workflow_name not in self.workflows:
+            return {}
+
+        profile = self.workflows[workflow_name].context
+        return {
+            "repomap_budget": profile.repomap_budget,
+            "personalized": profile.personalized,
+            "include_test_files": profile.include_test_files,
+            "priority_focus": profile.priority_focus,
+        }
+
+
+@lru_cache(maxsize=1)
+def get_workflow_engine(config_path: str | None = None) -> WorkflowEngine:
+    """Get cached WorkflowEngine instance (singleton per config path).
+
+    The engine is cached to avoid repeatedly parsing and validating workflows.yaml.
+    Since workflow configuration is static during runtime, caching provides
+    significant performance benefits with no downsides.
+
+    Args:
+        config_path: Path to workflows.yaml file (defaults to workflows.yaml in project root)
+
+    Returns:
+        Cached WorkflowEngine instance
+
+    Note:
+        Changes to workflows.yaml require a process restart to take effect.
+    """
+    return WorkflowEngine(config_path)
