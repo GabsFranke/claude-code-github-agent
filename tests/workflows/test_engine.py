@@ -5,7 +5,57 @@ from pathlib import Path
 import pytest
 import yaml
 
-from workflows.engine import WorkflowEngine
+from workflows.engine import WorkflowEngine, get_workflow_engine
+
+
+class TestGetWorkflowEngine:
+    """Test get_workflow_engine factory function with caching."""
+
+    def test_returns_workflow_engine_instance(self, tmp_path):
+        """Test that factory returns a WorkflowEngine instance."""
+        config_file = tmp_path / "workflows.yaml"
+        config_file.write_text(
+            yaml.dump(
+                {
+                    "workflows": {
+                        "my-workflow": {
+                            "triggers": {"commands": ["/test"]},
+                            "prompt": {"template": "test"},
+                        }
+                    }
+                }
+            )
+        )
+
+        engine = get_workflow_engine(str(config_file))
+        assert isinstance(engine, WorkflowEngine)
+
+    def test_returns_cached_instance(self, tmp_path):
+        """Test that factory returns the same cached instance."""
+        config_file = tmp_path / "workflows.yaml"
+        config_file.write_text(
+            yaml.dump(
+                {
+                    "workflows": {
+                        "my-workflow": {
+                            "triggers": {"commands": ["/test"]},
+                            "prompt": {"template": "test"},
+                        }
+                    }
+                }
+            )
+        )
+
+        engine1 = get_workflow_engine(str(config_file))
+        engine2 = get_workflow_engine(str(config_file))
+
+        # Should be the exact same object (cached)
+        assert engine1 is engine2
+
+    def test_cache_has_info(self):
+        """Test that the factory function has cache_info (is cached)."""
+        assert hasattr(get_workflow_engine, "cache_info")
+        assert hasattr(get_workflow_engine, "cache_clear")
 
 
 class TestWorkflowEngine:

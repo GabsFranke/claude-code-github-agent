@@ -75,33 +75,6 @@ When making changes to this codebase:
 ./check-code.sh --fast
 ```
 
-## Project Structure
-
-```
-claude-code-github-agent/
-├── services/
-│   ├── webhook/              # Receives GitHub webhooks
-│   ├── agent_worker/         # Coordinates jobs (workflow routing)
-│   ├── repo_sync/            # Manages bare repository cache
-│   └── sandbox_executor/     # Executes jobs in worktrees (YOU ARE HERE)
-├── shared/                   # Shared utilities (importable package)
-│   ├── config.py            # Pydantic configuration
-│   ├── queue.py             # Message queue abstraction
-│   ├── job_queue.py         # Job queue abstraction
-│   ├── github_auth.py       # GitHub App authentication
-│   └── exceptions.py        # Custom exceptions
-├── workflows/               # Workflow engine
-│   ├── engine.py           # YAML-based routing
-│   └── workflows.yaml      # Single source of truth for workflows
-├── prompts/                # System context for workflows
-├── subagents/              # Specialized subagent definitions
-├── plugins/                # Claude Code plugins
-│   ├── pr-review-toolkit/  # PR review commands & agents
-│   └── ci-failure-toolkit/ # CI failure analysis
-├── hooks/                  # Agent hooks
-└── tests/                  # Test suite
-```
-
 ## Working with Files
 
 ### Local File Operations
@@ -236,6 +209,26 @@ If something goes wrong:
 - Look at plugin implementations in `plugins/`
 - Check workflow definitions in `workflows.yaml`
 - Review test cases in `tests/` for usage examples
+
+## Memory
+
+You have access to a persistent memory system scoped to the current repository. Memory survives across sessions and is shared with the memory extraction worker that runs after each session.
+
+### Reading Memory
+
+Memory context from previous sessions is injected into your prompt at the start of each job inside `<memory>` tags. Read it — it contains architecture notes, known issues, commands, and other facts learned from prior sessions.
+
+You can also query memory directly during a session:
+
+```
+mcp__memory__memory_read()                          # List all memory files
+mcp__memory__memory_read(file_path="index.md")      # Read the index
+mcp__memory__memory_read(file_path="issues/foo.md") # Read a specific file
+```
+
+### Writing Memory
+
+You do not write memory directly. After every session, a background worker automatically runs the `@memory-extractor` subagent against your full transcript — it handles deduplication, organization, and quality control.
 
 ## Summary
 

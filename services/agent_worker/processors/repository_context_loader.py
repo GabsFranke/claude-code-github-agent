@@ -90,3 +90,25 @@ class RepositoryContextLoader:
                 "Repository context will be missing, which may affect agent behavior."
             )
             raise
+
+    async def fetch_memory_index(self, repo: str) -> str:
+        """
+        Fetch index.md from the local agent-memory volume if it exists.
+
+        Returns:
+            Content of index.md if found, empty string if file doesn't exist.
+        """
+        import os
+
+        memory_path = f"/home/bot/agent-memory/{repo}/memory/index.md"
+        if not os.path.exists(memory_path):
+            return ""
+
+        try:
+            with open(memory_path, encoding="utf-8") as f:
+                content = f.read()
+            logger.info(f"Successfully loaded index.md for {repo}")
+            return content
+        except Exception as e:
+            logger.error(f"Failed to read index.md for {repo}: {e}")
+            return ""

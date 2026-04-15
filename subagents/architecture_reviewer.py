@@ -38,6 +38,5 @@ Return your findings as JSON:
 ```
 
 Focus on significant architectural issues that affect maintainability and scalability.""",
-    # Omit tools field to inherit all tools from parent
     model="inherit",
 )

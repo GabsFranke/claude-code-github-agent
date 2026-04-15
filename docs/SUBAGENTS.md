@@ -174,6 +174,36 @@ Prioritize by severity: critical bugs first, then high-risk edge cases.""",
 4. **Tool inheritance**: Let subagents inherit tools unless you need restrictions
 5. **Severity levels**: Use consistent severity levels across subagents (critical, high, medium, low)
 
+## System Subagents
+
+Some subagents are used internally by the system infrastructure rather than by the main agent:
+
+### Memory Extractor
+
+**Definition**: `subagents/memory_extractor.py`
+
+The `@memory-extractor` subagent runs automatically after each sandbox session. It is invoked by the Memory Worker (not by the main agent) to extract persistent knowledge from session transcripts.
+
+**How it works**:
+
+1. Memory Worker reads a session transcript from the `agent-memory` volume
+2. Transcript is parsed into clean conversation text (metadata stripped)
+3. `@memory-extractor` is invoked with the conversation text
+4. It reads existing `index.md` to avoid duplicates
+5. Extracts new facts: architecture decisions, known issues, coding conventions, etc.
+6. Organizes knowledge into a hierarchical structure:
+   - `index.md` — Table of contents (100 lines max, one-line facts + references)
+   - `architecture/{topic}.md` — System design details
+   - `issues/{issue-name}.md` — Known bugs with reproduction steps
+   - `workflows/{workflow}.md` — Development workflows
+   - `commands.md` — Operational commands
+   - `decisions.md` — Architectural decision records
+7. Updates memory files via Memory MCP tools (`memory_read` / `memory_write`)
+
+**Model**: Uses Haiku (configurable via `ANTHROPIC_DEFAULT_HAIKU_MODEL`) for cost efficiency.
+
+**Tools**: `Read`, `Write`, `Edit`, `List`, `mcp__memory__*` (restricted to memory operations only).
+
 
 ## See Also
 

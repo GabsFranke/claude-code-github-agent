@@ -36,10 +36,10 @@ def test_setup_logging_silence_noisy():
     """Test setup_logging silences noisy HTTP loggers."""
     setup_logging(level="DEBUG", silence_noisy=True)
 
-    # Verify noisy loggers are set to INFO
-    assert logging.getLogger("httpcore").level == logging.INFO
-    assert logging.getLogger("httpx").level == logging.INFO
-    assert logging.getLogger("urllib3").level == logging.INFO
+    # Verify noisy loggers are set to WARNING
+    assert logging.getLogger("httpcore").level == logging.WARNING
+    assert logging.getLogger("httpx").level == logging.WARNING
+    assert logging.getLogger("urllib3").level == logging.WARNING
 
 
 def test_setup_logging_no_silence():

@@ -1,0 +1,8 @@
+{
+  "name": "test-toolkit",
+  "version": "0.1.0",
+  "description": "A minimal test plugin for verifying tool and skill inheritance between plugins and subagents",
+  "author": {
+    "name": "GabsFranke"
+  }
+}
