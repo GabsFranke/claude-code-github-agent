@@ -100,7 +100,32 @@ PUBSUB_TOPIC_NAME=agent-requests
 PUBSUB_SUBSCRIPTION_NAME=agent-requests-sub
 ```
 
+### Semantic Code Search Settings
+
+```bash
+# Semantic search via Google Gemini embeddings + Qdrant vector DB
+INDEXING_ENABLED=false  # Enable/disable the indexing worker (default: false)
+GEMINI_API_KEY=your_gemini_api_key  # Required for embeddings (get from https://aistudio.google.com/apikey)
+QDRANT_URL=http://qdrant:6333  # Qdrant instance URL (set automatically in Docker)
+
+# Optional overrides (defaults shown):
+EMBEDDING_MODEL=gemini-embedding-001  # Gemini embedding model
+EMBEDDING_DIMENSION=1024  # Output vector dimensionality
+EMBEDDING_BATCH_SIZE=20  # Texts per embedding API call
+```
+
 ## Webhook Configuration
+
+### Memory Worker Settings
+
+The memory worker uses the same Anthropic API settings as the sandbox worker. It also supports:
+
+```bash
+# Memory Worker (optional - uses Haiku for cost efficiency)
+ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-4-5-20251001  # Model for memory extraction
+```
+
+The memory worker listens on the `agent:memory:requests` Redis queue and uses the Memory MCP server to read/write persistent knowledge files.
 
 ### Required Settings
 

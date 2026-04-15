@@ -44,6 +44,8 @@ services:
       context: .
       dockerfile: services/agent_worker/Dockerfile
     env_file: .env
+    volumes:
+      - agent-memory:/home/bot/agent-memory:rw
     environment:
       - PYTHONPATH=/app
       # Worker creates jobs in queue (lightweight coordinator)
@@ -68,10 +70,13 @@ services:
     volumes:
       # Persistent cache for bare repositories across all workers
       - repo-cache:/var/cache/repos:rw
-      # Plugins (read-only) — sandbox compiles ClaudeAgentOptions
-      - ./plugins:/app/plugins:ro
+      # Persistent agent memory
+      - agent-memory:/home/bot/agent-memory:rw
+      # Shared transcript staging area (moved here from ephemeral workspace)
+      - transcripts:/home/bot/transcripts:rw
       # gcloud credentials for Vertex AI — sandbox is the one calling the SDK
-      - ${APPDATA}/gcloud/application_default_credentials.json:/root/.config/gcloud/application_default_credentials.json:ro
+      # Mounted to bot user's home directory
+      - ${APPDATA}/gcloud/application_default_credentials.json:/home/bot/.config/gcloud/application_default_credentials.json:ro
     environment:
       - PYTHONPATH=/app
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
@@ -82,6 +87,42 @@ services:
       - ANTHROPIC_DEFAULT_OPUS_MODEL=${ANTHROPIC_DEFAULT_OPUS_MODEL}
       - ANTHROPIC_VERTEX_PROJECT_ID=${ANTHROPIC_VERTEX_PROJECT_ID}
       - ANTHROPIC_VERTEX_REGION=${ANTHROPIC_VERTEX_REGION}
+      - CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-1}
+      - REDIS_URL=redis://redis:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-myredissecret}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - SDK_DEBUG=${SDK_DEBUG:-false}
+      - MEMORY_WORKER_ENABLED=${MEMORY_WORKER_ENABLED:-true}
+      - RETROSPECTOR_ENABLED=${RETROSPECTOR_ENABLED:-true}
+      - INDEXING_ENABLED=${INDEXING_ENABLED:-false}
+      - QDRANT_URL=http://qdrant:6333
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  memory_worker:
+    build:
+      context: .
+      dockerfile: services/memory_worker/Dockerfile
+    command: python -m services.memory_worker.memory_worker
+    env_file: .env
+    volumes:
+      # Reads transcripts from shared staging area; writes memory files
+      - agent-memory:/home/bot/agent-memory:rw
+      - transcripts:/home/bot/transcripts:rw
+      # gcloud credentials for Vertex AI (if using Vertex backend)
+      - ${APPDATA}/gcloud/application_default_credentials.json:/home/bot/.config/gcloud/application_default_credentials.json:ro
+    environment:
+      - PYTHONPATH=/app
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - ANTHROPIC_AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN}
+      - ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL}
+      - ANTHROPIC_DEFAULT_HAIKU_MODEL=${ANTHROPIC_DEFAULT_HAIKU_MODEL}
+      - ANTHROPIC_VERTEX_PROJECT_ID=${ANTHROPIC_VERTEX_PROJECT_ID}
+      - ANTHROPIC_VERTEX_REGION=${ANTHROPIC_VERTEX_REGION}
+      - CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-1}
       - REDIS_URL=redis://redis:6379
       - REDIS_PASSWORD=${REDIS_PASSWORD:-myredissecret}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
@@ -115,5 +156,91 @@ services:
       retries: 3
       start_period: 10s
 
+  retrospector_worker:
+    build:
+      context: .
+      dockerfile: services/retrospector_worker/Dockerfile
+    command: python -m services.retrospector_worker.retrospector_worker
+    env_file: .env
+    volumes:
+      # Reads transcripts from shared staging area
+      - transcripts:/home/bot/transcripts:rw
+      # Bare repo cache — needed to create worktrees of the bot repo
+      - repo-cache:/var/cache/repos:rw
+      # gcloud credentials for Vertex AI (if using Vertex backend)
+      - ${APPDATA}/gcloud/application_default_credentials.json:/home/bot/.config/gcloud/application_default_credentials.json:ro
+    environment:
+      - PYTHONPATH=/app
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - ANTHROPIC_AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN}
+      - ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL}
+      - ANTHROPIC_DEFAULT_SONNET_MODEL=${ANTHROPIC_DEFAULT_SONNET_MODEL}
+      - ANTHROPIC_VERTEX_PROJECT_ID=${ANTHROPIC_VERTEX_PROJECT_ID}
+      - ANTHROPIC_VERTEX_REGION=${ANTHROPIC_VERTEX_REGION}
+      - CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-1}
+      - REDIS_URL=redis://redis:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-myredissecret}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - GITHUB_APP_ID=${GITHUB_APP_ID}
+      - GITHUB_INSTALLATION_ID=${GITHUB_INSTALLATION_ID}
+      - GITHUB_PRIVATE_KEY=${GITHUB_PRIVATE_KEY}
+      # The bot's own repository — retrospector opens PRs here
+      - BOT_REPO=${BOT_REPO:-GabsFranke/claude-code-github-agent}
+      - BOT_USERNAME=${BOT_USERNAME:-Claude Code Agent}
+      - BOT_USER_EMAIL=${BOT_USER_EMAIL:-claude-code-agent[bot]@users.noreply.github.com}
+    depends_on:
+      redis:
+        condition: service_healthy
+      repo_sync:
+        condition: service_healthy
+
+  # Vector database for semantic code search
+  qdrant:
+    image: qdrant/qdrant:v1.17.1
+    volumes:
+      - qdrant-storage:/qdrant/storage
+    ports:
+      - "127.0.0.1:6333:6333"
+      - "127.0.0.1:6334:6334"
+    environment:
+      QDRANT__SERVICE__GRPC_PORT: 6334
+    healthcheck:
+      test: ["CMD-SHELL", "exit 0"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  # Background worker: chunks code, generates embeddings, stores in Qdrant
+  indexing_worker:
+    build:
+      context: .
+      dockerfile: services/indexing_worker/Dockerfile
+    command: python -m services.indexing_worker.indexing_worker
+    env_file: .env
+    volumes:
+      - repo-cache:/var/cache/repos:rw
+    environment:
+      - PYTHONPATH=/app
+      - REDIS_URL=redis://redis:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-myredissecret}
+      - QDRANT_URL=http://qdrant:6333
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - INDEXING_ENABLED=${INDEXING_ENABLED:-true}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-gemini-embedding-001}
+      - EMBEDDING_DIMENSION=${EMBEDDING_DIMENSION:-1024}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - GITHUB_APP_ID=${GITHUB_APP_ID}
+      - GITHUB_INSTALLATION_ID=${GITHUB_INSTALLATION_ID}
+      - GITHUB_PRIVATE_KEY=${GITHUB_PRIVATE_KEY}
+    depends_on:
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+
 volumes:
+  agent-memory:
   repo-cache:
+  transcripts:
+  qdrant-storage:

@@ -40,11 +40,12 @@ See [CONFIGURATION.md](CONFIGURATION.md) for all options.
 docker-compose up --build -d
 
 # Manual (not recommended - complex setup)
-# You'll need to run 4 services in separate terminals:
+# You'll need to run 5 services in separate terminals:
 # Terminal 1: redis-server --requirepass myredissecret
 # Terminal 2: cd services/webhook && python main.py
 # Terminal 3: cd services/agent_worker && python worker.py
 # Terminal 4: python -m services.sandbox_executor.sandbox_worker
+# Terminal 5: python -m services.memory_worker.memory_worker
 # Note: Manual setup requires proper environment variables for each service
 ```
 
@@ -55,6 +56,7 @@ claude-code-github-agent/
 ├── services/
 │   ├── agent_worker/         # Job coordinator
 │   ├── sandbox_executor/     # Claude SDK execution
+│   ├── memory_worker/        # Memory extraction from session transcripts
 │   ├── result_poster/        # GitHub response posting
 │   └── webhook/              # Webhook receiver
 ├── shared/                   # Shared utilities
@@ -63,9 +65,14 @@ claude-code-github-agent/
 │   ├── job_queue.py         # Job queue implementation
 │   ├── rate_limiter.py      # Rate limiting
 │   └── health.py            # Health monitoring
+├── mcp_servers/              # MCP server implementations
+│   └── memory/              # Memory read/write MCP server
+│       ├── server.py        # stdio MCP server
+│       └── tools.py         # memory_read/memory_write implementations
 ├── plugins/                  # Claude SDK plugins
 │   └── pr-review-toolkit/
 ├── subagents/               # Subagent definitions
+│   └── memory_extractor.py  # Extracts facts from transcripts
 ├── tests/                   # Test suite
 │   ├── unit/
 │   ├── integration/
@@ -209,6 +216,7 @@ docker-compose logs -f
 docker-compose logs -f sandbox_worker
 docker-compose logs -f worker
 docker-compose logs -f webhook
+docker-compose logs -f memory_worker
 
 # Langfuse hook logs (inside container only)
 docker-compose exec sandbox_worker cat /root/.claude/state/langfuse_hook.log

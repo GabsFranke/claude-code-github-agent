@@ -27,6 +27,7 @@ from .exceptions import (
     WebhookValidationError,
     WorktreeCreationError,
 )
+from .file_tree import EXCLUDE_DIRS, EXCLUDE_FILES, EXCLUDE_SUFFIXES, load_ignore_spec
 from .git_utils import execute_git_command
 from .github_auth import (
     GitHubAuthService,
@@ -101,4 +102,9 @@ __all__ = [
     "async_retry",
     # Signals
     "setup_graceful_shutdown",
+    # File tree
+    "EXCLUDE_DIRS",
+    "EXCLUDE_FILES",
+    "EXCLUDE_SUFFIXES",
+    "load_ignore_spec",
 ]
