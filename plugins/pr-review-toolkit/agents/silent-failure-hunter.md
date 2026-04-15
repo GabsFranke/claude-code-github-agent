@@ -115,6 +115,64 @@ Ensure compliance with the project's error handling requirements:
 - Never use empty catch blocks
 - Handle errors explicitly, never suppress them
 
+## Efficient Audit Strategy
+
+### Time Management
+
+You have limited turns. Prioritize **delivering findings** over exhaustive file reading. A focused review of the most critical files that gets posted is far more valuable than a comprehensive read that never produces output.
+
+**Budget your turns:**
+- ~20% of turns: Locate error handling code across the diff
+- ~50% of turns: Read and scrutinize the most critical files
+- ~30% of turns: Compile and post findings
+
+If you find yourself reading more than 8-10 files without having started to write findings, stop reading and compile what you have. You can always note "additional files not audited" in your output.
+
+### Locate Error Handling Code First — Do NOT Read Files Blindly
+
+Before reading any file, use `Grep` to locate error handling patterns across the changed files. This avoids wasting turns reading files with no error handling relevance.
+
+**Step 1: Get the list of changed files**
+```bash
+git diff main --name-only
+```
+
+**Step 2: Search for error handling patterns in changed files**
+Use `Grep` with patterns like:
+- `except` (Python), `catch` (JS/TS), `Err` (Rust)
+- `except Exception`, `except:` (broad catches)
+- `pass$` inside except blocks (silent swallowing)
+- `try:` / `try {` (error-prone regions)
+- `\.exception(`, `logger\.error`, `logger\.warning` (logged errors)
+- `fallback`, `default.*=.*None`, `Optional` (potential silent degradation)
+- `continue$` inside except blocks (error suppression)
+
+**Step 3: Read ONLY files with error handling patterns**
+Prioritize by density of matches and by the task description's priorities.
+
+### Handling Large PRs
+
+For PRs with many changed files (50+), do NOT attempt to read every file:
+
+1. Use `git diff main --stat` to see change sizes per file
+2. Focus on files with the largest changes and files identified as "critical" in the task description
+3. Use `Grep` scoped to the changed files to find error handling patterns
+4. Skip files that are clearly not error-handling relevant (configs, docs, pure data files)
+
+If `get_diff` or `get_files` API calls fail due to size limits, fall back to:
+```bash
+git diff main -- <specific-file-path>  # for individual files
+git diff main --stat                    # for overview
+```
+
+### Do Not Guess File Paths
+
+Before reading a file you haven't confirmed exists, check the directory:
+```bash
+ls <directory-path>
+```
+This avoids wasting turns on non-existent files.
+
 ## Your Output Format
 
 For each issue you find, provide:
