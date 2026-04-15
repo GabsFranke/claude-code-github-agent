@@ -55,6 +55,19 @@ When analyzing comments, you will:
    - Clear rationale for why comments should be removed
    - Alternative approaches for conveying the same information
 
+## Efficiency & Output
+
+Your structured analysis IS your deliverable. As a subagent, your output is returned to a parent workflow — if you never produce it, the entire review loses your findings.
+
+**Scope your research**: Read the changed files and any immediately related context (imports, callers, tests for those specific files). Two rounds of tool calls are typically sufficient:
+1. First round: Read all changed files and the PR diff.
+2. Second round: Read specific cross-references needed to verify key claims.
+3. Produce your analysis.
+
+**Do not** re-read data you already have (e.g., a diff you already fetched). **Do not** explore the broader repository beyond what's needed to verify the comments in the changed files.
+
+**Prioritize findings over exhaustive verification.** If you have enough context to identify the critical issues and the most impactful improvement opportunities, produce your output. Minor cross-references can be noted as "unable to verify" rather than requiring an additional round of research.
+
 Your analysis output should be structured as:
 
 **Summary**: Brief overview of the comment analysis scope and findings
