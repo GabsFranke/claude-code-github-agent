@@ -1,0 +1,157 @@
+---
+name: "codebase-context"
+description: "How to use the codebase context system for efficient code exploration and understanding. Use this skill when working with unfamiliar code, searching for definitions or references, exploring how code is connected, understanding file structure, or doing anything that requires navigating a codebase you don't fully know yet. Also use when the user asks to search code, find where something is defined, trace dependencies, or get an overview of a codebase."
+---
+
+# Codebase Context Tools
+
+You have three layers of codebase context available. Use them in order — start cheap, escalate only when needed.
+
+## Layer 1: Structural Map (always available)
+
+When your session starts, you receive a **repomap** — a compact structural overview of the entire codebase injected into your system prompt. It shows ranked definitions (classes, functions, methods) with line numbers, like a table of contents:
+
+```
+shared/sdk_factory.py:
+  32│ class SDKOptionsBuilder
+  58│ function build_options
+  124│ method with_memory_mcp
+  202│ method with_codebase_tools
+services/sandbox_executor/sandbox_worker.py:
+  25│ function main
+  142│ function process_job
+```
+
+This is generated via tree-sitter parsing and PageRank ranking, so the most important/referenced definitions appear first. Use it to:
+
+- Quickly locate where things are defined before reading files
+- Understand the overall shape of the codebase
+- Know which files matter most for a given task
+
+The repomap is personalized toward files relevant to your task (e.g., changed files in a PR review), so definitions in those files are ranked higher.
+
+## Layer 2: Code Tools MCP (always available)
+
+The `codebase-tools` MCP server provides four tools for structured code exploration. These are more token-efficient than raw Bash grep because they return structured, minimal results.
+
+### `find_definitions(symbol_name)`
+
+Find where a class, function, or method is defined. Returns file, line, kind (class/function/method), signature, and end line.
+
+Use when you need to locate a symbol but only know its name.
+
+```
+# Find where SDKOptionsBuilder is defined
+find_definitions(symbol_name="SDKOptionsBuilder")
+
+# Returns:
+# [{"file": "shared/sdk_factory.py", "line": 32, "kind": "class",
+#   "signature": "class SDKOptionsBuilder:", "end_line": 280}]
+```
+
+### `find_references(symbol_name)`
+
+Find all references to a symbol across the codebase. Excludes definition lines. Returns file, line, and surrounding context.
+
+Use to trace how a symbol is used, what depends on it, or understand its role in the system.
+
+```
+# Find everywhere generate_structural_context is called
+find_references(symbol_name="generate_structural_context")
+
+# Returns:
+# [{"file": "services/sandbox_executor/sandbox_worker.py", "line": 343,
+#   "context": "file_tree_text, repomap_text = await generate_structural_context("}]
+```
+
+### `search_codebase(pattern, file_type?, max_results?)`
+
+Regex search across the codebase. Returns structured results with file, line, matched text, and context. Supports file type filtering (python, js, ts, go, rust, java, ruby, c, cpp).
+
+Use when you need to search for patterns, error strings, config keys, or anything regex-based.
+
+```
+# Find all TODO comments in Python files
+search_codebase(pattern="TODO", file_type="python", max_results=10)
+
+# Find Redis key patterns
+search_codebase(pattern="agent:\\w+:\\w+")
+```
+
+### `read_file_summary(file_path, max_lines?)`
+
+Read a compact summary of a file: docstring, imports, and all class/function signatures with line numbers. Skips implementation bodies — typically 10-20% of original file size.
+
+Use to quickly understand a file's API surface without reading the full content. Good for deciding whether a file is relevant before committing tokens to read it fully.
+
+```
+# Get an overview of the chunker module
+read_file_summary(file_path="shared/chunker.py")
+
+# Returns: docstring, imports list, and all function/class signatures
+# {"docstring": "Tree-sitter-based semantic code chunker...",
+#  "imports": ["import logging", "from pathlib import Path", ...],
+#  "signatures": [{"name": "Chunk", "kind": "class", "line": 36, ...}, ...]}
+```
+
+## Layer 3: Semantic Search (conditional)
+
+The `semantic-search` MCP server provides embedding-based code search. It understands natural language queries and finds semantically similar code, even when exact keywords don't match.
+
+**Only available when the indexing worker has indexed the repository** (requires `INDEXING_ENABLED=true` + `GEMINI_API_KEY`). If calls return empty results, the repo hasn't been indexed yet — fall back to Layers 1 and 2.
+
+### `semantic_search(query, max_results?, file_filter?, kind_filter?)`
+
+Search using natural language or code descriptions. Returns ranked results with file, name, kind, line range, content snippet, and similarity score.
+
+Use for conceptual searches where you don't know exact names:
+
+```
+# Find how retries are handled
+semantic_search(query="how does the queue handle retries")
+
+# Find authentication-related code, only in shared/
+semantic_search(query="authentication flow", file_filter="shared/*.py")
+
+# Find only class definitions related to configuration
+semantic_search(query="configuration settings", kind_filter="class")
+```
+
+Good queries vs bad queries:
+
+- Good: "how does the indexing worker create worktrees from bare repos"
+- Good: "error handling for embedding API rate limits"
+- Good: "where is the job queue consumer logic"
+- Bad: "code" (too vague)
+- Bad: "process_job" (use `find_definitions` instead for exact names)
+
+## When to Use Each Layer
+
+| Task | Layer | Tool |
+|------|-------|------|
+| Quick overview of a file | 2 | `read_file_summary` |
+| Find where something is defined | 2 | `find_definitions` |
+| Find all usages of a symbol | 2 | `find_references` |
+| Search for a string or pattern | 2 | `search_codebase` |
+| Find code by concept/behavior | 3 | `semantic_search` |
+| Understand codebase structure | 1 | Read the repomap in system prompt |
+| Explore an unfamiliar module | 1 → 2 | Repomap → `read_file_summary` on interesting files |
+
+## Recommended Workflow
+
+For an unfamiliar codebase or module:
+
+1. **Scan the repomap** in your system prompt to understand the overall structure
+2. **`read_file_summary`** on files that look relevant to understand their API surface
+3. **`find_definitions`** / **`find_references`** to trace specific symbols and dependencies
+4. **`semantic_search`** for conceptual exploration when you don't know exact names
+5. **`Read`** the full file only when you need implementation details
+
+This progression minimizes token usage — you only read full files when you know you need them.
+
+## Technical Details
+
+- **Tree-sitter support**: 10 languages (Python, JavaScript, TypeScript, TSX, Go, Rust, Java, C, C++, Ruby) with regex fallback for others
+- **Repomap ranking**: PageRank on reference graph with personalization toward task-relevant files
+- **Embedding model**: `gemini-embedding-001` with 1024-dimensional vectors stored in Qdrant
+- **Indexing**: Incremental via git diff with Redis embedding cache to avoid re-embedding unchanged content
