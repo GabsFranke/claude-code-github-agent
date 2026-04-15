@@ -185,6 +185,37 @@ class QueueConfig(BaseConfig):
     )
 
 
+class IndexingConfig(BaseConfig):
+    """Semantic indexing configuration for Google Gemini + Qdrant."""
+
+    indexing_enabled: bool = Field(
+        default=False, description="Enable semantic indexing worker"
+    )
+    gemini_api_key: str | None = Field(
+        default=None, description="Google Gemini API key for embeddings"
+    )
+    qdrant_url: str = Field(
+        default="http://localhost:6333", description="Qdrant REST API URL"
+    )
+    qdrant_api_key: str | None = Field(
+        default=None, description="Qdrant API key (optional)"
+    )
+    embedding_model: str = Field(
+        default="gemini-embedding-001", description="Gemini embedding model name"
+    )
+    embedding_dimension: int = Field(
+        default=1024, description="Embedding vector dimension"
+    )
+    embedding_batch_size: int = Field(
+        default=20, description="Max texts per embedding API call"
+    )
+
+    @property
+    def is_enabled(self) -> bool:
+        """Check if indexing is fully configured and enabled."""
+        return self.indexing_enabled and bool(self.gemini_api_key)
+
+
 class WebhookConfig(BaseConfig):
     """Webhook service configuration."""
 
