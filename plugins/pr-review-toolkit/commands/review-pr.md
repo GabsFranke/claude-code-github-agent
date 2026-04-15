@@ -228,6 +228,7 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
 - **Address critical first**: Fix high-priority issues before lower priority
 - **Re-run after fixes**: Can be manually triggered again after pushing fixes
 - **Use specific reviews**: Target specific aspects when you know the concern
+- **Large persisted outputs**: When GitHub API responses (get_files, get_diff) are too large and get persisted to disk, use the Read tool on the persisted file path to examine the content. Do not use `cat | python3` inline scripts — they are fragile with JSON structures (e.g., added files may lack a `deletions` key) and waste turns on recoverable errors
 
 ## Workflow Integration:
 
