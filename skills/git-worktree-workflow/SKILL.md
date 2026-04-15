@@ -99,7 +99,7 @@ This project has strict code quality standards. Run these commands before every 
 .venv/bin/ruff check --fix services/ shared/ subagents/ hooks/ plugins/ tests/
 
 # Verify all checks pass
-./check-code.sh
+bash ./check-code.sh
 ```
 
 **Why this matters:**
@@ -271,7 +271,7 @@ chmod +x directory/
 ❌ **DO NOT** use `gh` CLI - use MCP tools
 ❌ **DO NOT** hardcode branch names - use `HEAD` or `$(git branch --show-current)`
 ❌ **DO NOT** commit without running code quality checks - CI will fail
-❌ **DO NOT** skip `./check-code.sh` - it must pass before pushing
+❌ **DO NOT** skip code quality checks - run `bash ./check-code.sh` before pushing
 
 ## Common Scenarios
 
@@ -293,7 +293,7 @@ git branch --show-current
 # 4. Run code quality checks (see python-code-quality skill)
 
 # 5. Verify checks pass
-./check-code.sh
+bash ./check-code.sh
 
 # 6. Commit
 git add .

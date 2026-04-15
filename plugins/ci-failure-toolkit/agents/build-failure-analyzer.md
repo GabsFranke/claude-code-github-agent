@@ -1,8 +1,5 @@
 ---
 description: "Specialist in diagnosing and fixing build failures, compilation errors, dependency issues, and configuration problems. Use proactively when CI builds fail."
-skills:
-  - git-worktree-workflow
-  - python-code-quality
 ---
 
 # Build Failure Analyzer

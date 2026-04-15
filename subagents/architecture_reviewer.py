@@ -47,6 +47,12 @@ IMPORTANT: Favor producing findings over exhaustive exploration. It is better to
 
 ## Output Format
 
+IMPORTANT: Focus your analysis on the PR's changes. Do not investigate the entire codebase.
+Avoid reading files that are not directly imported or affected by the changed code.
+
+After gathering context, you MUST produce the JSON output below. It is better to return a
+partial but well-reasoned review than to exhaust turns investigating tangential code.
+
 Return your findings as JSON:
 ```json
 {
@@ -70,6 +76,5 @@ Return your findings as JSON:
 ```
 
 Focus on significant architectural issues that affect maintainability and scalability.""",
-    # Omit tools field to inherit all tools from parent
     model="inherit",
 )

@@ -106,7 +106,7 @@ echo "  Code Quality Check"
 echo "========================================"
 echo ""
 
-PATHS="services/ shared/ subagents/ hooks/ plugins/ tests/"
+PATHS="services/ shared/ subagents/ hooks/ plugins/ mcp_servers/ tests/"
 HAS_ERRORS=false
 
 # Black
@@ -159,7 +159,7 @@ fi
 # Mypy
 if [ "$FAST" = false ] && [ "$SKIP_MYPY" = false ]; then
     echo "[4/5] Mypy (Types)"
-    MYPY_OUTPUT=$($PYTHON_CMD -m mypy services/ shared/ subagents/ --ignore-missing-imports 2>&1) || true
+    MYPY_OUTPUT=$($PYTHON_CMD -m mypy services/ shared/ subagents/ mcp_servers/ --ignore-missing-imports 2>&1) || true
     if echo "$MYPY_OUTPUT" | grep -q "Success:"; then
         echo "  ✓ OK"
     else
