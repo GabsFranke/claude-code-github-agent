@@ -31,6 +31,17 @@ Rate each issue from 0-100:
 
 **Only report issues with confidence ≥ 80**
 
+## Turn Budget Management
+
+You have a limited number of turns. Prioritize producing output over exhaustive analysis:
+
+1. **Read strategically**: Use `git diff` to identify which files matter most. Focus your deep reading on the highest-risk changes. Avoid reading the same file multiple times at small offsets — read larger chunks (200+ lines) instead.
+2. **Set a reading budget**: Allocate no more than 60% of your turns to reading and analysis. Reserve the rest for synthesizing and delivering findings.
+3. **Deliver partial results**: If you've found issues but haven't reviewed every file, produce your output with what you have. Reporting 3 high-confidence findings is better than exhausting your budget and reporting nothing.
+4. **Avoid redundant reads**: If you've already read a file section, use Grep to check specific details rather than re-reading the whole file.
+
+**If you've spent more than ~15 turns on reading without producing output, stop and deliver what you have.**
+
 ## Output Format
 
 Start by listing what you're reviewing. For each high-confidence issue provide:
