@@ -42,7 +42,7 @@ class TestWorkflowContextProfiles:
 
     def test_fix_ci_profile(self, engine: WorkflowEngine):
         profile = engine.get_context_profile("fix-ci")
-        assert profile["repomap_budget"] == 2048
+        assert profile["repomap_budget"] == 4096
         assert profile["personalized"] is True
         assert profile["priority_focus"] == ["build_system", "test_structure"]
 
@@ -53,7 +53,7 @@ class TestWorkflowContextProfiles:
 
     def test_generic_profile(self, engine: WorkflowEngine):
         profile = engine.get_context_profile("generic")
-        assert profile["repomap_budget"] == 2048
+        assert profile["repomap_budget"] == 4096
         assert profile["personalized"] is False
 
     def test_unknown_workflow_returns_empty(self, engine: WorkflowEngine):

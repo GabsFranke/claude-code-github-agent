@@ -62,6 +62,18 @@ async def ensure_repo_synced(
         logger.info(f"Repo {repo} already synced (cached)")
         return repo_dir
 
+    # Fallback: Check if repo directory exists (handles expired completion keys)
+    if os.path.exists(repo_dir):
+        logger.info(
+            f"Repo {repo} directory exists (completion key expired but repo is synced)"
+        )
+        # Re-trigger sync to ensure it's up-to-date and refresh completion key
+        from shared import get_queue
+
+        sync_queue = get_queue(queue_name="agent:sync:requests")
+        await sync_queue.publish({"repo": repo, "ref": ref})
+        logger.info(f"Re-triggered sync for {repo} to refresh cache")
+
     # Subscribe to completion events
     completion_channel = "agent:sync:events"
     pubsub = redis_client.pubsub()
@@ -417,6 +429,12 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
 
         response = result["response"]
 
+        # Flush buffered post-processing jobs. The SDK may fire
+        # Stop/SubagentStop hooks multiple times per session — the
+        # flush deduplicates by (transcript, event, job_type) and
+        # enqueues only the final set.
+        await builder.flush_pending_post_jobs()
+
         # Mark job as complete (agent already posted to GitHub via MCP)
         await job_queue.complete_job(
             job_id,
@@ -433,6 +451,13 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
 
     except Exception as e:
         import time
+
+        # Flush buffered jobs even on failure — partial sessions can
+        # still produce useful retrospection data.
+        try:
+            await builder.flush_pending_post_jobs()
+        except Exception as flush_err:
+            logger.error(f"Failed to flush post-processing jobs: {flush_err}")
 
         logger.error(f"Job {job_id} failed: {e}", exc_info=True)
 

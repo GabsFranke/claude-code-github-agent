@@ -32,11 +32,12 @@ logger = logging.getLogger(__name__)
 # Configuration — use IndexingConfig for consistent defaults
 from shared.config import IndexingConfig  # noqa: E402
 
+_indexing_config: IndexingConfig | None = None
 try:
     _indexing_config = IndexingConfig()
 except Exception:
     # Fallback to raw env vars if config validation fails (e.g., in tests)
-    _indexing_config = None
+    pass
 
 if _indexing_config:
     INDEXING_ENABLED = _indexing_config.indexing_enabled

@@ -422,7 +422,9 @@ def _search_with_re(
     for root, dirs, filenames in os.walk(_repo_path):
         # Filter excluded directories in-place to avoid walking into
         # .git, node_modules, __pycache__, etc.
-        dirs[:] = [d for d in sorted(dirs) if d not in EXCLUDE_DIRS and not d.startswith(".")]
+        dirs[:] = [
+            d for d in sorted(dirs) if d not in EXCLUDE_DIRS and not d.startswith(".")
+        ]
 
         for name in filenames:
             if len(results) >= max_results:
