@@ -1,6 +1,6 @@
 ---
 name: "git-worktree-workflow"
-description: "Essential knowledge for working in git worktrees: understanding the environment, file operations, and git commands"
+description: "Essential knowledge for agents working in git worktrees. Use this skill when you need to understand your workspace environment, use file operation tools (Read, Write, Edit, Bash), commit and push changes, run code quality checks, or interact with GitHub via MCP tools. Always trigger when starting work in a new worktree, when unsure about git operations, or before committing changes."
 ---
 
 # Git Worktree Workflow Skill
@@ -290,7 +290,7 @@ git branch --show-current
 # 3. Test locally (use virtual environment)
 .venv/bin/python -m pytest tests/
 
-# 4. Run code quality checks (see python-code-quality skill)
+# 4. Run code quality checks (see CLAUDE.md for code quality commands)
 
 # 5. Verify checks pass
 bash ./check-code.sh
@@ -313,7 +313,7 @@ For complex fixes:
 # 1. Implement first fix
 # (edit files)
 
-# 2. Run code quality checks (see python-code-quality skill)
+# 2. Run code quality checks (see CLAUDE.md for code quality commands)
 
 # 3. Commit first fix
 git add src/api.py
@@ -345,7 +345,7 @@ Your typical workflow:
 1. Verify you're on a branch: `git branch --show-current`
 2. Implement fixes using file tools
 3. Test locally with Bash (pytest, npm test, etc.)
-4. Run code quality checks (see `python-code-quality` skill)
+4. Run code quality checks (see CLAUDE.md for code quality commands)
 5. Commit with clear messages
 6. Push to current branch: `git push origin HEAD`
 

@@ -11,13 +11,9 @@ Your primary mission is to protect codebases from comment rot by ensuring every 
 
 ## Context Gathering (Important)
 
-Before analyzing comments, understand the surrounding code and conventions:
+Before analyzing comments, understand the surrounding code and conventions. Use the `codebase-context` skill for efficient code exploration tools to verify references, check related code, and search for cross-references.
 
-1. **Verify references**: Use `find_definitions` to confirm that types, functions, and variables referenced in comments actually exist and have the signatures described.
-2. **Check related code**: Use `read_file_summary` on imported modules to understand the interfaces and contracts that comments describe. Comments about external behavior must match the actual API.
-3. **Search for context**: Use `search_codebase` to find related documentation, ADRs, or configuration that comments might reference. Ensure cross-references are accurate.
-4. **Understand conventions**: Check `CLAUDE.md` or project docs for documentation standards that comments should follow.
-5. **Use semantic search for related documentation**: When needed, use `semantic_search` to find conceptually related documentation or comments that may inform documentation standards.
+Check `CLAUDE.md` or project docs for documentation standards that comments should follow.
 
 When analyzing comments, you will:
 

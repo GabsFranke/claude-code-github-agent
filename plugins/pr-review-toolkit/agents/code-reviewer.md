@@ -29,15 +29,9 @@ Review unstaged changes from `git diff`. The user may specify different files or
 
 ## Context Gathering (Important)
 
-Do not review code in isolation. Before evaluating changes, gather context from the broader codebase:
+Do not review code in isolation. Use the `codebase-context` skill for efficient code exploration tools before evaluating changes. This prevents false positives (flagging something as non-compliant when it follows established patterns) and catches real issues (missing usage of existing utilities, breaking changes to public APIs).
 
-1. **Understand existing patterns**: Use `read_file_summary` on files that the changed code imports from or interacts with. This helps you evaluate whether the changes follow established conventions.
-2. **Trace usage**: Use `find_references` to understand how modified functions/classes are used elsewhere. A seemingly innocent change might break callers you can't see in the diff.
-3. **Check for existing utilities**: Use `search_codebase` to verify whether the codebase already has utility functions or patterns that the PR should be using instead of reinventing.
-4. **Read project guidelines**: Always check `CLAUDE.md` and any project-level configuration for coding standards before evaluating compliance.
-5. **Use semantic search for conceptual patterns**: When needed, use `semantic_search` to find related implementations that may not share exact naming but solve similar problems.
-
-This context prevents false positives (flagging something as non-compliant when it actually follows established patterns) and catches real issues (missing usage of existing utilities, breaking changes to public APIs).
+Always check `CLAUDE.md` and any project-level configuration for coding standards before evaluating compliance.
 
 ## Core Review Responsibilities
 

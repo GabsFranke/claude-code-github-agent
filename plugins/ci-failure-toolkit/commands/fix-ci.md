@@ -459,7 +459,7 @@ Instructions:
 2. Analyze build failures in services/webhook/ only
 3. Implement fixes using Read/Write/Edit tools
 4. Test locally: run the same build command that failed for webhook service
-5. Run code quality checks (see python-code-quality skill)
+5. Run code quality checks (see CLAUDE.md for code quality commands)
 6. Commit changes: git add . && git commit -m "fix: resolve webhook build failures"
 7. Push: git push origin HEAD
 8. Return a structured summary of fixes applied
@@ -507,7 +507,7 @@ Instructions:
 2. Analyze all 8 test failures in services/webhook/ from the log above
 3. Implement fixes for all failures using Read/Write/Edit tools
 4. Run tests locally: .venv/bin/python -m pytest services/webhook/tests/ -v
-5. Run code quality checks (see python-code-quality skill)
+5. Run code quality checks (see CLAUDE.md for code quality commands)
 6. Commit changes: git add . && git commit -m "fix: resolve webhook test failures (8 tests)"
 7. Push: git push origin HEAD
 8. Return a structured summary of all fixes applied
@@ -557,7 +557,7 @@ IMPORTANT: You are working in a shared worktree. The main agent has already crea
 
 Instructions:
 1. Verify you're on the correct branch: git branch --show-current (should show {current_branch})
-2. Run auto-fixers first (see python-code-quality skill):
+2. Run auto-fixers first (see CLAUDE.md for code quality commands):
    - black shared/
    - isort shared/
    - ruff check --fix shared/

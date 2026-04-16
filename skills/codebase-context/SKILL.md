@@ -1,6 +1,6 @@
 ---
 name: "codebase-context"
-description: "How to use the codebase context system for efficient code exploration and understanding. Use this skill when working with unfamiliar code, searching for definitions or references, exploring how code is connected, understanding file structure, or doing anything that requires navigating a codebase you don't fully know yet. Also use when the user asks to search code, find where something is defined, trace dependencies, or get an overview of a codebase."
+description: "Use this skill whenever you need to explore, search, or understand code — including code reviews, PR analysis, architecture review, finding definitions or references, tracing dependencies, checking for existing utilities, or understanding file structure. Always trigger before reading files directly — the tools here (read_file_summary, find_references, semantic_search, search_codebase, find_definitions) are more efficient than sequential Read calls. Trigger for any task involving code exploration, context gathering, or understanding how code is connected."
 ---
 
 # Codebase Context Tools

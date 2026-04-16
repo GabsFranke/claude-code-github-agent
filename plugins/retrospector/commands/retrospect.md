@@ -37,7 +37,23 @@ It includes:
 - If sixth argument is `subagent`: This is a subagent execution session
 - Otherwise: This is a main workflow session
 
-**For main workflow sessions**, scan for:
+### Agent Tool Landscape
+
+When analyzing transcripts, you need to know what tools agents have access to so you can identify suboptimal tool usage. Agents in the sandbox have:
+
+**Search and exploration tools:**
+- `read_file_summary` — AST-extracted file overview at ~15% token cost of full `Read`
+- `semantic_search` — Natural language code search (Gemini embeddings + Qdrant)
+- `find_definitions` — Locate symbol definitions by exact name
+- `find_references` — Find all usages of a symbol across the codebase
+- `search_codebase` — Regex search across the codebase
+
+**File tools:** `Read`, `Grep`, `Glob`, `Write`, `Edit`
+**GitHub tools:** `mcp__github__*` (PRs, issues, comments, reviews)
+**Delegation tools:** `Agent` (subagents), `Skill` (load knowledge)
+**Skills:** `codebase-context` (search system guide), `git-worktree-workflow`
+
+### Scan For (all sessions)
 
 - Tool calls that returned errors followed by redundant retries
 - Agent tool calls — note which subagents were invoked (this is expected and good)
@@ -46,16 +62,26 @@ It includes:
 - Excessive back-and-forth on something that should have been one step
 - Missing context that led to wrong assumptions
 - Any explicit failure or error in the final turns
+- **Tool usage anti-patterns** (see below)
 
-**For subagent sessions**, scan for:
+### Tool Usage Anti-Patterns
+
+When scanning the transcript, flag these common problems:
+
+1. **Sequential file reading** — Agent reads 10+ files one-by-one in consecutive turns. Should use `read_file_summary` to triage, then deep-read selectively. This is the most common cause of turn exhaustion on large PRs.
+
+2. **Manual pattern searching** — Agent reads files to find where something is defined or how a pattern works. Should use `semantic_search`, `find_definitions`, or `search_codebase` instead.
+
+3. **Missing symbol tracing** — Agent changes or reviews code without checking where symbols are used downstream. Should use `find_references` to trace blast radius.
+
+4. **Skill not loaded** — Agent struggles with codebase navigation but never loads the `codebase-context` skill via the Skill tool. If the instruction file doesn't reference the skill, suggest adding a reference.
+
+When you find one of these anti-patterns, the fix is typically to update the instruction file to explicitly mention the relevant tool and when to use it.
+
+### Additional Checks (subagent sessions)
 
 - Whether the subagent stayed focused on its specialized task
-- Tool calls that returned errors followed by redundant retries
-- Instructions that were visibly ignored
-- Steps taken in the wrong order
-- Excessive back-and-forth on something that should have been one step
 - Missing domain-specific context for this subagent's specialty
-- Any explicit failure or error in the final turns
 
 **IMPORTANT:** Do NOT suggest that a main workflow should delegate to subagents
 if the transcript already shows Agent tool invocations. Subagent delegation
@@ -119,6 +145,10 @@ For subagent sessions, focus only on the subagent being analyzed.
 a command's frontmatter (`skills:` list). They live at `skills/{skill-name}/SKILL.md`.
 If the transcript shows a skill was loaded or invoked, read that file too.
 Use `Glob skills/*/SKILL.md` to discover all available skills if needed.
+
+If an instruction file doesn't reference a relevant skill that would have helped
+the agent (e.g., `codebase-context` for any workflow that explores code), suggest
+adding a reference to load that skill.
 
 **Also always read this file** — `plugins/retrospector/commands/retrospect.md` —
 and evaluate whether your own instructions have gaps that this session exposed.

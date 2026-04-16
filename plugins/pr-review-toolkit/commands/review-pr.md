@@ -7,11 +7,19 @@ argument-hint: "[owner/repo] [pr-number] [review-aspects]"
 
 Run a comprehensive pull request review using multiple specialized agents. Agents run in a git worktree with direct file access and use GitHub MCP to post results.
 
+**Your job is to orchestrate — delegate analysis to agents, do not read every file yourself.**
+
 **Arguments:** "$ARGUMENTS"
 
 - First argument: Repository (owner/repo format, required for posting review)
 - Second argument: PR number (required for posting review)
 - Additional arguments: Specific review aspects (optional)
+
+## Codebase Context Tools
+
+Review agents have access to efficient search tools for code exploration (documented in the `codebase-context` skill). They will use these for context gathering — you do not need to read files yourself.
+
+**Do NOT read changed files one-by-one.** Delegate to agents and let them handle code exploration.
 
 ## Review Workflow:
 
@@ -67,6 +75,8 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
    - **Large PR** (>300 lines or 8+ files): All applicable reviews — the complexity warrants full coverage
 
 5. **Launch Review Agents: tool_name: Agent**
+
+   **Do NOT read all changed files yourself before launching agents.** Your job is to route, not to review. Use `read_file_summary` on a few key files only if you need context for routing decisions (e.g., which agents to run, what areas to assign). Launch agents early — they will read files themselves.
 
    **Parallel approach** (default):
    - Launch all agents simultaneously in a single message
@@ -261,6 +271,7 @@ Run a comprehensive pull request review using multiple specialized agents. Agent
 
 ## Notes:
 
+- **Turn budget**: Spend no more than 30% of turns reading/orchestration. Reserve 30% for agent launches and 40% for aggregation + posting. If you've spent more than ~10 turns reading files without launching agents, stop and launch them immediately.
 - Agents run in git worktree with direct file system access
 - Each agent focuses on its specialty for deep analysis
 - Agents use codebase tools (find_definitions, find_references, search_codebase, read_file_summary) and semantic search to understand broader context beyond the diff

@@ -104,7 +104,7 @@ docker-compose -f docker-compose.minimal.yml up --build -d
 docker-compose up --build -d
 
 # Optional: Scale sandbox workers for parallel processing
-docker-compose up --scale sandbox_worker=2 --scale memory_worker=2 --scale retrospector_worker=2 -d
+docker-compose up --build --scale sandbox_worker=2 --scale memory_worker=2 --scale retrospector_worker=2 -d
 # or with minimal setup:
 docker-compose -f docker-compose.minimal.yml up --scale sandbox_worker=5 -d
 

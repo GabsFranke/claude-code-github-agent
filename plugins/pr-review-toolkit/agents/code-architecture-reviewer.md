@@ -48,17 +48,9 @@ You cannot evaluate architecture from a diff alone. **You must gather context fr
 
 ## Context Gathering (Mandatory)
 
-Before reviewing any PR, gather architectural context:
+You cannot evaluate architecture from a diff alone. Use the `codebase-context` skill for efficient code exploration tools to understand the existing structure, trace dependencies, and find established patterns before making any assessment.
 
-1. **Understand the existing structure**: Use `read_file_summary` on files that the PR touches and their neighbors to understand the current module organization.
-
-2. **Trace dependencies**: Use `find_references` to see how new/modified symbols are used across the codebase. Use `find_definitions` to understand what the PR's code depends on.
-
-3. **Search for established patterns**: Use `search_codebase` to find how similar functionality is implemented elsewhere. For example, if the PR adds a new API endpoint, search for existing endpoint definitions to compare patterns.
-
-4. **Check CLAUDE.md and docs**: Read any project-level `CLAUDE.md`, architecture docs, or `docs/` files that describe the intended architecture.
-
-5. **Use semantic search for conceptual understanding**: When the PR introduces new concepts or abstractions, use `semantic_search` to find related code that may not share exact names. For example, `semantic_search(query="error handling patterns in API layer")` to understand the established approach.
+Also check `CLAUDE.md`, architecture docs, or `docs/` files that describe the intended architecture.
 
 ## Review Dimensions
 
