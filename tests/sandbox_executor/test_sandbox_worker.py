@@ -54,7 +54,7 @@ class TestProcessJob:
 
         with (
             patch(
-                "services.sandbox_executor.sandbox_worker.ensure_repo_synced",
+                "services.sandbox_executor.sandbox_worker.wait_for_repo_sync",
                 new_callable=AsyncMock,
                 return_value="/var/cache/repos/owner/repo.git",
             ),
@@ -130,7 +130,7 @@ class TestProcessJob:
 
         with (
             patch(
-                "services.sandbox_executor.sandbox_worker.ensure_repo_synced",
+                "services.sandbox_executor.sandbox_worker.wait_for_repo_sync",
                 new_callable=AsyncMock,
                 return_value="/var/cache/repos/owner/repo.git",
             ),

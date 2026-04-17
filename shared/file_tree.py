@@ -6,6 +6,7 @@ to skip noise directories and generated files.
 """
 
 import os
+from collections.abc import Iterator
 from pathlib import Path
 
 
@@ -107,6 +108,67 @@ def load_ignore_spec(repo_path: Path) -> "pathspec.PathSpec | None":
         return pathspec.PathSpec.from_lines("gitignore", lines)
     except Exception:
         return None
+
+
+def walk_source_files(
+    repo_path: Path,
+    ignore_spec: "pathspec.PathSpec | None" = None,
+) -> Iterator[Path]:
+    """Walk repo yielding source file paths, respecting exclusions and ignore files.
+
+    This is the canonical directory-walk-and-filter logic shared by
+    ``_count_summary``, ``RepoMap._iter_source_files``, and
+    ``chunk_repo`` (full-scan branch).
+
+    Skips:
+    - Directories in ``EXCLUDE_DIRS`` and dot-directories
+    - Files in ``EXCLUDE_FILES``
+    - Files ending with suffixes in ``EXCLUDE_SUFFIXES``
+    - ``.git`` file guard (worktrees create a ``.git`` file)
+    - Files containing ``.generated.``, ``.min.``, or ``.bundle.`` substrings
+    - Paths matching the optional ``ignore_spec`` (from ``load_ignore_spec``)
+
+    Args:
+        repo_path: Absolute path to the repository root.
+        ignore_spec: Optional ``pathspec.PathSpec`` from ``load_ignore_spec``.
+
+    Yields:
+        Absolute ``Path`` objects for each non-excluded source file.
+    """
+    repo_path = Path(repo_path)
+
+    for root, dirs, filenames in os.walk(repo_path):
+        rel_root = str(Path(root).relative_to(repo_path)).replace("\\", "/")
+        if rel_root == ".":
+            rel_root = ""
+
+        # Filter excluded and ignored directories in-place (sorted for determinism)
+        filtered_dirs: list[str] = []
+        for d in sorted(dirs):
+            if d in EXCLUDE_DIRS or d.startswith("."):
+                continue
+            rel = f"{rel_root}/{d}" if rel_root else d
+            if ignore_spec and (
+                ignore_spec.match_file(rel + "/") or ignore_spec.match_file(rel)
+            ):
+                continue
+            filtered_dirs.append(d)
+        dirs[:] = filtered_dirs
+
+        for name in sorted(filenames):
+            # .git file guard (worktrees create a .git file, not a directory)
+            if name == ".git":
+                continue
+            if name in EXCLUDE_FILES:
+                continue
+            if any(name.endswith(s) for s in EXCLUDE_SUFFIXES):
+                continue
+            if any(pat in name.lower() for pat in (".generated.", ".min.", ".bundle.")):
+                continue
+            rel = f"{rel_root}/{name}" if rel_root else name
+            if ignore_spec and ignore_spec.match_file(rel):
+                continue
+            yield Path(root) / name
 
 
 def _should_exclude_dir(name: str) -> bool:
@@ -219,36 +281,13 @@ def _count_summary(
     counts: dict[str, int] = {}
     total = 0
 
-    for root, dirs, files in os.walk(repo_path):
-        rel_root = str(Path(root).relative_to(repo_path)).replace("\\", "/")
-        if rel_root == ".":
-            rel_root = ""
-
-        # Filter dirs in-place to skip excluded and ignored
-        filtered = []
-        for d in dirs:
-            if _should_exclude_dir(d):
-                continue
-            rel = f"{rel_root}/{d}" if rel_root else d
-            if ignore_spec and (
-                ignore_spec.match_file(rel + "/") or ignore_spec.match_file(rel)
-            ):
-                continue
-            filtered.append(d)
-        dirs[:] = filtered
-
-        for f in files:
-            if _should_exclude_file(f):
-                continue
-            rel = f"{rel_root}/{f}" if rel_root else f
-            if ignore_spec and ignore_spec.match_file(rel):
-                continue
-            ext = Path(f).suffix.lower()
-            if ext:
-                counts[ext] = counts.get(ext, 0) + 1
-            else:
-                counts["(no ext)"] = counts.get("(no ext)", 0) + 1
-            total += 1
+    for filepath in walk_source_files(repo_path, ignore_spec):
+        ext = filepath.suffix.lower()
+        if ext:
+            counts[ext] = counts.get(ext, 0) + 1
+        else:
+            counts["(no ext)"] = counts.get("(no ext)", 0) + 1
+        total += 1
 
     if not total:
         return "empty repository"

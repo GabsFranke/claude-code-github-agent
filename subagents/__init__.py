@@ -1,4 +1,4 @@
-"""Custom subagent definitions for PR review."""
+"""Custom subagent definitions for PR review and memory extraction."""
 
 from .architecture_reviewer import ARCHITECTURE_REVIEWER
 from .memory_extractor import MEMORY_EXTRACTOR

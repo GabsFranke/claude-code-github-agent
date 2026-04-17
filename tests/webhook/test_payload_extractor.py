@@ -68,12 +68,12 @@ class TestExtractionModels:
         assert rule.required is True
         assert rule.default == 0
 
-    def test_event_config_all_optional(self):
-        """EventExtractionConfig works with all fields None."""
+    def test_event_config_defaults(self):
+        """EventExtractionConfig has sensible defaults."""
         config = EventExtractionConfig()
         assert config.issue_number is None
         assert config.ref is None
-        assert config.user is None
+        assert config.user == ExtractionRule(path="sender.login")
         assert config.extra == {}
 
     def test_extracted_fields_defaults(self):

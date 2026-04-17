@@ -8,7 +8,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from .exceptions import QueueError
+from .exceptions import QueueError, RepositorySyncError
 
 logger = logging.getLogger(__name__)
 
@@ -245,3 +245,92 @@ def get_queue(queue_name: str = "agent-requests") -> MessageQueue:
     logger.info("Using Redis message queue")
     redis_password = os.getenv("REDIS_PASSWORD")
     return RedisQueue(queue_name=queue_name, password=redis_password)
+
+
+async def _request_repo_sync(repo: str, ref: str, redis_client) -> None:
+    """Publish a sync request for the given repo+ref.
+
+    Uses get_queue() to obtain the sync requests queue (same pattern
+    as sandbox_worker).  ``get_queue`` is imported inside the function
+    body to avoid circular imports.
+    """
+    # Local import to avoid circular imports
+    q = get_queue(queue_name="agent:sync:requests")
+    await q.publish({"repo": repo, "ref": ref})
+
+
+async def wait_for_repo_sync(
+    repo: str,
+    ref: str,
+    redis_client,
+    timeout: int = 300,
+) -> str:
+    """Wait for repo sync completion via pub/sub.
+
+    Checks Redis completion key first (fast path).  If not cached,
+    subscribes to the sync events channel and waits for a completion
+    event matching repo+ref.
+
+    Returns:
+        Path to the bare repo directory.
+
+    Raises:
+        RepositorySyncError: On timeout, sync failure, or stream end.
+    """
+    complete_key = f"agent:sync:complete:{repo}:{ref}"
+    cache_base = "/var/cache/repos"
+    repo_dir = os.path.join(cache_base, f"{repo}.git")
+
+    # Fast path: already marked complete in Redis
+    is_complete = await redis_client.get(complete_key)
+    if is_complete and os.path.exists(repo_dir):
+        logger.info(f"Repo {repo} already synced (cached)")
+        return repo_dir
+
+    # If the repo directory exists on disk but the completion key expired,
+    # or if neither exists, request a fresh sync.
+    await _request_repo_sync(repo, ref, redis_client)
+    logger.info(f"Requested sync for {repo} (ref={ref})")
+
+    # Subscribe to completion events
+    completion_channel = "agent:sync:events"
+    pubsub = redis_client.pubsub()
+    await pubsub.subscribe(completion_channel)
+
+    logger.info(f"Waiting for sync completion event for {repo}...")
+
+    try:
+        start_time = asyncio.get_event_loop().time()
+
+        async for message in pubsub.listen():
+            # Check timeout
+            if asyncio.get_event_loop().time() - start_time > timeout:
+                raise RepositorySyncError(
+                    f"Sync timeout for {repo} after {timeout}s "
+                    f"- repo sync worker may be down"
+                )
+
+            if message["type"] == "message":
+                try:
+                    event = json.loads(message["data"])
+                    if event.get("repo") == repo and event.get("ref") == ref:
+                        if event.get("status") == "complete":
+                            logger.info(f"Received sync completion event for {repo}")
+                            return repo_dir
+                        elif event.get("status") == "error":
+                            raise RepositorySyncError(
+                                f"Repo sync failed for {repo}: "
+                                f"{event.get('error', 'unknown error')}"
+                            )
+                except json.JSONDecodeError:
+                    logger.warning(f"Invalid JSON in sync event: {message['data']}")
+                    continue
+
+        # If we exit the loop without returning, something went wrong
+        raise RepositorySyncError(
+            f"Sync event stream ended unexpectedly for {repo} "
+            f"- no completion event received"
+        )
+    finally:
+        await pubsub.unsubscribe(completion_channel)
+        await pubsub.close()

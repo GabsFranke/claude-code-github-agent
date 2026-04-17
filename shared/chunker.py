@@ -8,13 +8,12 @@ Reuses exclusion logic from shared/file_tree.py.
 """
 
 import logging
-import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from .file_tree import EXCLUDE_DIRS, EXCLUDE_FILES, EXCLUDE_SUFFIXES, load_ignore_spec
+from .file_tree import load_ignore_spec, walk_source_files
 from .ts_languages import (
     EXTENSION_MAP,
     LanguageConfig,
@@ -160,32 +159,8 @@ def chunk_repo(
 
     # Full scan
     chunks = []
-    for root, dirs, filenames in os.walk(repo_path):
-        rel_root = str(Path(root).relative_to(repo_path)).replace("\\", "/")
-        if rel_root == ".":
-            rel_root = ""
-
-        # Filter excluded and ignored directories in-place
-        filtered_dirs: list[str] = []
-        for d in sorted(dirs):
-            if d in EXCLUDE_DIRS or d.startswith("."):
-                continue
-            rel = f"{rel_root}/{d}" if rel_root else d
-            if ignore_spec and (
-                ignore_spec.match_file(rel + "/") or ignore_spec.match_file(rel)
-            ):
-                continue
-            filtered_dirs.append(d)
-        dirs[:] = filtered_dirs
-
-        for name in sorted(filenames):
-            if _should_skip(name):
-                continue
-            rel = f"{rel_root}/{name}" if rel_root else name
-            if ignore_spec and ignore_spec.match_file(rel):
-                continue
-            filepath = Path(root) / name
-            chunks.extend(chunk_file(filepath, repo_path))
+    for filepath in walk_source_files(repo_path, ignore_spec):
+        chunks.extend(chunk_file(filepath, repo_path))
 
     return chunks
 
@@ -562,20 +537,6 @@ def _chunk_with_regex(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _should_skip(name: str) -> bool:
-    """Check if a file should be skipped."""
-    if name in EXCLUDE_FILES:
-        return True
-    # Skip .git file (worktrees create a .git file pointing to the bare repo)
-    if name == ".git":
-        return True
-    if any(name.endswith(s) for s in EXCLUDE_SUFFIXES):
-        return True
-    if any(pat in name.lower() for pat in (".generated.", ".min.", ".bundle.")):
-        return True
-    return False
 
 
 def _node_text(source: bytes, node: Any) -> str:

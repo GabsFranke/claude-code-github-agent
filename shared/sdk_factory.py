@@ -4,41 +4,22 @@ This module provides a builder pattern for constructing ClaudeAgentOptions
 with sensible defaults and flexible customization for different worker types.
 """
 
-import asyncio
-import json
 import logging
 import os
-import shutil
 from pathlib import Path
 
 from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
 
 from shared.langfuse_hooks import setup_langfuse_hooks
+from shared.post_processing import flush_pending_post_jobs as _flush_pending_post_jobs
+from shared.post_processing import (
+    stage_transcript_with_retry as _stage_transcript_with_retry,
+)
 
 logger = logging.getLogger(__name__)
 
 # Total system prompt budget in tokens
 SYSTEM_PROMPT_BUDGET = 12_000
-
-# Module-level Redis connection pool for reuse across hook invocations
-_redis_pool = None
-
-
-async def _get_redis_pool():
-    """Get or create the module-level Redis connection pool.
-
-    Using a connection pool prevents connection churn under high load.
-    """
-    global _redis_pool
-    if _redis_pool is None:
-        import redis.asyncio as aioredis
-
-        redis_url = os.getenv("REDIS_URL", "redis://redis:6379")
-        redis_password = os.getenv("REDIS_PASSWORD")
-        _redis_pool = aioredis.ConnectionPool.from_url(
-            redis_url, decode_responses=True, password=redis_password
-        )
-    return _redis_pool
 
 
 class SDKOptionsBuilder:
@@ -55,6 +36,25 @@ class SDKOptionsBuilder:
             .build()
         )
     """
+
+    @staticmethod
+    def _resolve_indexing_config() -> tuple[bool, str, str | None]:
+        """Resolve indexing configuration with env-var fallback.
+
+        Returns:
+            Tuple of (is_enabled, qdrant_url, gemini_api_key or None).
+        """
+        try:
+            from shared.config import IndexingConfig
+
+            cfg = IndexingConfig()
+            return cfg.is_enabled, cfg.qdrant_url, cfg.gemini_api_key
+        except Exception:
+            return (
+                os.getenv("INDEXING_ENABLED", "false").lower() == "true",
+                os.getenv("QDRANT_URL") or "",
+                os.getenv("GEMINI_API_KEY") or "",
+            )
 
     def __init__(self, cwd: str):
         """Initialize builder with working directory.
@@ -206,7 +206,7 @@ class SDKOptionsBuilder:
         """Add codebase tools MCP server for structured code search.
 
         Provides find_definitions, find_references, search_codebase, and
-        read_file_summary tools that reuse Phase 1's tree-sitter infrastructure.
+        read_file_summary tools that reuse the tree-sitter infrastructure.
 
         Args:
             worktree_path: Absolute path to the git worktree.
@@ -238,21 +238,7 @@ class SDKOptionsBuilder:
         Returns:
             Self for method chaining
         """
-        from shared.config import IndexingConfig
-
-        try:
-            cfg = IndexingConfig()
-        except Exception:
-            cfg = None
-
-        if cfg:
-            indexing_enabled = cfg.is_enabled
-            qdrant_url = cfg.qdrant_url
-            gemini_key = cfg.gemini_api_key
-        else:
-            indexing_enabled = os.getenv("INDEXING_ENABLED", "false").lower() == "true"
-            qdrant_url = os.getenv("QDRANT_URL") or ""
-            gemini_key = os.getenv("GEMINI_API_KEY") or ""
+        indexing_enabled, qdrant_url, gemini_key = self._resolve_indexing_config()
 
         if indexing_enabled and qdrant_url and gemini_key:
             self._mcp_servers["semantic-search"] = {
@@ -434,14 +420,9 @@ class SDKOptionsBuilder:
         retrospector_enabled = (
             os.getenv("RETROSPECTOR_ENABLED", "true").lower() == "true"
         )
-        try:
-            from shared.config import IndexingConfig
-
-            indexing_enabled = IndexingConfig().is_enabled
-        except Exception:
-            indexing_enabled = os.getenv(
-                "INDEXING_ENABLED", "false"
-            ).lower() == "true" and bool(os.getenv("GEMINI_API_KEY"))
+        indexing_enabled, _, gemini_key = self._resolve_indexing_config()
+        # Preserve original env-fallback guard: require GEMINI_API_KEY
+        indexing_enabled = indexing_enabled and bool(gemini_key)
 
         # Capture context from builder for hooks to use
         repo_context = self._repo_context
@@ -460,7 +441,11 @@ class SDKOptionsBuilder:
                 )
 
             if not transcript:
-                return {"success": True}
+                logger.warning(
+                    "Post-session hook: no transcript path in hook input, "
+                    "skipping post-processing"
+                )
+                return {"success": False, "error": "no_transcript_path"}
 
             logger.debug(f"Post-session hook triggered: {transcript} ({event})")
 
@@ -544,60 +529,9 @@ class SDKOptionsBuilder:
 
         Safe to call even if no jobs were buffered (no-op).
         """
-        pending = self._pending_post_jobs
-        if not pending:
-            return
-
-        # Dedup: for the same (staged_path, event, type), keep only the
-        # last entry. This handles the case where the SDK fires Stop
-        # multiple times per session — each subsequent fire appends a
-        # newer entry, and we want the latest metadata.
-        seen: dict[tuple, dict] = {}
-        for job in pending:
-            key = (job.get("staged_path", ""), job.get("event"), job["type"])
-            seen[key] = job  # Last one wins
-
-        deduped = list(seen.values())
-        total = len(pending)
-        removed = total - len(deduped)
-        if removed:
-            logger.info(
-                f"Flush: deduped {removed} duplicate post-processing jobs "
-                f"({total} -> {len(deduped)})"
-            )
-
-        # Clear the buffer so a reused builder doesn't double-flush
+        jobs = self._pending_post_jobs
         self._pending_post_jobs = []
-
-        # Enqueue each job
-        for job in deduped:
-            try:
-                job_type = job["type"]
-                if job_type == "memory":
-                    await _enqueue_memory_job(
-                        job["repo"],
-                        job["staged_path"],
-                        job["event"],
-                        claude_md=job.get("claude_md"),
-                        memory_index=job.get("memory_index"),
-                    )
-                elif job_type == "retrospector":
-                    await _enqueue_retrospector_job(
-                        job["repo"],
-                        job["staged_path"],
-                        job["event"],
-                        job.get("workflow_name"),
-                        job.get("session_meta", {}),
-                    )
-                elif job_type == "indexing":
-                    await _enqueue_indexing_job(
-                        job["repo"], job["event"], ref=job.get("ref")
-                    )
-            except Exception as e:
-                logger.error(
-                    f"Failed to enqueue {job['type']} job during flush: {e}",
-                    exc_info=True,
-                )
+        await _flush_pending_post_jobs(jobs)
 
     # Directory methods
 
@@ -764,10 +698,9 @@ class SDKOptionsBuilder:
 
         Enforces a total system prompt budget (~12K tokens). Components
         are truncated by priority if the budget is exceeded:
-          1. Workflow context (never truncated)
-          2. CLAUDE.md (truncated from bottom)
-          3. Memory index (truncate oldest entries)
-          4. Structural context (truncated first)
+          1. Prompt content (workflow context, CLAUDE.md, memory index
+             -- all combined into a single block; truncated last)
+          2. Structural context (file tree + repomap; truncated first)
 
         Returns:
             Configured ClaudeAgentOptions instance
@@ -812,14 +745,13 @@ class SDKOptionsBuilder:
     def _assemble_system_prompt(self) -> str | None:
         """Assemble the final system prompt with budget enforcement.
 
-        Components in priority order (highest first):
-          1. Workflow context (from system_context / prompts/*.md)
-          2. CLAUDE.md (repository-specific instructions)
-          3. Memory index (accumulated knowledge)
-          4. Structural context (file tree + repomap)
+        Two component tiers (highest priority first):
+          1. Prompt content (workflow context, CLAUDE.md, memory index
+             -- merged into a single block before this method runs)
+          2. Structural context (file tree + repomap)
 
-        Lowest-priority components are truncated first if the total
-        exceeds SYSTEM_PROMPT_BUDGET tokens.
+        Structural context is truncated first if the total exceeds
+        SYSTEM_PROMPT_BUDGET tokens.
         """
         # Collect components with their token costs
         components: list[tuple[str, str]] = []  # (label, text)
@@ -849,49 +781,34 @@ class SDKOptionsBuilder:
             "Truncating by priority."
         )
 
-        # Re-order: structural (truncate first), then prompt content
-        ordered: list[tuple[str, bool]] = []
-
-        # Structural context is lowest priority — truncate first
-        structural_parts = []
-        prompt_parts = []
-        for label, text in components:
-            if label == "structural":
-                structural_parts.append(text)
-            else:
-                prompt_parts.append(text)
-
         budget_remaining = SYSTEM_PROMPT_BUDGET
+        final_parts: list[str] = []
 
-        # Add prompt content first (highest priority)
-        for text in prompt_parts:
-            tokens = _estimate_tokens(text)
-            if tokens <= budget_remaining:
-                ordered.append((text, False))
-                budget_remaining -= tokens
-            else:
-                # Truncate prompt content to fit
-                truncated = _truncate_text(text, budget_remaining)
-                if truncated:
-                    ordered.append((truncated, True))
-                    budget_remaining = 0
-                break
+        # Add prompt content first (highest priority — keep intact)
+        for label, text in components:
+            if label != "structural":
+                tokens = _estimate_tokens(text)
+                if tokens <= budget_remaining:
+                    final_parts.append(text)
+                    budget_remaining -= tokens
+                else:
+                    truncated = _truncate_text(text, budget_remaining)
+                    if truncated:
+                        final_parts.append(truncated)
+                        budget_remaining = 0
+                    break
 
-        # Add structural context with remaining budget
-        if budget_remaining > 0 and structural_parts:
-            structural_text = "\n\n".join(structural_parts)
-            tokens = _estimate_tokens(structural_text)
-            if tokens <= budget_remaining:
-                ordered.append((structural_text, False))
-            else:
-                truncated = _truncate_text(structural_text, budget_remaining)
-                if truncated:
-                    ordered.append((truncated, True))
-
-        # Combine: structural first (it's context), then prompt content
-        final_parts = []
-        for text, _was_truncated in ordered:
-            final_parts.append(text)
+        # Add structural context with remaining budget (lowest priority — truncate first)
+        if budget_remaining > 0:
+            for label, text in components:
+                if label == "structural":
+                    tokens = _estimate_tokens(text)
+                    if tokens <= budget_remaining:
+                        final_parts.append(text)
+                    else:
+                        truncated = _truncate_text(text, budget_remaining)
+                        if truncated:
+                            final_parts.append(truncated)
 
         if not final_parts:
             return None
@@ -939,225 +856,3 @@ def _truncate_text(text: str, max_tokens: int) -> str | None:
         return None
 
     return result + "\n... (truncated)"
-
-
-# Helper functions for transcript staging (used by with_transcript_staging)
-
-
-async def _stage_transcript_with_retry(
-    repo: str,
-    transcript_path: str,
-    max_retries: int = 3,
-    hook_event: str | None = None,
-    agent_id: str | None = None,
-    workflow_name: str | None = None,
-) -> str | None:
-    """Stage transcript with exponential backoff retry.
-
-    Args:
-        repo: Repository identifier
-        transcript_path: Path to transcript file
-        max_retries: Maximum number of retry attempts (default: 3)
-        hook_event: Hook event name (passed to _stage_transcript for naming)
-        agent_id: Subagent identifier (passed to _stage_transcript for naming)
-        workflow_name: Workflow name (passed to _stage_transcript for naming)
-
-    Returns:
-        Staged path on success, None on failure after all retries
-    """
-    for attempt in range(max_retries):
-        result = await _stage_transcript(
-            repo,
-            transcript_path,
-            hook_event=hook_event,
-            agent_id=agent_id,
-            workflow_name=workflow_name,
-        )
-        if result:
-            return result
-
-        if attempt < max_retries - 1:
-            delay = 2**attempt  # 1s, 2s, 4s
-            logger.warning(
-                f"Staging attempt {attempt + 1} failed, " f"retrying in {delay}s"
-            )
-            await asyncio.sleep(delay)
-
-    return None
-
-
-async def _stage_transcript(
-    repo: str,
-    transcript_path: str,
-    hook_event: str | None = None,
-    agent_id: str | None = None,
-    workflow_name: str | None = None,
-) -> str | None:
-    """Copy transcript to the shared transcripts volume for post-processing workers.
-
-    The transcript is persisted permanently for future analysis and debugging.
-    Files are named descriptively for easy identification:
-
-    - Main session: ``{workflow_name}_{timestamp}.jsonl``
-    - Subagent: ``subagent_{agent_id}_{timestamp}.jsonl``
-
-    Args:
-        repo: Repository identifier
-        transcript_path: Path to transcript file
-        hook_event: Hook event name (Stop or SubagentStop)
-        agent_id: Subagent identifier (e.g., "comment-analyzer")
-        workflow_name: Workflow name (e.g., "review-pr")
-
-    Returns:
-        Staged path on success, None on failure
-    """
-    transcript_file = Path(transcript_path)
-    if not transcript_file.exists():
-        logger.warning(f"Transcript not found, cannot stage: {transcript_path}")
-        return None
-
-    staged_dir = f"/home/bot/transcripts/{repo}"
-    await asyncio.to_thread(os.makedirs, staged_dir, exist_ok=True)
-
-    # Build a descriptive filename. Use the original transcript's
-    # stem as a session identifier so multiple hook fires for the
-    # same session overwrite the same staged file (keeping the
-    # latest/most-complete version). The descriptive prefix makes
-    # it easy to identify which session/subagent produced it.
-    suffix = transcript_file.suffix or ".jsonl"
-    session_stem = transcript_file.stem  # e.g., "session-abc123"
-
-    if hook_event == "SubagentStop" and agent_id:
-        filename = f"subagent_{agent_id}_{session_stem}{suffix}"
-    else:
-        name = workflow_name or "session"
-        filename = f"{name}_{session_stem}{suffix}"
-
-    staged_path = os.path.join(staged_dir, filename)
-    try:
-        await asyncio.to_thread(shutil.copy2, transcript_path, staged_path)
-        logger.info(f"Transcript staged: {staged_path}")
-    except Exception as e:
-        logger.warning(f"Failed to stage transcript for {repo}: {e}")
-        return None
-
-    return staged_path
-
-
-async def _enqueue_memory_job(
-    repo: str,
-    transcript_path: str,
-    hook_event: str,
-    claude_md: str | None = None,
-    memory_index: str | None = None,
-) -> None:
-    """Enqueue a memory extraction job for an already-persisted transcript.
-
-    Args:
-        repo: Repository identifier
-        transcript_path: Path to staged transcript
-        hook_event: Hook event name (Stop or SubagentStop)
-        claude_md: Pre-fetched CLAUDE.md content (optional, will fetch if None)
-        memory_index: Pre-fetched memory content (optional, will fetch if None)
-    """
-    try:
-        import redis.asyncio as aioredis
-
-        pool = await _get_redis_pool()
-        rc = aioredis.Redis(connection_pool=pool)
-        try:
-            payload = json.dumps(
-                {
-                    "repo": repo,
-                    "transcript_path": transcript_path,
-                    "hook_event": hook_event,
-                    "claude_md": claude_md,  # Pass pre-fetched context
-                    "memory_index": memory_index,  # Pass pre-fetched context
-                }
-            )
-            await rc.rpush("agent:memory:requests", payload)  # type: ignore[misc]
-            logger.info(f"Enqueued memory job for {repo} [{hook_event}]")
-        finally:
-            # Don't close the connection, just release it back to pool
-            await rc.aclose()  # type: ignore[attr-defined]
-    except Exception as e:
-        logger.warning(f"Failed to enqueue memory job for {repo}: {e}")
-
-
-async def _enqueue_retrospector_job(
-    repo: str,
-    transcript_path: str,
-    hook_event: str,
-    workflow_name: str | None,
-    session_meta: dict,
-) -> None:
-    """Enqueue a retrospection job for an already-persisted transcript.
-
-    Called by ``flush_pending_post_jobs()`` after deduplication, not
-    directly from SDK hooks.
-
-    Args:
-        repo: Repository identifier
-        transcript_path: Path to staged transcript
-        hook_event: Hook event name (Stop or SubagentStop)
-        workflow_name: Workflow name for context
-        session_meta: Session metadata (num_turns, is_error, duration_ms)
-    """
-    try:
-        import redis.asyncio as aioredis
-
-        pool = await _get_redis_pool()
-        rc = aioredis.Redis(connection_pool=pool)
-        try:
-            payload = json.dumps(
-                {
-                    "repo": repo,
-                    "transcript_path": transcript_path,
-                    "hook_event": hook_event,
-                    "workflow_name": workflow_name,
-                    "session_meta": session_meta,
-                }
-            )
-            await rc.rpush("agent:retrospector:requests", payload)  # type: ignore[misc]
-            logger.info(
-                f"Enqueued retrospector job for {repo} "
-                f"[{workflow_name or 'unknown'}] [{hook_event}]"
-            )
-        finally:
-            await rc.aclose()  # type: ignore[attr-defined]
-    except Exception as e:
-        logger.warning(f"Failed to enqueue retrospector job for {repo}: {e}")
-
-
-async def _enqueue_indexing_job(
-    repo: str, hook_event: str, ref: str | None = None
-) -> None:
-    """Enqueue a code indexing job for embedding-based semantic search.
-
-    Fires after agent sessions complete to keep the vector index up-to-date
-    with any code changes the agent (or external contributors) made.
-
-    Args:
-        repo: Repository identifier
-        hook_event: Hook event name (Stop or SubagentStop)
-        ref: Git ref to index (defaults to "main")
-    """
-    try:
-        import redis.asyncio as aioredis
-
-        pool = await _get_redis_pool()
-        rc = aioredis.Redis(connection_pool=pool)
-        try:
-            payload = json.dumps(
-                {
-                    "repo": repo,
-                    "ref": ref or "main",
-                    "trigger": f"job_{hook_event.lower()}",
-                }
-            )
-            await rc.rpush("agent:indexing:requests", payload)  # type: ignore[misc]
-            logger.info(f"Enqueued indexing job for {repo} [{hook_event}] ref={ref}")
-        finally:
-            await rc.aclose()  # type: ignore[attr-defined]
-    except Exception as e:
-        logger.warning(f"Failed to enqueue indexing job for {repo}: {e}")

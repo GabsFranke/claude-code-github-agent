@@ -210,15 +210,10 @@ async def handle_request(request: dict[str, Any]) -> dict[str, Any]:
     return {"error": {"code": -32601, "message": f"Unknown method: {method}"}}
 
 
-async def read_stdin_line() -> str | None:
-    """Read a line from stdin asynchronously."""
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, sys.stdin.readline)
-
-
 async def main():
     """Main server loop - reads JSON-RPC requests from stdin, writes responses to stdout."""
-    # Initialize repo from environment
+    from mcp_servers.base import run_server
+
     repo_path = os.getenv("REPO_PATH")
     if repo_path:
         try:
@@ -229,54 +224,7 @@ async def main():
     else:
         logger.warning("REPO_PATH not set, tools will be unavailable")
 
-    while True:
-        try:
-            line = await read_stdin_line()
-            if not line:
-                break
-
-            request = json.loads(line)
-
-            # Notifications have no "id" - do not send a response
-            if "id" not in request:
-                continue
-
-            # Handle request
-            response = await handle_request(request)
-
-            # Build proper JSON-RPC 2.0 response
-            output: dict[str, Any] = {"jsonrpc": "2.0", "id": request.get("id")}
-            if "error" in response:
-                output["error"] = response["error"]
-            else:
-                output["result"] = response
-
-            sys.stdout.write(json.dumps(output) + "\n")
-            sys.stdout.flush()
-
-        except json.JSONDecodeError as e:
-            input_preview = line[:200] if line and len(line) > 200 else line
-            logger.error(
-                f"JSON parse error: {str(e)}",
-                exc_info=True,
-                extra={"input_preview": input_preview},
-            )
-            error_response = {
-                "jsonrpc": "2.0",
-                "error": {"code": -32700, "message": f"Parse error: {str(e)}"},
-                "id": None,
-            }
-            sys.stdout.write(json.dumps(error_response) + "\n")
-            sys.stdout.flush()
-        except Exception as e:
-            logger.exception("Error processing request")
-            error_response = {
-                "jsonrpc": "2.0",
-                "error": {"code": -32603, "message": f"Internal error: {str(e)}"},
-                "id": None,
-            }
-            sys.stdout.write(json.dumps(error_response) + "\n")
-            sys.stdout.flush()
+    await run_server("codebase-tools", handle_request)
 
 
 if __name__ == "__main__":

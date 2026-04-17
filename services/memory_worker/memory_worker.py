@@ -12,10 +12,12 @@ to prevent concurrent writes to the same repository's index.md file.
 """
 
 import asyncio
+import json
 import logging
 import os
 import sys
 
+from shared.dlq import enqueue_for_retry, is_transient_error
 from shared.logging_utils import setup_logging
 from shared.queue import RedisQueue
 from shared.sdk_executor import execute_sdk
@@ -34,6 +36,10 @@ SDK_MAX_RETRIES = int(os.getenv("SDK_MAX_RETRIES", "3"))
 SDK_RETRY_BASE_DELAY = float(os.getenv("SDK_RETRY_BASE_DELAY", "5.0"))
 
 shutdown_event = asyncio.Event()
+
+# DLQ configuration
+_DLQ_KEY = "agent:memory:dead_letter"
+_QUEUE_KEY = "agent:memory:requests"
 
 
 async def process_memory_job(message: dict, redis_client) -> None:
@@ -104,8 +110,8 @@ Extract memorable facts from the session transcript and update the memory files 
         # Execute via centralized executor with retry
         result = await execute_sdk(
             prompt=f"@memory-extractor {prompt}",
-            options_builder=builder,
-            collect_text=False,  # We don't need text response
+            options=builder.build(),
+            collect_text=False,
             max_retries=SDK_MAX_RETRIES,
             retry_base_delay=SDK_RETRY_BASE_DELAY,
         )
@@ -115,15 +121,18 @@ Extract memorable facts from the session transcript and update the memory files 
             f"{result['num_turns']} turns, {result['duration_ms']}ms"
         )
 
-    except Exception as e:
-        logger.warning(
-            f"Memory extraction failed for {repo} [{hook_event}]: {e}",
+    except Exception:
+        logger.error(
+            "Memory extraction failed for %s [%s]",
+            repo,
+            hook_event,
             exc_info=True,
         )
+        raise
 
 
 async def main() -> None:
-    """Main memory worker loop."""
+    """Main memory worker loop with DLQ support."""
     logger.info("Starting memory worker")
     setup_graceful_shutdown(shutdown_event, logger)
 
@@ -132,7 +141,7 @@ async def main() -> None:
 
     queue = RedisQueue(
         redis_url=redis_url,
-        queue_name="agent:memory:requests",
+        queue_name=_QUEUE_KEY,
         password=redis_password,
     )
     await queue._connect()
@@ -140,13 +149,47 @@ async def main() -> None:
 
     logger.info("Memory worker ready, waiting for jobs...")
 
-    async def message_handler(message: dict) -> None:
-        if shutdown_event.is_set():
-            return
-        await process_memory_job(message, redis_client)
-
     try:
-        await queue.subscribe(message_handler)
+        while not shutdown_event.is_set():
+            try:
+                result = await redis_client.blpop(_QUEUE_KEY, timeout=5)
+                if not result:
+                    continue
+
+                _, raw_message = result
+                message = json.loads(raw_message)
+                repo = message.get("repo", "unknown")
+                logger.info(f"Processing memory job for {repo}")
+
+                try:
+                    await process_memory_job(message, redis_client)
+                except Exception as e:
+                    if is_transient_error(e):
+                        await enqueue_for_retry(
+                            redis_client, _QUEUE_KEY, _DLQ_KEY, message, e
+                        )
+                    else:
+                        logger.error(
+                            "Non-transient error for memory job %s, "
+                            "sending to DLQ: %s",
+                            repo,
+                            e,
+                            exc_info=True,
+                        )
+                        await enqueue_for_retry(
+                            redis_client,
+                            _QUEUE_KEY,
+                            _DLQ_KEY,
+                            message,
+                            e,
+                            max_retries=0,
+                        )
+
+            except json.JSONDecodeError as e:
+                logger.error(f"Invalid JSON in memory request: {e}")
+            except Exception as e:
+                logger.error(f"Error in memory worker loop: {e}", exc_info=True)
+                await asyncio.sleep(5)
     finally:
         logger.info("Memory worker shutting down...")
         await queue.close()

@@ -39,7 +39,7 @@ from .http_client import AsyncHTTPClient, close_http_client, get_http_client
 from .job_queue import JobQueue
 from .logging_utils import setup_logging
 from .models import AgentRequest, AgentResponse
-from .queue import MessageQueue, PubSubQueue, RedisQueue, get_queue
+from .queue import MessageQueue, PubSubQueue, RedisQueue, get_queue, wait_for_repo_sync
 from .rate_limiter import MultiRateLimiter, RateLimiter
 from .retry import async_retry
 from .signals import setup_graceful_shutdown
@@ -96,6 +96,7 @@ __all__ = [
     "RedisQueue",
     "PubSubQueue",
     "get_queue",
+    "wait_for_repo_sync",
     # Rate Limiting
     "RateLimiter",
     "MultiRateLimiter",

@@ -19,8 +19,10 @@ import tempfile
 import uuid
 from pathlib import Path
 
+from shared import dlq as _dlq_mod
 from shared import setup_graceful_shutdown
 from shared.chunker import chunk_repo
+from shared.dlq import enqueue_for_retry, is_transient_error
 from shared.file_tree import collection_name_for_repo
 from shared.logging_utils import setup_logging
 from shared.queue import RedisQueue
@@ -162,7 +164,7 @@ async def _cache_embeddings(
         if mapping:
             await redis_client.hset(_CACHE_KEY, mapping=mapping)  # type: ignore[misc]
     except Exception as e:
-        logger.warning(f"Embedding cache store failed: {e}")
+        logger.error(f"Embedding cache store failed: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +172,9 @@ async def _cache_embeddings(
 # ---------------------------------------------------------------------------
 
 
-async def _embed_texts(texts: list[str]) -> list[list[float]]:
+async def _embed_texts(
+    texts: list[str],
+) -> tuple[list[list[float]], list[int]]:
     """Call Gemini embedding API for a batch of texts.
 
     Handles batching at EMBEDDING_BATCH_SIZE items per API call,
@@ -181,6 +185,7 @@ async def _embed_texts(texts: list[str]) -> list[list[float]]:
 
     client = genai.Client(api_key=GEMINI_API_KEY)
     all_embeddings: list[list[float]] = []
+    all_valid_indices: list[int] = []
     max_retries = 5
 
     for i in range(0, len(texts), EMBEDDING_BATCH_SIZE):
@@ -195,32 +200,35 @@ async def _embed_texts(texts: list[str]) -> list[list[float]]:
                         output_dimensionality=EMBEDDING_DIMENSION,
                     ),
                 )
-                # Preserve count alignment: replace None embeddings with
-                # zero vectors so len(all_embeddings) always matches len(texts).
-                # This prevents IndexError in batch_embed's merge loop.
+                # Skip chunks with empty embeddings rather than substituting
+                # zero vectors, which pollute the index (cosine sim = 0).
                 embeddings: list[list[float]] = []
+                valid_indices: list[int] = []
                 for j, e in enumerate(result.embeddings or []):
                     if e.values:
                         embeddings.append(e.values)
+                        valid_indices.append(i + j)
                     else:
-                        logger.warning(
-                            f"Empty embedding at index {j} in batch "
-                            f"{i // EMBEDDING_BATCH_SIZE + 1}, using zero vector"
+                        logger.error(
+                            "Empty embedding at index %d in batch %d, skipping chunk",
+                            j,
+                            i // EMBEDDING_BATCH_SIZE + 1,
                         )
-                        embeddings.append([0.0] * EMBEDDING_DIMENSION)
 
-                # Pad if API returned fewer embeddings than inputs
-                while len(embeddings) < len(batch):
-                    logger.warning(
-                        f"Missing embedding at index {len(embeddings)} in batch "
-                        f"{i // EMBEDDING_BATCH_SIZE + 1}, using zero vector"
+                skipped = len(batch) - len(embeddings)
+                if skipped > 0:
+                    logger.error(
+                        "Skipped %d/%d chunks in batch %d due to missing embeddings",
+                        skipped,
+                        len(batch),
+                        i // EMBEDDING_BATCH_SIZE + 1,
                     )
-                    embeddings.append([0.0] * EMBEDDING_DIMENSION)
 
                 all_embeddings.extend(embeddings)
+                all_valid_indices.extend(valid_indices)
                 logger.debug(
                     f"Embedded batch {i // EMBEDDING_BATCH_SIZE + 1}: "
-                    f"{len(batch)} texts ({len(embeddings)} embeddings)"
+                    f"{len(batch)} texts ({len(embeddings)} valid embeddings)"
                 )
                 break
             except Exception as e:
@@ -236,7 +244,7 @@ async def _embed_texts(texts: list[str]) -> list[list[float]]:
                     logger.error(f"Embedding batch failed at offset {i}: {e}")
                     raise
 
-    return all_embeddings
+    return all_embeddings, all_valid_indices
 
 
 async def batch_embed(texts: list[str], redis_client=None) -> list[list[float]]:
@@ -269,28 +277,38 @@ async def batch_embed(texts: list[str], redis_client=None) -> list[list[float]]:
             f"Cache miss [{idx}]: hash={_content_hash(texts[idx])[:12]}... "
             f"preview={preview!r}..."
         )
-    new_embeddings = await _embed_texts(miss_texts)
+    new_embeddings, valid_local_indices = await _embed_texts(miss_texts)
 
-    # Validate count alignment to prevent IndexError in merge loop
-    if len(new_embeddings) != len(miss_texts):
-        raise ValueError(
-            f"Embedding count mismatch: expected {len(miss_texts)}, "
-            f"got {len(new_embeddings)}. Aborting to prevent data corruption."
-        )
-
-    # Store new embeddings in cache
+    # Store new embeddings in cache (only for successfully embedded texts)
     if redis_client and new_embeddings:
-        await _cache_embeddings(redis_client, miss_texts, new_embeddings)
+        valid_texts = [miss_texts[li] for li in valid_local_indices]
+        await _cache_embeddings(redis_client, valid_texts, new_embeddings)
 
-    # Merge cached + new
+    # Build map: position within miss_texts -> embedding
+    local_to_embed: dict[int, list[float]] = dict(
+        zip(valid_local_indices, new_embeddings)  # type: ignore[arg-type]
+    )
+
+    # Merge cached + new, skipping chunks without valid embeddings
     results: list[list[float]] = []
-    miss_idx = 0
+    skipped = 0
     for i in range(len(texts)):
         if cached_results[i] is not None:
             results.append(cached_results[i])  # type: ignore[arg-type]
         else:
-            results.append(new_embeddings[miss_idx])
-            miss_idx += 1
+            # Find position of i within miss_indices
+            pos = miss_indices.index(i)
+            if pos in local_to_embed:
+                results.append(local_to_embed[pos])
+            else:
+                skipped += 1
+
+    if skipped:
+        logger.warning(
+            "Skipped %d chunks with missing embeddings out of %d total",
+            skipped,
+            len(texts),
+        )
 
     return results
 
@@ -710,11 +728,15 @@ async def _create_worktree(repo: str, ref: str) -> str | None:
         )
         bare_ref = f"refs/remotes/origin/{base_ref}"
 
-    cmd = f"git --git-dir={repo_dir} worktree add --detach {worktree} {bare_ref}"
-
     try:
-        proc = await asyncio.create_subprocess_shell(
-            cmd,
+        proc = await asyncio.create_subprocess_exec(
+            "git",
+            f"--git-dir={repo_dir}",
+            "worktree",
+            "add",
+            "--detach",
+            worktree,
+            bare_ref,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -723,9 +745,14 @@ async def _create_worktree(repo: str, ref: str) -> str | None:
         if proc.returncode != 0:
             logger.warning(f"Worktree creation failed: {stderr.decode().strip()}")
             # Try with default branch
-            cmd_fb = f"git --git-dir={repo_dir} worktree add --detach {worktree} refs/remotes/origin/main"
-            proc = await asyncio.create_subprocess_shell(
-                cmd_fb,
+            proc = await asyncio.create_subprocess_exec(
+                "git",
+                f"--git-dir={repo_dir}",
+                "worktree",
+                "add",
+                "--detach",
+                worktree,
+                "refs/remotes/origin/main",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -747,9 +774,13 @@ async def _cleanup_worktree(repo: str, worktree: str) -> None:
     repo_dir = os.path.join(cache_base, f"{repo}.git")
 
     try:
-        cmd = f"git --git-dir={repo_dir} worktree remove --force {worktree}"
-        proc = await asyncio.create_subprocess_shell(
-            cmd,
+        proc = await asyncio.create_subprocess_exec(
+            "git",
+            f"--git-dir={repo_dir}",
+            "worktree",
+            "remove",
+            "--force",
+            worktree,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -792,76 +823,22 @@ async def _get_commit_hash(worktree: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _is_transient_error(exc: Exception) -> bool:
-    """Check if an error is transient and worth retrying.
-
-    Non-transient errors (config issues, missing API keys, validation)
-    should go straight to the DLQ without retry.
-    """
-    transient_markers = (
-        "timeout",
-        "connection",
-        "reset",
-        "429",
-        "RESOURCE_EXHAUSTED",
-        "503",
-        "502",
-        "ECONNREFUSED",
-        "ECONNRESET",
-        "ETIMEDOUT",
-    )
-    msg = str(exc).lower()
-    return any(marker.lower() in msg for marker in transient_markers)
+# Backward-compatible wrappers for existing tests
+_is_transient_error = is_transient_error
 
 
 async def _enqueue_for_retry(redis_client, message: dict, exc: Exception) -> None:
-    """Re-enqueue a failed job with incremented attempts, or push to DLQ."""
-    attempts = message.get("attempts", 0) + 1
-    message["attempts"] = attempts
-    message["last_error"] = f"{type(exc).__name__}: {exc}"
-
-    if attempts >= MAX_JOB_RETRIES:
-        # Max retries exceeded — push to dead-letter queue
-        dlq_entry = json.dumps(
-            {
-                "repo": message.get("repo", "unknown"),
-                "ref": message.get("ref", "unknown"),
-                "trigger": message.get("trigger", "unknown"),
-                "reason": "max_retries_exceeded",
-                "last_error": message["last_error"],
-                "attempts": attempts,
-                "timestamp": __import__("time").time(),
-            }
-        )
-        await redis_client.rpush(_DLQ_KEY, dlq_entry)  # type: ignore[misc]
-        logger.error(
-            f"Job for {message.get('repo', 'unknown')} exceeded "
-            f"{MAX_JOB_RETRIES} retries, sent to DLQ: {exc}"
-        )
-    else:
-        # Re-enqueue for retry
-        await redis_client.rpush(_QUEUE_KEY, json.dumps(message))  # type: ignore[misc]
-        logger.warning(
-            f"Re-enqueued job for {message.get('repo', 'unknown')} "
-            f"(attempt {attempts}/{MAX_JOB_RETRIES}): {exc}"
-        )
+    await enqueue_for_retry(
+        redis_client, _QUEUE_KEY, _DLQ_KEY, message, exc, MAX_JOB_RETRIES
+    )
 
 
 async def get_dlq_count(redis_client) -> int:
-    """Get number of entries in the indexing dead-letter queue."""
-    try:
-        return int(await redis_client.llen(_DLQ_KEY))  # type: ignore[no-any-return]
-    except Exception:
-        return 0
+    return await _dlq_mod.get_dlq_count(redis_client, _DLQ_KEY)
 
 
 async def inspect_dlq(redis_client, limit: int = 10) -> list[dict]:
-    """Inspect dead-letter queue entries."""
-    try:
-        entries = await redis_client.lrange(_DLQ_KEY, 0, limit - 1)
-        return [json.loads(e) for e in entries]
-    except Exception:
-        return []
+    return await _dlq_mod.inspect_dlq(redis_client, _DLQ_KEY, limit=limit)
 
 
 # ---------------------------------------------------------------------------
@@ -959,27 +936,21 @@ async def main() -> None:
                     await process_indexing_job(message, redis_client)
                 except Exception as e:
                     # Transient errors get retried; permanent errors go to DLQ
-                    if _is_transient_error(e):
+                    if is_transient_error(e):
                         await _enqueue_for_retry(redis_client, message, e)
                     else:
                         logger.error(
                             f"Non-transient error for {repo}, sending to DLQ: {e}",
                             exc_info=True,
                         )
-                        message["attempts"] = message.get("attempts", 0) + 1
-                        message["last_error"] = f"{type(e).__name__}: {e}"
-                        dlq_entry = json.dumps(
-                            {
-                                "repo": repo,
-                                "ref": message.get("ref", "unknown"),
-                                "trigger": message.get("trigger", "unknown"),
-                                "reason": "non_transient_error",
-                                "last_error": message["last_error"],
-                                "attempts": message["attempts"],
-                                "timestamp": __import__("time").time(),
-                            }
+                        await enqueue_for_retry(
+                            redis_client,
+                            _QUEUE_KEY,
+                            _DLQ_KEY,
+                            message,
+                            e,
+                            max_retries=0,
                         )
-                        await redis_client.rpush(_DLQ_KEY, dlq_entry)  # type: ignore[misc]
 
             except json.JSONDecodeError as e:
                 logger.error(f"Invalid JSON in indexing request: {e}")

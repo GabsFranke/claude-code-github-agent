@@ -1,7 +1,6 @@
 """Sandbox worker that pulls jobs from queue and executes them in isolated workspaces."""
 
 import asyncio
-import json
 import logging
 import os
 import shutil
@@ -19,6 +18,7 @@ from shared import (  # noqa: E402
     WorktreeCreationError,
     execute_git_command,
     setup_graceful_shutdown,
+    wait_for_repo_sync,
 )
 from shared.context_builder import (  # noqa: E402
     find_priority_focus_files,
@@ -44,79 +44,6 @@ SDK_RETRY_BASE_DELAY = float(os.getenv("SDK_RETRY_BASE_DELAY", "5.0"))
 shutdown_event = asyncio.Event()
 
 
-async def ensure_repo_synced(
-    repo: str, ref: str, redis_client, github_token: str
-) -> str:
-    """Ensure bare repo is synced by waiting for completion event via pub/sub.
-
-    This function subscribes to Redis pub/sub and waits for the repo sync worker
-    to publish a completion event. No polling, no arbitrary timeouts.
-    """
-    complete_key = f"agent:sync:complete:{repo}:{ref}"
-    cache_base = "/var/cache/repos"
-    repo_dir = os.path.join(cache_base, f"{repo}.git")
-
-    # First check if already synced (fast path)
-    is_complete = await redis_client.get(complete_key)
-    if is_complete:
-        logger.info(f"Repo {repo} already synced (cached)")
-        return repo_dir
-
-    # Fallback: Check if repo directory exists (handles expired completion keys)
-    if os.path.exists(repo_dir):
-        logger.info(
-            f"Repo {repo} directory exists (completion key expired but repo is synced)"
-        )
-        # Re-trigger sync to ensure it's up-to-date and refresh completion key
-        from shared import get_queue
-
-        sync_queue = get_queue(queue_name="agent:sync:requests")
-        await sync_queue.publish({"repo": repo, "ref": ref})
-        logger.info(f"Re-triggered sync for {repo} to refresh cache")
-
-    # Subscribe to completion events
-    completion_channel = "agent:sync:events"
-    pubsub = redis_client.pubsub()
-    await pubsub.subscribe(completion_channel)
-
-    logger.info(f"Waiting for sync completion event for {repo}...")
-
-    try:
-        # Wait for completion event with reasonable timeout (5 minutes for large repos)
-        timeout = 300  # 5 minutes
-        start_time = asyncio.get_running_loop().time()
-
-        async for message in pubsub.listen():
-            # Check timeout
-            if asyncio.get_running_loop().time() - start_time > timeout:
-                raise RepositorySyncError(
-                    f"Sync timeout for {repo} after {timeout}s - repo sync worker may be down"
-                )
-
-            if message["type"] == "message":
-                try:
-                    event = json.loads(message["data"])
-                    if event.get("repo") == repo and event.get("ref") == ref:
-                        if event.get("status") == "complete":
-                            logger.info(f"Received sync completion event for {repo}")
-                            return repo_dir
-                        elif event.get("status") == "error":
-                            raise RepositorySyncError(
-                                f"Repo sync failed for {repo}: {event.get('error', 'unknown error')}"
-                            )
-                except json.JSONDecodeError:
-                    logger.warning(f"Invalid JSON in sync event: {message['data']}")
-                    continue
-
-        # If we exit the loop without returning, something went wrong
-        raise RepositorySyncError(
-            f"Sync event stream ended unexpectedly for {repo} - no completion event received"
-        )
-    finally:
-        await pubsub.unsubscribe(completion_channel)
-        await pubsub.close()
-
-
 async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
     """Process a single job in an isolated workspace.
 
@@ -127,6 +54,7 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
     """
     workspace = None
     repo_dir = None
+    builder = None
 
     try:
         # Validate job_id format for security (prevent directory traversal)
@@ -153,9 +81,7 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
         logger.info(f"Job data ref value: {job_data.get('ref', 'NOT_FOUND')}")
         logger.info(f"Setting up worktree for {repo} (ref {ref})")
 
-        repo_dir = await ensure_repo_synced(
-            repo, ref, job_queue.redis, job_data["github_token"]
-        )
+        repo_dir = await wait_for_repo_sync(repo, ref, job_queue.redis)
 
         # Create isolated workspace under /tmp — cleaned up explicitly after job
         workspace_base = tempfile.mkdtemp(
@@ -240,8 +166,14 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
         home_dir = os.path.expanduser("~")
         os.makedirs(home_dir, exist_ok=True)
         credentials_file = os.path.join(home_dir, ".git-credentials")
-        with open(credentials_file, "w", encoding="utf-8") as f:
-            f.write(f"https://x-access-token:{job_data['github_token']}@github.com\n")
+        fd = os.open(credentials_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(
+                fd,
+                f"https://x-access-token:{job_data['github_token']}@github.com\n".encode(),
+            )
+        finally:
+            os.close(fd)
 
         # Configure git user for commits (required for git commit to work)
         bot_username = os.getenv("BOT_USERNAME", "Claude Code Agent")
@@ -422,7 +354,7 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
         # Execute via centralized executor with retry
         result = await execute_sdk(
             prompt=job_data["prompt"],
-            options_builder=builder,
+            options=builder.build(),
             max_retries=SDK_MAX_RETRIES,
             retry_base_delay=SDK_RETRY_BASE_DELAY,
         )
@@ -455,7 +387,8 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
         # Flush buffered jobs even on failure — partial sessions can
         # still produce useful retrospection data.
         try:
-            await builder.flush_pending_post_jobs()
+            if builder is not None:
+                await builder.flush_pending_post_jobs()
         except Exception as flush_err:
             logger.error(f"Failed to flush post-processing jobs: {flush_err}")
 

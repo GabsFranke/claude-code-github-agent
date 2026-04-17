@@ -121,66 +121,12 @@ async def handle_request(request: dict[str, Any]) -> dict[str, Any]:
     return {"error": {"code": -32601, "message": f"Unknown method: {method}"}}
 
 
-async def read_stdin_line() -> str | None:
-    """Read a line from stdin asynchronously."""
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, sys.stdin.readline)
-
-
 async def main():
     """Main server loop - reads JSON-RPC requests from stdin, writes responses to stdout."""
+    from mcp_servers.base import run_server
+
     init_config()
-    logger.info("Semantic search MCP server starting...")
-
-    try:
-        while True:
-            try:
-                line = await read_stdin_line()
-                if not line:
-                    break
-
-                request = json.loads(line)
-
-                if "id" not in request:
-                    continue
-
-                response = await handle_request(request)
-
-                output: dict[str, Any] = {"jsonrpc": "2.0", "id": request.get("id")}
-                if "error" in response:
-                    output["error"] = response["error"]
-                else:
-                    output["result"] = response
-
-                sys.stdout.write(json.dumps(output) + "\n")
-                sys.stdout.flush()
-
-            except json.JSONDecodeError as e:
-                input_preview = line[:200] if line and len(line) > 200 else line
-                logger.error(
-                    f"JSON parse error: {str(e)}",
-                    exc_info=True,
-                    extra={"input_preview": input_preview},
-                )
-                error_response = {
-                    "jsonrpc": "2.0",
-                    "error": {"code": -32700, "message": f"Parse error: {str(e)}"},
-                    "id": None,
-                }
-                sys.stdout.write(json.dumps(error_response) + "\n")
-                sys.stdout.flush()
-            except Exception as e:
-                logger.exception("Error processing request")
-                error_response = {
-                    "jsonrpc": "2.0",
-                    "error": {"code": -32603, "message": f"Internal error: {str(e)}"},
-                    "id": None,
-                }
-                sys.stdout.write(json.dumps(error_response) + "\n")
-                sys.stdout.flush()
-    finally:
-        cleanup()
-        logger.info("Semantic search MCP server shutdown complete")
+    await run_server("semantic-search", handle_request, cleanup_fn=cleanup)
 
 
 if __name__ == "__main__":

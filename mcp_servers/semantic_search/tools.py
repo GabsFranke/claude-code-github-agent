@@ -121,7 +121,7 @@ def semantic_search(
 
     try:
         from google.genai import types
-        from qdrant_client.models import FieldCondition, Filter, MatchText
+        from qdrant_client.models import FieldCondition, Filter, MatchValue
 
         # Embed the query using singleton client
         response = _genai_client.models.embed_content(
@@ -146,7 +146,7 @@ def semantic_search(
         conditions = []
         if kind_filter:
             conditions.append(
-                FieldCondition(key="kind", match=MatchText(text=kind_filter))
+                FieldCondition(key="kind", match=MatchValue(value=kind_filter))
             )
 
         search_filter = Filter(must=conditions) if conditions else None

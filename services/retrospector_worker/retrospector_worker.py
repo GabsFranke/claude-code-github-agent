@@ -16,7 +16,6 @@ to prevent concurrent retrospection of the same workflow.
 """
 
 import asyncio
-import json
 import logging
 import os
 import shutil
@@ -24,7 +23,8 @@ import sys
 import tempfile
 from pathlib import Path
 
-from shared import close_github_auth_service
+from shared import close_github_auth_service, wait_for_repo_sync
+from shared.dlq import enqueue_for_retry, is_transient_error
 from shared.git_utils import execute_git_command
 from shared.github_auth import get_github_auth_service
 from shared.logging_utils import setup_logging
@@ -41,7 +41,11 @@ shutdown_event = asyncio.Event()
 
 # Default retry configuration
 SDK_MAX_RETRIES = 3
-SDK_RETRY_BASE_DELAY = 5.0  # seconds (exponential: 5s, 15s, 30s)
+SDK_RETRY_BASE_DELAY = 5.0  # seconds (exponential: 5s, 15s, 45s)
+
+# DLQ configuration
+_DLQ_KEY = "agent:retrospector:dead_letter"
+_QUEUE_KEY = "agent:retrospector:requests"
 
 
 def _validate_git_config_value(value: str, name: str) -> str:
@@ -68,58 +72,6 @@ def _validate_git_config_value(value: str, name: str) -> str:
             f"Git config values cannot contain newlines."
         )
     return value
-
-
-async def _ensure_bot_repo_synced(bot_repo: str, redis_client) -> str:
-    """Ensure the bot's own repo is synced in the bare cache.
-
-    Publishes a sync request and waits for the repo_sync worker to confirm
-    completion via pub/sub — same pattern as sandbox_worker.ensure_repo_synced.
-    """
-    cache_base = "/var/cache/repos"
-    repo_dir = os.path.join(cache_base, f"{bot_repo}.git")
-    ref = "main"
-
-    complete_key = f"agent:sync:complete:{bot_repo}:{ref}"
-    is_complete = await redis_client.get(complete_key)
-    if is_complete and os.path.exists(repo_dir):
-        logger.info(f"Bot repo {bot_repo} already synced (cached)")
-        return repo_dir
-
-    # Request sync
-    await redis_client.rpush(
-        "agent:sync:requests",
-        json.dumps({"repo": bot_repo, "ref": ref}),
-    )
-    logger.info(f"Requested sync for bot repo {bot_repo}")
-
-    completion_channel = "agent:sync:events"
-    pubsub = redis_client.pubsub()
-    await pubsub.subscribe(completion_channel)
-
-    try:
-        timeout = 300
-        start = asyncio.get_event_loop().time()
-        async for message in pubsub.listen():
-            if asyncio.get_event_loop().time() - start > timeout:
-                raise RuntimeError(f"Sync timeout for {bot_repo} after {timeout}s")
-            if message["type"] == "message":
-                try:
-                    event = json.loads(message["data"])
-                    if event.get("repo") == bot_repo and event.get("ref") == ref:
-                        if event.get("status") == "complete":
-                            logger.info(f"Bot repo {bot_repo} synced")
-                            return repo_dir
-                        elif event.get("status") == "error":
-                            raise RuntimeError(
-                                f"Bot repo sync failed: {event.get('error', 'unknown')}"
-                            )
-                except json.JSONDecodeError:
-                    continue
-        raise RuntimeError("Sync event stream ended without completion")
-    finally:
-        await pubsub.unsubscribe(completion_channel)
-        await pubsub.close()
 
 
 async def process_retrospector_job(message: dict, redis_client) -> None:
@@ -157,7 +109,7 @@ async def process_retrospector_job(message: dict, redis_client) -> None:
     repo_dir = None  # Initialize to prevent NameError in finally block
 
     try:
-        repo_dir = await _ensure_bot_repo_synced(bot_repo, redis_client)
+        repo_dir = await wait_for_repo_sync(bot_repo, "main", redis_client)
 
         # Create isolated worktree for the bot repo
         workspace = tempfile.mkdtemp(prefix="retro_", dir="/tmp")  # nosec B108
@@ -212,10 +164,14 @@ async def process_retrospector_job(message: dict, redis_client) -> None:
         )
         if github_token:
             credentials_file = os.path.join(os.path.expanduser("~"), ".git-credentials")
-            Path(credentials_file).write_text(
-                f"https://x-access-token:{github_token}@github.com\n",
-                encoding="utf-8",
-            )
+            fd = os.open(credentials_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            try:
+                os.write(
+                    fd,
+                    f"https://x-access-token:{github_token}@github.com\n".encode(),
+                )
+            finally:
+                os.close(fd)
             await execute_git_command(
                 "git config credential.helper store", cwd=workspace
             )
@@ -285,8 +241,8 @@ async def process_retrospector_job(message: dict, redis_client) -> None:
             # Execute via centralized executor with retry logic
             result = await execute_sdk(
                 prompt=prompt,
-                options_builder=builder,
-                collect_text=False,  # We don't need text response
+                options=builder.build(),
+                collect_text=False,
                 max_retries=SDK_MAX_RETRIES,
                 retry_base_delay=SDK_RETRY_BASE_DELAY,
             )
@@ -368,7 +324,27 @@ async def main() -> None:
     async def message_handler(message: dict) -> None:
         if shutdown_event.is_set():
             return
-        await process_retrospector_job(message, redis_client)
+        try:
+            await process_retrospector_job(message, redis_client)
+        except Exception as e:
+            if is_transient_error(e):
+                await enqueue_for_retry(redis_client, _QUEUE_KEY, _DLQ_KEY, message, e)
+            else:
+                logger.error(
+                    "Non-transient error for retrospector job %s, "
+                    "sending to DLQ: %s",
+                    message.get("repo", "unknown"),
+                    e,
+                    exc_info=True,
+                )
+                await enqueue_for_retry(
+                    redis_client,
+                    _QUEUE_KEY,
+                    _DLQ_KEY,
+                    message,
+                    e,
+                    max_retries=0,
+                )
 
     try:
         await queue.subscribe(message_handler)

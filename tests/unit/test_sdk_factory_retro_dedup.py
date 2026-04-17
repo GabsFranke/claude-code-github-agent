@@ -41,7 +41,7 @@ class TestFlushPendingPostJobs:
                 }
             )
 
-        with patch("shared.sdk_factory._enqueue_retrospector_job") as mock_retro:
+        with patch("shared.post_processing.enqueue_retrospector_job") as mock_retro:
             mock_retro.return_value = AsyncMock()
             await builder.flush_pending_post_jobs()
 
@@ -79,7 +79,7 @@ class TestFlushPendingPostJobs:
             }
         )
 
-        with patch("shared.sdk_factory._enqueue_retrospector_job") as mock_retro:
+        with patch("shared.post_processing.enqueue_retrospector_job") as mock_retro:
             mock_retro.return_value = AsyncMock()
             await builder.flush_pending_post_jobs()
 
@@ -113,8 +113,8 @@ class TestFlushPendingPostJobs:
         )
 
         with (
-            patch("shared.sdk_factory._enqueue_retrospector_job") as mock_retro,
-            patch("shared.sdk_factory._enqueue_memory_job") as mock_mem,
+            patch("shared.post_processing.enqueue_retrospector_job") as mock_retro,
+            patch("shared.post_processing.enqueue_memory_job") as mock_mem,
         ):
             mock_retro.return_value = AsyncMock()
             mock_mem.return_value = AsyncMock()
@@ -139,14 +139,14 @@ class TestFlushPendingPostJobs:
             }
         )
 
-        with patch("shared.sdk_factory._enqueue_retrospector_job") as mock_retro:
+        with patch("shared.post_processing.enqueue_retrospector_job") as mock_retro:
             mock_retro.return_value = AsyncMock()
             await builder.flush_pending_post_jobs()
 
         assert builder._pending_post_jobs == []
 
         # Second flush is a no-op
-        with patch("shared.sdk_factory._enqueue_retrospector_job") as mock_retro:
+        with patch("shared.post_processing.enqueue_retrospector_job") as mock_retro:
             mock_retro.return_value = AsyncMock()
             await builder.flush_pending_post_jobs()
 
@@ -178,7 +178,7 @@ class TestFlushPendingPostJobs:
             }
         )
 
-        with patch("shared.sdk_factory._enqueue_retrospector_job") as mock_retro:
+        with patch("shared.post_processing.enqueue_retrospector_job") as mock_retro:
             mock_retro.return_value = AsyncMock()
             await builder.flush_pending_post_jobs()
 

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from shared.context_builder import find_priority_focus_files
+from shared.context_builder import _MAX_FOCUS_FILES_PER_AREA, find_priority_focus_files
 from workflows.engine import ContextProfile, WorkflowEngine
 
 
@@ -137,3 +137,85 @@ class TestPriorityFocusFiles:
 
         assert "Dockerfile" in files
         assert not any("node_modules" in f for f in files)
+
+
+class TestPriorityFocusFilesExtended:
+    """Extended tests for find_priority_focus_files edge cases."""
+
+    def test_api_surface_finds_routes_and_endpoints(self, tmp_path: Path):
+        """Should find api/, routes/, views.py, urls.py, etc."""
+        (tmp_path / "api").mkdir()
+        (tmp_path / "api" / "routes.py").write_text("# routes")
+        (tmp_path / "routes").mkdir()
+        (tmp_path / "routes" / "index.py").write_text("# index")
+        (tmp_path / "views.py").write_text("# views")
+        (tmp_path / "urls.py").write_text("# urls")
+        (tmp_path / "router.py").write_text("# router")
+        (tmp_path / "unrelated.py").write_text("# nope")
+
+        files = find_priority_focus_files(tmp_path, ["api_surface"])
+
+        assert "api/routes.py" in files
+        assert "routes/index.py" in files
+        assert "views.py" in files
+        assert "urls.py" in files
+        assert "router.py" in files
+        assert "unrelated.py" not in files
+
+    def test_dependencies_finds_manifest_files(self, tmp_path: Path):
+        """Should find requirements.txt, package.json, go.mod, etc."""
+        (tmp_path / "requirements.txt").write_text("fastapi")
+        (tmp_path / "package.json").write_text("{}")
+        (tmp_path / "go.mod").write_text("module example")
+        (tmp_path / "Cargo.toml").write_text("[package]")
+        (tmp_path / "Gemfile").write_text("source 'https://rubygems.org'")
+        (tmp_path / "app.py").write_text("print('hi')")
+
+        files = find_priority_focus_files(tmp_path, ["dependencies"])
+
+        assert "requirements.txt" in files
+        assert "package.json" in files
+        assert "go.mod" in files
+        assert "Cargo.toml" in files
+        assert "Gemfile" in files
+        assert "app.py" not in files
+
+    def test_max_file_cap_respected(self, tmp_path: Path):
+        """Result should be capped at _MAX_FOCUS_FILES_PER_AREA * len(focus_areas)."""
+        focus_areas = ["build_system"]
+        cap = _MAX_FOCUS_FILES_PER_AREA * len(focus_areas)
+
+        # Create more matching files than the cap allows.
+        # "setup.py" is a build_system pattern — create 60 of them in subdirs.
+        for i in range(cap + 15):
+            d = tmp_path / f"dir{i}"
+            d.mkdir()
+            (d / "setup.py").write_text(f"# setup {i}")
+
+        files = find_priority_focus_files(tmp_path, focus_areas)
+
+        assert len(files) <= cap
+
+    def test_cross_area_dedup(self, tmp_path: Path):
+        """pyproject.toml appears in both build_system and dependencies but only once."""
+        (tmp_path / "pyproject.toml").write_text("[project]")
+
+        files = find_priority_focus_files(tmp_path, ["build_system", "dependencies"])
+
+        # pyproject.toml should appear exactly once
+        count = files.count("pyproject.toml")
+        assert count == 1
+        assert "pyproject.toml" in files
+
+    def test_mixed_known_and_unknown_areas(self, tmp_path: Path):
+        """One valid + one invalid area returns only matches for the valid one."""
+        (tmp_path / "Dockerfile").write_text("FROM python:3.12")
+        (tmp_path / "app.py").write_text("print('hi')")
+
+        files = find_priority_focus_files(
+            tmp_path, ["build_system", "totally_fake_area"]
+        )
+
+        assert "Dockerfile" in files
+        # app.py is not a build_system pattern, so it should not appear
+        assert "app.py" not in files

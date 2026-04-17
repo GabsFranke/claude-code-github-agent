@@ -27,7 +27,7 @@ class EventExtractionConfig(BaseModel):
 
     issue_number: ExtractionRule | None = None
     ref: ExtractionRule | None = None
-    user: ExtractionRule | None = None
+    user: ExtractionRule = ExtractionRule(path="sender.login")
     extra: dict[str, ExtractionRule] = Field(default_factory=dict)
 
 
@@ -65,6 +65,31 @@ class PayloadExtractor:
     user, extra context). Supports action-qualified overrides: if a config
     exists for "workflow_job.completed" it takes priority over "workflow_job".
     """
+
+    _REF_STRATEGIES: dict[str, str] = {
+        # PR events → refs/pull/N/head
+        "pull_request": "pr",
+        "pull_request_review": "pr",
+        "pull_request_review_comment": "pr",
+        "pull_request_review_thread": "pr",
+        # CI events → refs/heads/{ref}
+        "workflow_job": "heads",
+        "workflow_run": "heads",
+        "check_run": "heads",
+        "check_suite": "heads",
+        "deployment": "heads",
+        "deployment_status": "heads",
+        "repository_dispatch": "heads",
+        # Passthrough (already fully qualified)
+        "push": "passthrough",
+        "merge_group": "passthrough",
+        "workflow_dispatch": "passthrough",
+        # Special: needs data["ref_type"]
+        "create": "create_delete",
+        "delete": "create_delete",
+        # Hardcoded
+        "issue_comment": "main",
+    }
 
     def __init__(self, rules: dict[str, EventExtractionConfig] | None = None):
         self._rules = rules
@@ -152,7 +177,8 @@ class PayloadExtractor:
         - PR-related events get refs/pull/N/head
         - workflow_job / check events get refs/heads/branch
         - release events keep the tag name as-is
-        - push / create / delete events keep the raw ref
+        - push events keep the raw ref; create / delete events resolve to
+          fully-qualified refs/heads/ or refs/tags/
         - Everything else defaults to "main"
         """
         if ref_rule is None:
@@ -168,50 +194,18 @@ class PayloadExtractor:
             )
             return "main"
 
-        # PR events: ref is the issue number, build PR head ref
-        if event_type in (
-            "pull_request",
-            "pull_request_review",
-            "pull_request_review_comment",
-            "pull_request_review_thread",
-        ):
+        strategy = self._REF_STRATEGIES.get(event_type, "passthrough")
+
+        if strategy == "pr":
             return f"refs/pull/{raw_ref}/head"
-
-        # For issue_comment, ref computation depends on whether it's on a PR
-        # (handled by overlay logic in main.py, not here)
-        if event_type == "issue_comment":
-            return "main"
-
-        # CI events: raw ref is a branch name
-        if event_type in (
-            "workflow_job",
-            "workflow_run",
-            "check_run",
-            "check_suite",
-            "deployment",
-            "deployment_status",
-        ):
+        if strategy == "heads":
             return f"refs/heads/{raw_ref}"
-
-        # Push / merge_group: ref is already fully qualified
-        if event_type in ("push", "merge_group"):
-            return str(raw_ref)
-
-        # create / delete: ref is a branch or tag name
-        if event_type in ("create", "delete"):
+        if strategy == "main":
+            return "main"
+        if strategy == "create_delete":
             ref_type = data.get("ref_type", "branch")
             if ref_type == "tag":
                 return f"refs/tags/{raw_ref}"
             return f"refs/heads/{raw_ref}"
-
-        # repository_dispatch: ref is the branch name
-        if event_type == "repository_dispatch":
-            return f"refs/heads/{raw_ref}"
-
-        # workflow_dispatch: ref is already qualified (refs/heads/...)
-        # or a bare branch name -- keep as-is
-        if event_type == "workflow_dispatch":
-            return str(raw_ref)
-
-        # Release events: ref is the tag name
+        # "passthrough" and default
         return str(raw_ref)

@@ -118,12 +118,24 @@ class TestRepoMapTagExtraction:
         assert not any("__pycache__" in fp for fp in filepaths)
         assert not any(".git" in fp for fp in filepaths)
 
-    def test_skip_file_patterns(self):
-        assert RepoMap._should_skip_file("bundle.min.js")
-        assert RepoMap._should_skip_file("app_pb2.py")
-        assert RepoMap._should_skip_file("package-lock.json")
-        assert not RepoMap._should_skip_file("main.py")
-        assert not RepoMap._should_skip_file("app.ts")
+    def test_skip_file_patterns(self, tmp_path: Path):
+        """walk_source_files should skip excluded file patterns."""
+        from shared.file_tree import walk_source_files
+
+        # Create files that should be skipped
+        (tmp_path / "bundle.min.js").write_text("// minified", encoding="utf-8")
+        (tmp_path / "app_pb2.py").write_text("# pb2", encoding="utf-8")
+        (tmp_path / "package-lock.json").write_text("{}", encoding="utf-8")
+        # Create files that should be kept
+        (tmp_path / "main.py").write_text("pass", encoding="utf-8")
+        (tmp_path / "app.ts").write_text("// app", encoding="utf-8")
+
+        found = {f.name for f in walk_source_files(tmp_path)}
+        assert "main.py" in found
+        assert "app.ts" in found
+        assert "bundle.min.js" not in found
+        assert "app_pb2.py" not in found
+        assert "package-lock.json" not in found
 
     def test_regex_fallback(self, tmp_path: Path):
         """Test that regex fallback works for files without tree-sitter support."""

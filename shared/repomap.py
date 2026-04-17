@@ -11,13 +11,12 @@ Falls back through three tiers:
 """
 
 import logging
-import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from .file_tree import EXCLUDE_DIRS, EXCLUDE_FILES, EXCLUDE_SUFFIXES, load_ignore_spec
+from .file_tree import load_ignore_spec, walk_source_files
 from .ts_languages import (
     EXTENSION_MAP,
     LanguageConfig,
@@ -177,47 +176,7 @@ class RepoMap:
 
     def _iter_source_files(self) -> list[Path]:
         """Walk the repo yielding source files, respecting exclusions and ignore files."""
-        files: list[Path] = []
-
-        for root, dirs, filenames in os.walk(self.repo_path):
-            rel_root = str(Path(root).relative_to(self.repo_path)).replace("\\", "/")
-            if rel_root == ".":
-                rel_root = ""
-
-            # Filter excluded and ignored directories in-place
-            filtered_dirs: list[str] = []
-            for d in sorted(dirs):
-                if d in EXCLUDE_DIRS or d.startswith("."):
-                    continue
-                rel = f"{rel_root}/{d}" if rel_root else d
-                if self._ignore_spec and (
-                    self._ignore_spec.match_file(rel + "/")
-                    or self._ignore_spec.match_file(rel)
-                ):
-                    continue
-                filtered_dirs.append(d)
-            dirs[:] = filtered_dirs
-
-            for name in sorted(filenames):
-                if self._should_skip_file(name):
-                    continue
-                rel = f"{rel_root}/{name}" if rel_root else name
-                if self._ignore_spec and self._ignore_spec.match_file(rel):
-                    continue
-                files.append(Path(root) / name)
-
-        return files
-
-    @staticmethod
-    def _should_skip_file(name: str) -> bool:
-        if name in EXCLUDE_FILES:
-            return True
-        if any(name.endswith(s) for s in EXCLUDE_SUFFIXES):
-            return True
-        # Skip very large files and binary-ish names
-        if any(pat in name.lower() for pat in (".generated.", ".min.", ".bundle.")):
-            return True
-        return False
+        return list(walk_source_files(self.repo_path, self._ignore_spec))
 
     def _get_tags(self, filepath: Path) -> list[Tag]:
         """Extract tags from a single file. Tries tree-sitter, falls back to regex."""

@@ -9,6 +9,7 @@ from shared.file_tree import (
     _should_exclude_file,
     generate_file_tree,
     load_ignore_spec,
+    walk_source_files,
 )
 
 
@@ -260,3 +261,97 @@ class TestLoadIgnoreSpec:
         spec = load_ignore_spec(tmp_path)
         assert spec is not None
         assert not spec.match_file("any_file.txt")
+
+
+class TestWalkSourceFiles:
+    def test_yields_source_files(self, sample_repo: Path):
+        """Should yield paths to source files."""
+        found = list(walk_source_files(sample_repo))
+        names = {p.name for p in found}
+        assert "main.py" in names
+        assert "utils.py" in names
+        assert "test_main.py" in names
+
+    def test_excludes_noise_dirs(self, sample_repo: Path):
+        """Should not yield files from excluded directories."""
+        found = list(walk_source_files(sample_repo))
+        names = {p.name for p in found}
+        assert "main.cpython-311.pyc" not in names
+        assert "index.js" not in names  # in node_modules
+
+    def test_excludes_noise_files(self, sample_repo: Path):
+        """Should not yield excluded files."""
+        found = list(walk_source_files(sample_repo))
+        names = {p.name for p in found}
+        assert "package-lock.json" not in names
+        assert "bundle.min.js" not in names
+
+    def test_excludes_dot_dirs(self, tmp_path: Path):
+        """Should skip dot-directories like .git."""
+        (tmp_path / ".hidden").mkdir()
+        (tmp_path / ".hidden" / "secret.py").write_text("pass")
+        (tmp_path / "visible.py").write_text("pass")
+
+        found = list(walk_source_files(tmp_path))
+        names = {p.name for p in found}
+        assert "visible.py" in names
+        assert "secret.py" not in names
+
+    def test_excludes_git_file_guard(self, tmp_path: Path):
+        """Should skip .git file (worktrees create a .git file, not a directory)."""
+        (tmp_path / ".git").write_text("gitdir: /some/path")
+        (tmp_path / "main.py").write_text("pass")
+
+        found = list(walk_source_files(tmp_path))
+        names = {p.name for p in found}
+        assert "main.py" in names
+        assert ".git" not in names
+
+    def test_excludes_generated_and_minified(self, tmp_path: Path):
+        """Should skip files with .generated., .min., .bundle. substrings."""
+        (tmp_path / "foo.generated.py").write_text("pass")
+        (tmp_path / "app.min.js").write_text("// min")
+        (tmp_path / "vendor.bundle.js").write_text("// bundle")
+        (tmp_path / "main.py").write_text("pass")
+
+        found = list(walk_source_files(tmp_path))
+        names = {p.name for p in found}
+        assert "main.py" in names
+        assert "foo.generated.py" not in names
+        assert "app.min.js" not in names
+        assert "vendor.bundle.js" not in names
+
+    def test_respects_gitignore(self, tmp_path: Path):
+        """Should respect .gitignore patterns when ignore_spec is provided."""
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "main.py").write_text("pass")
+        (tmp_path / "src" / "secrets.env").write_text("KEY=xxx")
+        (tmp_path / ".gitignore").write_text("*.env\n")
+
+        ignore_spec = load_ignore_spec(tmp_path)
+        found = list(walk_source_files(tmp_path, ignore_spec))
+        names = {p.name for p in found}
+        assert "main.py" in names
+        assert "secrets.env" not in names
+
+    def test_deterministic_order(self, sample_repo: Path):
+        """Yield order should be deterministic (sorted dirs and files)."""
+        results1 = [str(p) for p in walk_source_files(sample_repo)]
+        results2 = [str(p) for p in walk_source_files(sample_repo)]
+        assert results1 == results2
+
+    def test_empty_repo(self, tmp_path: Path):
+        """Should yield nothing for an empty directory."""
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        assert list(walk_source_files(empty)) == []
+
+    def test_yields_absolute_paths(self, sample_repo: Path):
+        """All yielded paths should be absolute."""
+        for p in walk_source_files(sample_repo):
+            assert p.is_absolute()
+
+    def test_yields_existing_files(self, sample_repo: Path):
+        """All yielded paths should point to existing files."""
+        for p in walk_source_files(sample_repo):
+            assert p.is_file()

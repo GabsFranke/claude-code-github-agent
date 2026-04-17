@@ -11,20 +11,27 @@ import pytest
 
 from shared.exceptions import SDKError, SDKTimeoutError
 from shared.sdk_executor import execute_sdk
-from shared.sdk_factory import SDKOptionsBuilder
+
+
+def _mock_options(tmp_path):
+    """Create a mock ClaudeAgentOptions."""
+    options = MagicMock()
+    options.model = "test-model"
+    options.cwd = str(tmp_path)
+    options.setting_sources = ["user", "project", "local"]
+    options.allowed_tools = []
+    return options
 
 
 class TestExecuteSDK:
     """Tests for execute_sdk function."""
 
     @pytest.fixture
-    def mock_options_builder(self, tmp_path):
-        """Create a mock options builder."""
-        builder = SDKOptionsBuilder(cwd=str(tmp_path))
-        return builder
+    def mock_options(self, tmp_path):
+        return _mock_options(tmp_path)
 
     @pytest.mark.asyncio
-    async def test_execute_sdk_exception_raises_sdk_error(self, mock_options_builder):
+    async def test_execute_sdk_exception_raises_sdk_error(self, mock_options):
         """Test that SDK exceptions are wrapped in SDKError."""
         with patch("shared.sdk_executor.ClaudeSDKClient") as mock_client_class:
             mock_client = AsyncMock()
@@ -34,11 +41,11 @@ class TestExecuteSDK:
             with pytest.raises(SDKError, match="SDK execution failed"):
                 await execute_sdk(
                     prompt="test",
-                    options_builder=mock_options_builder,
+                    options=mock_options,
                 )
 
     @pytest.mark.asyncio
-    async def test_execute_sdk_timeout_raises_error(self, mock_options_builder):
+    async def test_execute_sdk_timeout_raises_error(self, mock_options):
         """Test that timeout raises SDKTimeoutError."""
         with patch("shared.sdk_executor.ClaudeSDKClient") as mock_client_class:
             mock_client = MagicMock()
@@ -57,12 +64,12 @@ class TestExecuteSDK:
             with pytest.raises(SDKTimeoutError, match="timed out"):
                 await execute_sdk(
                     prompt="test",
-                    options_builder=mock_options_builder,
+                    options=mock_options,
                     timeout=1,  # 1 second timeout
                 )
 
     @pytest.mark.asyncio
-    async def test_execute_sdk_empty_response_raises_error(self, mock_options_builder):
+    async def test_execute_sdk_empty_response_raises_error(self, mock_options):
         """Test that empty response raises SDKError when collect_text=True."""
         # Mock the message types
         mock_assistant_msg = MagicMock()
@@ -89,12 +96,12 @@ class TestExecuteSDK:
             with pytest.raises(SDKError, match="empty response"):
                 await execute_sdk(
                     prompt="test",
-                    options_builder=mock_options_builder,
+                    options=mock_options,
                     collect_text=True,
                 )
 
     @pytest.mark.asyncio
-    async def test_execute_sdk_multiple_text_blocks(self, mock_options_builder):
+    async def test_execute_sdk_multiple_text_blocks(self, mock_options):
         """Test SDK execution with multiple text blocks."""
         # Mock multiple text blocks
         mock_text_block1 = MagicMock()
@@ -127,7 +134,7 @@ class TestExecuteSDK:
 
             result = await execute_sdk(
                 prompt="test",
-                options_builder=mock_options_builder,
+                options=mock_options,
                 collect_text=True,
             )
 
@@ -139,12 +146,11 @@ class TestExecuteSDKRetry:
     """Tests for execute_sdk retry logic."""
 
     @pytest.fixture
-    def mock_options_builder(self, tmp_path):
-        """Create a mock options builder."""
-        return SDKOptionsBuilder(cwd=str(tmp_path))
+    def mock_options(self, tmp_path):
+        return _mock_options(tmp_path)
 
     @pytest.mark.asyncio
-    async def test_success_on_first_attempt(self, mock_options_builder):
+    async def test_success_on_first_attempt(self, mock_options):
         """Test successful execution on first attempt with retry enabled."""
         with patch("shared.sdk_executor._execute_sdk_once") as mock_execute:
             mock_execute.return_value = {
@@ -157,7 +163,7 @@ class TestExecuteSDKRetry:
 
             result = await execute_sdk(
                 prompt="test",
-                options_builder=mock_options_builder,
+                options=mock_options,
                 max_retries=3,
             )
 
@@ -165,7 +171,7 @@ class TestExecuteSDKRetry:
             mock_execute.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_retries_on_failure(self, mock_options_builder):
+    async def test_retries_on_failure(self, mock_options):
         """Test that execution retries on failure with exponential backoff."""
         with patch("shared.sdk_executor._execute_sdk_once") as mock_execute:
             # Fail twice, then succeed
@@ -184,7 +190,7 @@ class TestExecuteSDKRetry:
             with patch("shared.sdk_executor.asyncio.sleep") as mock_sleep:
                 result = await execute_sdk(
                     prompt="test",
-                    options_builder=mock_options_builder,
+                    options=mock_options,
                     max_retries=3,
                     retry_base_delay=5.0,
                 )
@@ -198,7 +204,7 @@ class TestExecuteSDKRetry:
                 mock_sleep.assert_any_call(15.0)  # Second retry: 15s
 
     @pytest.mark.asyncio
-    async def test_raises_after_max_retries(self, mock_options_builder):
+    async def test_raises_after_max_retries(self, mock_options):
         """Test that exception is raised after max retries exhausted."""
         with patch("shared.sdk_executor._execute_sdk_once") as mock_execute:
             mock_execute.side_effect = RuntimeError("Always fails")
@@ -207,14 +213,14 @@ class TestExecuteSDKRetry:
                 with pytest.raises(RuntimeError, match="Always fails"):
                     await execute_sdk(
                         prompt="test",
-                        options_builder=mock_options_builder,
+                        options=mock_options,
                         max_retries=2,
                     )
 
                 assert mock_execute.call_count == 2
 
     @pytest.mark.asyncio
-    async def test_no_retry_when_max_retries_is_one(self, mock_options_builder):
+    async def test_no_retry_when_max_retries_is_one(self, mock_options):
         """Test that no retry happens when max_retries=1 (default)."""
         with patch("shared.sdk_executor._execute_sdk_once") as mock_execute:
             mock_execute.side_effect = RuntimeError("Immediate failure")
@@ -222,7 +228,7 @@ class TestExecuteSDKRetry:
             with pytest.raises(RuntimeError, match="Immediate failure"):
                 await execute_sdk(
                     prompt="test",
-                    options_builder=mock_options_builder,
+                    options=mock_options,
                     max_retries=1,  # Default - no retry
                 )
 
@@ -230,7 +236,7 @@ class TestExecuteSDKRetry:
             mock_execute.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_exponential_backoff_calculation(self, mock_options_builder):
+    async def test_exponential_backoff_calculation(self, mock_options):
         """Test that exponential backoff uses correct formula (base * 3^attempt)."""
         with patch("shared.sdk_executor._execute_sdk_once") as mock_execute:
             mock_execute.side_effect = [
@@ -243,7 +249,7 @@ class TestExecuteSDKRetry:
                 with pytest.raises(RuntimeError):
                     await execute_sdk(
                         prompt="test",
-                        options_builder=mock_options_builder,
+                        options=mock_options,
                         max_retries=3,
                         retry_base_delay=5.0,
                     )

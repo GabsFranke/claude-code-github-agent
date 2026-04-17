@@ -8,10 +8,15 @@ import asyncio
 import logging
 import os
 
-from claude_agent_sdk import AssistantMessage, ClaudeSDKClient, ResultMessage, TextBlock
+from claude_agent_sdk import (
+    AssistantMessage,
+    ClaudeAgentOptions,
+    ClaudeSDKClient,
+    ResultMessage,
+    TextBlock,
+)
 
 from shared import SDKError, SDKTimeoutError
-from shared.sdk_factory import SDKOptionsBuilder
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +30,7 @@ else:
 
 async def execute_sdk(
     prompt: str,
-    options_builder: SDKOptionsBuilder,
+    options: ClaudeAgentOptions,
     timeout: int | None = None,
     collect_text: bool = True,
     max_retries: int = 1,
@@ -39,12 +44,12 @@ async def execute_sdk(
 
     Args:
         prompt: User prompt to send to the agent
-        options_builder: Pre-configured SDKOptionsBuilder instance
+        options: Pre-built ClaudeAgentOptions instance
         timeout: Optional timeout in seconds (default: from env or 1800)
         collect_text: Whether to collect text blocks into response (default: True)
         max_retries: Maximum number of retry attempts (default: 1 = no retry)
         retry_base_delay: Base delay in seconds for exponential backoff (default: 5.0)
-                         Delays: 5s, 15s, 30s for attempts 1, 2, 3
+                         Delays: 5s, 15s, 45s for attempts 1, 2, 3
 
     Returns:
         dict with:
@@ -64,7 +69,7 @@ async def execute_sdk(
         try:
             return await _execute_sdk_once(
                 prompt=prompt,
-                options_builder=options_builder,
+                options=options,
                 timeout=timeout,
                 collect_text=collect_text,
             )
@@ -72,7 +77,7 @@ async def execute_sdk(
             last_error = e
             if attempt < max_retries - 1:
                 # Log as warning before retry
-                # Exponential backoff: 5s, 15s, 30s (with base_delay=5.0)
+                # Exponential backoff: 5s, 15s, 45s (with base_delay=5.0)
                 delay = retry_base_delay * (3**attempt)
                 logger.warning(
                     f"SDK execution attempt {attempt + 1}/{max_retries} failed: {type(e).__name__}: {e}. "
@@ -92,7 +97,7 @@ async def execute_sdk(
 
 async def _execute_sdk_once(
     prompt: str,
-    options_builder: SDKOptionsBuilder,
+    options,
     timeout: int | None = None,
     collect_text: bool = True,
 ) -> dict:
@@ -100,7 +105,7 @@ async def _execute_sdk_once(
 
     Args:
         prompt: User prompt to send to the agent
-        options_builder: Pre-configured SDKOptionsBuilder instance
+        options: Pre-built ClaudeAgentOptions instance
         timeout: Optional timeout in seconds (default: from env or 1800)
         collect_text: Whether to collect text blocks into response (default: True)
 
@@ -111,8 +116,6 @@ async def _execute_sdk_once(
         SDKTimeoutError: If execution exceeds timeout
         SDKError: If SDK execution fails or returns empty response
     """
-    options = options_builder.build()
-
     sdk_timeout = timeout or int(os.getenv("SDK_EXECUTION_TIMEOUT", "1800"))
     response_parts = []
     all_messages = []
