@@ -21,7 +21,10 @@ services:
     build:
       context: .
       dockerfile: services/webhook/Dockerfile
+    command: sh -c 'python main.py 2>&1 | tee /var/log/bot/webhook.log'
     env_file: .env
+    volumes:
+      - ./logs:/var/log/bot
     ports:
       - "10000:8080"
     environment:
@@ -43,9 +46,11 @@ services:
     build:
       context: .
       dockerfile: services/agent_worker/Dockerfile
+    command: sh -c 'python3 -m services.agent_worker.worker 2>&1 | tee /var/log/bot/worker.log'
     env_file: .env
     volumes:
       - agent-memory:/home/bot/agent-memory:rw
+      - ./logs:/var/log/bot
     environment:
       - PYTHONPATH=/app
       # Worker creates jobs in queue (lightweight coordinator)
@@ -64,7 +69,7 @@ services:
     build:
       context: .
       dockerfile: services/sandbox_executor/Dockerfile
-    command: python -m services.sandbox_executor.sandbox_worker
+    command: sh -c 'python -m services.sandbox_executor.sandbox_worker 2>&1 | tee /var/log/bot/sandbox_worker.log'
     env_file: .env
 
     volumes:
@@ -74,6 +79,7 @@ services:
       - agent-memory:/home/bot/agent-memory:rw
       # Shared transcript staging area (moved here from ephemeral workspace)
       - transcripts:/home/bot/transcripts:rw
+      - ./logs:/var/log/bot
       # gcloud credentials for Vertex AI — sandbox is the one calling the SDK
       # Mounted to bot user's home directory
       - ${APPDATA}/gcloud/application_default_credentials.json:/home/bot/.config/gcloud/application_default_credentials.json:ro
@@ -111,12 +117,13 @@ services:
     build:
       context: .
       dockerfile: services/memory_worker/Dockerfile
-    command: python -m services.memory_worker.memory_worker
+    command: sh -c 'python -m services.memory_worker.memory_worker 2>&1 | tee /var/log/bot/memory_worker.log'
     env_file: .env
     volumes:
       # Reads transcripts from shared staging area; writes memory files
       - agent-memory:/home/bot/agent-memory:rw
       - transcripts:/home/bot/transcripts:rw
+      - ./logs:/var/log/bot
       # gcloud credentials for Vertex AI (if using Vertex backend)
       - ${APPDATA}/gcloud/application_default_credentials.json:/home/bot/.config/gcloud/application_default_credentials.json:ro
     environment:
@@ -142,12 +149,14 @@ services:
   langfuse-db:
     image: postgres:15-alpine
     env_file: .env
+    command: sh -c 'docker-entrypoint.sh postgres 2>&1 | tee /var/log/bot/langfuse-db.log'
     environment:
       POSTGRES_DB: ${LANGFUSE_DB_NAME:-langfuse}
       POSTGRES_USER: ${LANGFUSE_DB_USER:-langfuse}
       POSTGRES_PASSWORD: ${LANGFUSE_DB_PASSWORD:-langfuse}
     volumes:
       - langfuse-db-data:/var/lib/postgresql/data
+      - ./logs/langfuse:/var/log/bot
     ports:
       - "127.0.0.1:5432:5432"
     healthcheck:
@@ -161,6 +170,7 @@ services:
     image: clickhouse/clickhouse-server:latest
     user: "101:101"
     env_file: .env
+    command: sh -c '/entrypoint.sh 2>&1 | tee /var/log/bot/langfuse-clickhouse.log'
     environment:
       CLICKHOUSE_DB: default
       CLICKHOUSE_USER: clickhouse
@@ -168,6 +178,7 @@ services:
     volumes:
       - langfuse-clickhouse-data:/var/lib/clickhouse
       - langfuse-clickhouse-logs:/var/log/clickhouse-server
+      - ./logs/langfuse:/var/log/bot
     ports:
       - "127.0.0.1:18123:8123"
       - "127.0.0.1:19000:9000"
@@ -181,13 +192,14 @@ services:
   langfuse-minio:
     image: minio/minio:latest
     entrypoint: sh
-    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data 2>&1 | tee /var/log/bot/langfuse-minio.log'
     env_file: .env
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-miniosecret}
     volumes:
       - langfuse-minio-data:/data
+      - ./logs/langfuse:/var/log/bot
     ports:
       - "9090:9000"
       - "127.0.0.1:9091:9001"
@@ -201,7 +213,11 @@ services:
   # Langfuse worker (processes events asynchronously)
   langfuse-worker:
     image: langfuse/langfuse-worker:3.149
+    entrypoint: sh
+    command: -c '/bin/sh /app/entrypoint.sh 2>&1 | tee /var/log/bot/langfuse-worker.log'
     env_file: .env
+    volumes:
+      - ./logs/langfuse:/var/log/bot
     environment:
       DATABASE_URL: postgresql://langfuse:${LANGFUSE_DB_PASSWORD:-langfuse}@langfuse-db:5432/langfuse
       NEXTAUTH_URL: http://localhost:7500
@@ -241,7 +257,11 @@ services:
   # Langfuse web UI
   langfuse:
     image: langfuse/langfuse:3.149
+    entrypoint: sh
+    command: -c '/bin/sh /app/entrypoint.sh 2>&1 | tee /var/log/bot/langfuse.log'
     env_file: .env
+    volumes:
+      - ./logs/langfuse:/var/log/bot
     ports:
       - "7500:3000"
     environment:
@@ -295,13 +315,14 @@ services:
     build:
       context: .
       dockerfile: services/retrospector_worker/Dockerfile
-    command: python -m services.retrospector_worker.retrospector_worker
+    command: sh -c 'python -m services.retrospector_worker.retrospector_worker 2>&1 | tee /var/log/bot/retrospector_worker.log'
     env_file: .env
     volumes:
       # Reads transcripts from shared staging area
       - transcripts:/home/bot/transcripts:rw
       # Bare repo cache — needed to create worktrees of the bot repo
       - repo-cache:/var/cache/repos:rw
+      - ./logs:/var/log/bot
       # gcloud credentials for Vertex AI (if using Vertex backend)
       - ${APPDATA}/gcloud/application_default_credentials.json:/home/bot/.config/gcloud/application_default_credentials.json:ro
     environment:
@@ -337,9 +358,11 @@ services:
     build:
       context: .
       dockerfile: services/repo_sync/Dockerfile
+    command: sh -c 'python -m services.repo_sync.sync_worker 2>&1 | tee /var/log/bot/repo_sync.log'
     env_file: .env
     volumes:
       - repo-cache:/var/cache/repos:rw
+      - ./logs:/var/log/bot
     environment:
       - PYTHONPATH=/app
       - REDIS_URL=redis://redis:6379
@@ -381,10 +404,11 @@ services:
     build:
       context: .
       dockerfile: services/indexing_worker/Dockerfile
-    command: python -m services.indexing_worker.indexing_worker
+    command: sh -c 'python -m services.indexing_worker.indexing_worker 2>&1 | tee /var/log/bot/indexing_worker.log'
     env_file: .env
     volumes:
       - repo-cache:/var/cache/repos:rw
+      - ./logs:/var/log/bot
     environment:
       - PYTHONPATH=/app
       - REDIS_URL=redis://redis:6379
