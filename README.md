@@ -62,6 +62,7 @@ The agent runs Claude SDK with the full Claude Code feature set:
 ### Prerequisites
 
 - [Docker](https://docs.docker.com/get-docker/) and Docker Compose
+- [Make](https://www.gnu.org/software/make/) (or use `docker compose` commands directly below)
 - [GitHub App](https://github.com/settings/apps/new) (see setup below)
 - Anthropic-compatible API key (Anthropic, Z.AI, Vertex AI, etc.)
 - ngrok or similar tunnel (for local webhook testing)
