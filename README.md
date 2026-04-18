@@ -1,351 +1,204 @@
+<div align="center">
+
 # Claude Code GitHub Agent
 
-AI-powered GitHub agent that automatically reviews pull requests and responds to commands using Claude Agent SDK and GitHub's official MCP server.
+**Self-hosted GitHub agent that runs Claude SDK on any of 40+ webhook events — fully configurable via YAML workflows and plugins**
 
-> [!IMPORTANT]
-> This project is currently self-hosted only. You'll need to run it on your own infrastructure with Docker or manually. Cloud deployment options may be added in the future.
+[![CI](https://github.com/GabsFranke/claude-code-github-agent/actions/workflows/test.yml/badge.svg)](https://github.com/GabsFranke/claude-code-github-agent/actions/workflows/test.yml) [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/) [![Docker](https://img.shields.io/badge/docker-ready-blue.svg)](https://www.docker.com/) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-## Features
+[Getting Started](#quick-start) · [Usage](#usage) · [Customization](#customization) · [Docs](#documentation) · [Contributing](#contributing)
 
-### Webhook-Driven Automation
+</div>
 
-- 🤖 **Automatic PR Reviews** - Triggered when PRs are opened, reviews code quality, security, and best practices
-- 💬 **Command Invocation** - Responds to `/<command>` or `/agent <request>` in issue and PR comments
-- 📋 **Issue Management** - Can triage issues, add labels, and provide analysis
-- 🔧 **Code Analysis** - Answers questions about your codebase, searches files, explains code
-- 🚀 **Autonomous Actions** - Creates branches, commits changes, and opens PRs
-- 🤝 **Specialized Subagents** - Delegates to focused agents (architecture review, security scanning, bug hunting, test writing)
-- 📝 **Per-repo Customization** - Reads CLAUDE.md configuration files from repository root
-- 📊 **Full Observability** - Self-hosted Langfuse integration for tracing tool calls and reasoning
-- 🗺️ **Structural Code Awareness** - Aider-style repomap with tree-sitter + PageRank for codebase understanding
-- 🔍 **Code Search Tools** - AST-based code search and file summaries via tree-sitter queries (10 languages)
-- 🔎 **Semantic Code Search** - Embedding-based code search across repositories (Gemini + Qdrant)
+---
 
-### Planned Features
+## What It Does
 
-- 🧪 **Auto-fix Failed Tests** - Reacts to failed GitHub Actions and attempts fixes
-- 💭 **Persistent Chat Sessions** - Long-running planning sessions from GitHub Discussions
-- 🎯 **Auto-coding from Issues** - Picks up issues and autonomously creates PRs with solutions
+A self-hosted GitHub agent that hooks into **40+ webhook events** and runs Claude SDK with full repository access — reading files, making changes, and interacting with GitHub via MCP. Everything is configured through **YAML workflows** and **plugins**:
+
+```yaml
+# workflows.yaml — add new behaviors without touching code
+my-workflow:
+  triggers:
+    events: [pull_request.opened, issues.labeled]
+    commands: [/my-command]
+  prompt:
+    template: "Analyze {repo} #{issue_number}"
+```
+
+**Built-in workflows** include PR review, CI failure auto-fix, issue triage, and a generic `/agent` command. **Plugins** add specialized agents (code reviewers, CI failure analyzers, retrospector). And the agent **remembers** your codebases across sessions through persistent memory and semantic search.
+
+Runs on your infrastructure. Scales horizontally. Full observability via Langfuse.
+
+## Key Features
+
+### Event-Driven Engine
+
+- **40+ GitHub events** — PRs, issues, comments, pushes, CI/CD, discussions, labels, releases, and more
+- **YAML-driven workflows** — Define triggers, commands, filters, and prompts in `workflows.yaml`, no code changes needed
+- **Slash commands** — `/review`, `/fix-ci`, `/triage`, `/agent <request>` in any issue or PR comment
+- **Horizontal scaling** — Scale sandbox workers independently: `docker-compose up --scale sandbox_worker=10`
+
+### Claude Code Integration
+
+The agent runs Claude SDK with the full Claude Code feature set:
+
+- **Plugins** — Drop-in `.claude-plugin/` directories with agents, commands, and MCP servers. Auto-discovered at runtime. Currently includes PR review, CI failure analysis, and retrospector plugins.
+- **Skills** — Reusable prompt templates loaded from `~/.claude/skills/`. Agents invoke them via the `Skill` tool.
+- **Memory** — Persistent per-repo knowledge across sessions. The `@memory-extractor` subagent reads session transcripts after each run and updates memory files (architecture notes, known issues, decisions).
+- **Hooks** — Event-driven scripts on `Stop`, `SubagentStop`, and other lifecycle events. Used for Langfuse tracing and transcript persistence.
+- **Subagents** — Delegate to specialized agents via the `Task` tool. Each plugin contributes its own agents (12 built in across 4 plugins).
+- **CLAUDE.md** — Per-repo customization files read at session start. Define project conventions, constraints, and preferences.
+
+### Code Intelligence
+
+- **3-layer context** — File tree → AST code tools → semantic vector search
+- **Structural awareness** — Aider-style repomap with tree-sitter + PageRank (10 languages), personalized per PR
+- **5 MCP servers** — GitHub (HTTP), GitHub Actions, Memory, Codebase Tools, Semantic Search (all stdio)
+- **Self-improvement** — Retrospector analyzes past sessions and proposes instruction improvements via PRs
 
 ## Quick Start
 
 ### Prerequisites
 
-- Docker & Docker Compose (recommended) OR Python 3.11+
-- GitHub App with appropriate permissions ([create one](https://github.com/settings/apps/new))
-- Anthropic API Key ([get from console](https://console.anthropic.com/))
-- ngrok (for local webhook testing)
+- [Docker](https://docs.docker.com/get-docker/) and Docker Compose
+- [GitHub App](https://github.com/settings/apps/new) (see setup below)
+- Anthropic-compatible API key (Anthropic, Z.AI, Vertex AI, etc.)
+- ngrok or similar tunnel (for local webhook testing)
 
-### Setup (Self-Hosting)
+### 1. Create a GitHub App
 
-1. **Get your ngrok URL:**
+Go to **GitHub Settings → Developer settings → GitHub Apps → New GitHub App**:
+
+| Field              | Value                                     |
+| ------------------ | ----------------------------------------- |
+| **Webhook URL**    | `https://your-ngrok-url.ngrok.io/webhook` |
+| **Webhook secret** | A random string (save for `.env`)         |
+
+**Repository permissions:**
+
+| Permission    | Access       |
+| ------------- | ------------ |
+| Actions       | Read-only    |
+| Contents      | Read & write |
+| Issues        | Read & write |
+| Pull requests | Read & write |
+
+**Subscribe to events:** Choose which events GitHub sends to the webhook. For the built-in workflows, enable: Issue comment, Issues, Pull request, Pull request review, Pull request review comment, Pull request review thread, Push, Workflow job. You can subscribe to more or fewer events at any time — see the [full list of supported events](docs/WORKFLOWS.md#supported-events). The agent only acts on what you enable here and configure in [workflows.yaml](workflows.yaml).
+
+After creating: note the **App ID**, generate a **private key** (.pem), install the app on your repos, and note the **Installation ID** from the URL.
+
+### 2. Configure and Run
 
 ```bash
-# Start ngrok (container doesn't need to be running yet)
-ngrok http 10000
+git clone https://github.com/GabsFranke/claude-code-github-agent.git
+cd claude-code-github-agent
+cp .env.example .env               # Edit .env with your credentials
+cp repo-setup.example.yaml repo-setup.yaml  # Edit Per-repo dependency setup (optional)
 ```
 
-Copy the forwarding URL (e.g., `https://abc123.ngrok.io`)
-
-2. **Create a GitHub App:**
-
-Go to GitHub Settings → Developer settings → GitHub Apps → New GitHub App:
-
-- **GitHub App name**: Choose a unique name (e.g., "My Claude Agent")
-- **Homepage URL**: Your repository or any URL
-- **Webhook URL**: `https://your-ngrok-url.ngrok.io/webhook`
-- **Webhook secret**: Generate a random string (you'll use this as GITHUB_WEBHOOK_SECRET in .env)
-- **Permissions**:
-  - Repository permissions:
-    - Actions: Read-only (optional, for workflow insights)
-    - Contents: Read & write
-    - Issues: Read & write
-    - Pull requests: Read & write
-    - Metadata: Read-only
-- **Subscribe to events**:
-  - Discussion comment
-  - Issue comment
-  - Issues
-  - Pull request
-  - Pull request review
-  - Pull request review comment
-  - Pull request review thread
-  - Push
-  - Workflow job
-- Click "Create GitHub App"
-- Note your **App ID** from the app settings page
-- Generate and download a **private key** (save the .pem file)
-- Install the app on your repository (Install App → select repositories)
-- Note your **Installation ID** from the URL after installation
-
-> Note: GitHub Apps are required for the agent to review its own PRs and interact as a bot user. Personal Access Tokens are not supported.
-
-3. **Configure environment:**
-
 ```bash
-# Copy example config
-cp .env.example .env
-
-# Edit .env with your credentials:
-ANTHROPIC_API_KEY=(from Anthropic Console)
-GITHUB_APP_ID=(from your GitHub App settings)
-GITHUB_INSTALLATION_ID=(from installation URL)
-GITHUB_PRIVATE_KEY=(contents of the .pem file)
-GITHUB_WEBHOOK_SECRET=(the secret you set when creating the app)
-```
-
-4. **Run with Docker:**
-
-```bash
-# Option 1: Minimal setup (without Langfuse observability)
+# Minimal setup
 docker-compose -f docker-compose.minimal.yml up --build -d
 
-# Option 2: Full setup with Langfuse (recommended for debugging)
+# Full setup with Langfuse observability
 docker-compose up --build -d
-
-# Optional: Scale sandbox workers for parallel processing
-docker-compose up --build --scale sandbox_worker=2 --scale memory_worker=2 --scale retrospector_worker=2 -d
-# or with minimal setup:
-docker-compose -f docker-compose.minimal.yml up --scale sandbox_worker=5 -d
-
-# View logs
-docker-compose logs -f
-
-# Stop services
-docker-compose down
 ```
 
-5. **Access Langfuse (optional, only if using full setup):**
+That's it. Open a PR on a repo where the app is installed and watch it review.
 
-View agent traces and debug tool calls at http://localhost:7500
+### Alternative AI Providers
 
-- Email: `admin@example.com`
-- Password: `admin123`
+The agent works with any Anthropic-compatible API:
 
-See [LANGFUSE_SETUP.md](LANGFUSE_SETUP.md) for details.
+```bash
+# Z.AI (GLM models)
+ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic
+ANTHROPIC_DEFAULT_SONNET_MODEL=GLM-4.7
+
+# Google Vertex AI
+ANTHROPIC_VERTEX_PROJECT_ID=your-project
+ANTHROPIC_VERTEX_REGION=global
+```
 
 ## Usage
 
-### Automatic PR Reviews
+### Built-in Workflows
 
-When you open a PR, the agent automatically reviews it and posts:
+| Trigger                | What happens                                           |
+| ---------------------- | ------------------------------------------------------ |
+| PR opened              | Full code review with specialized agents               |
+| CI job fails           | Analyzes logs, identifies root cause, pushes fix       |
+| Issue opened           | Triages with priority, complexity, and type assessment |
+| Issue labeled `triage` | Same triage, triggered by label                        |
 
-- General code review summary
-- Inline comments on specific lines
-- Suggestions for improvements
+### Slash Commands
 
-### Commands
-
-Comment on any issue or PR with `/agent` followed by a command or request:
-
-**Built-in Commands:**
-
-- `/review` (or `/review-pr`, `/pr-review`) - Comprehensive PR review with subagents
-- `/triage` (or `/triage-issue`) - Analyze and triage an issue
-
-**Generic Requests:**
+Comment on any issue or PR:
 
 ```
-/agent review the security of this code
-/agent create a PR to add error handling
-/agent find all uses of the deprecated API
+/review                          # Full PR review
+/fix-ci                          # Analyze and fix CI failures
+/triage                          # Triage an issue
+/agent review the auth logic     # Generic request with natural language
+/agent find all uses of deprecated API
 ```
 
-The agent has access to the full repository and can read files, search code, make changes, and interact with GitHub.
+## Customization
 
-### Per-Repository Configuration
+### Add a Workflow
 
-Add a `CLAUDE.md` file to your repository root with custom instructions:
+Edit `workflows.yaml` to define new triggers and behaviors — no code changes needed:
 
-```markdown
-# Agent Instructions
-
-When working on this project:
-
-- Follow the existing code style
-- Update documentation if you change APIs
+```yaml
+workflows:
+  my-workflow:
+    triggers:
+      events: [issues.opened]
+      commands: [/my-command]
+    prompt:
+      template: "Analyze {repo} #{issue_number}"
+    context:
+      repomap_budget: 2048
 ```
 
-### Subagents
+See [WORKFLOWS.md](docs/WORKFLOWS.md) for the full reference, and [CONFIGURATION.md](docs/CONFIGURATION.md) for environment variables.
 
-The agent uses specialized subagents for intelligent PR reviews:
+### Add a Plugin
 
-**PR Review Subagents (used selectively based on changes):**
+Drop a `.claude-plugin/` directory into `plugins/` — agents, commands, and MCP servers are auto-discovered at runtime. See [PLUGINS.md](docs/PLUGINS.md) for details.
 
-- **architecture-reviewer**: Evaluates design patterns, SOLID principles, and system architecture
-- **security-reviewer**: Scans for vulnerabilities (SQL injection, XSS, auth issues, etc.)
-- **bug-hunter**: Identifies potential bugs, edge cases, and error handling issues
-- **code-quality-reviewer**: Reviews code style, readability, and maintainability
+### Per-Repository Instructions
 
-**General Purpose Subagents:**
+Add a `CLAUDE.md` to any repo root. The agent reads it before every session and persists learned knowledge across sessions.
 
-- **context-gatherer**: Explores codebase to find relevant files
-- **bug-investigator**: Traces bugs to root causes
-- **test-writer**: Creates comprehensive test cases
+### Per-Repository Setup
 
-The main agent intelligently decides which subagents to use based on the PR:
-
-- Documentation changes → `code-quality-reviewer` only
-- Bug fixes → `bug-hunter` + `code-quality-reviewer`
-- New features → Multiple agents as needed
-- Security-critical changes → All agents including `security-reviewer`
-- Typo fixes → May skip agents entirely
-
-The coordinator explains which agents were used and why in the review summary.
-
-You can also request specific subagents manually:
-
-```
-/agent use security-reviewer to check for vulnerabilities
-/agent have architecture-reviewer evaluate this design
-/agent ask bug-hunter to find edge cases in the validation logic
-```
-
-## Architecture
-
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed system design.
-
-**High-level flow**:
-
-```
-GitHub Event → Webhook → Redis Queues → Worker (Workflow Engine) → Job Queue → Sandbox Pool (Local Worktrees) → GitHub MCP → GitHub API
-                              ↓
-                         Repo Sync Service (on-demand) → Bare Repo Cache → Git Worktrees
-```
-
-**Key components**:
-
-- **Webhook Service** - Receives GitHub events, extracts raw data (FastAPI)
-- **Worker** - Routes events/commands via YAML workflows, creates jobs
-- **Workflow Engine** - YAML-driven routing (workflows.yaml)
-- **Repo Sync Service** - Manages cached bare repositories (on-demand)
-- **Sandbox Pool** - Executes Claude SDK in isolated git worktrees
-- **Redis** - Message queue, job queue, and sync coordination
-- **Claude Agent SDK** - Autonomous coding agent with local file access
-- **GitHub MCP** - Official GitHub integration
-- **Codebase Context** - Structural repomap + AST code search + semantic search (3 layers)
-- **Indexing Worker** - Chunks repos, generates embeddings, stores in Qdrant
-- **Qdrant** - Vector database for semantic code search
-
-**Scaling**: `docker-compose up --scale sandbox_worker=10 -d`
+Configure dependency installation and build commands per repo in `repo-setup.yaml` — lets the agent run tests, use language tools, and build the project. See [REPO_SETUP.md](docs/REPO_SETUP.md).
 
 ## Documentation
 
-- [Getting Started](docs/GETTING_STARTED.md) - Installation and setup
-- [Architecture](docs/ARCHITECTURE.md) - System design and components
-- [Workflows](docs/WORKFLOWS.md) - Creating and managing workflows
-- [Repository Setup](docs/REPO_SETUP.md) - Configuring dependency installation
-- [Configuration](docs/CONFIGURATION.md) - Environment variables
-- [Development](docs/DEVELOPMENT.md) - Testing and contributing
-- [Langfuse Setup](docs/LANGFUSE_SETUP.md) - Observability
-- [PR Review Flow](docs/PR_REVIEW_FLOW.md) - Review workflow
-- [Plugins](docs/PLUGINS.md) - Plugin system
-- [Subagents](docs/SUBAGENTS.md) - Subagent system
+| Document                                 | Description                           |
+| ---------------------------------------- | ------------------------------------- |
+| [Architecture](docs/ARCHITECTURE.md)     | System design, components, data flows |
+| [Development](docs/DEVELOPMENT.md)       | Testing, deployment, contributing     |
+| [Workflows](docs/WORKFLOWS.md)           | Creating and managing workflows       |
+| [Configuration](docs/CONFIGURATION.md)   | Environment variables reference       |
+| [Plugins](docs/PLUGINS.md)               | Plugin system                         |
+| [Subagents](docs/SUBAGENTS.md)           | Subagent system                       |
+| [Repo Setup](docs/REPO_SETUP.md)         | Per-repository dependency setup       |
+| [Langfuse Setup](docs/LANGFUSE_SETUP.md) | Observability configuration           |
 
-## Configuration
+## Contributing
 
-### Environment Variables
+1. Fork the repository
+2. Create a feature branch: `git checkout -b feature/my-feature`
+3. Make changes and add tests
+4. Run quality checks: `bash ./check-code.sh`
+5. Open a PR to `develop`
 
-**Required:**
-
-- `ANTHROPIC_API_KEY`: Your Anthropic API key (or `ANTHROPIC_AUTH_TOKEN` as alternative)
-- `GITHUB_WEBHOOK_SECRET`: Secret for webhook signature verification
-- `GITHUB_APP_ID`: Your GitHub App ID
-- `GITHUB_INSTALLATION_ID`: Installation ID from the app installation URL
-- `GITHUB_PRIVATE_KEY`: Contents of the private key .pem file
-
-**Optional:**
-
-- `ANTHROPIC_BASE_URL`: Override API endpoint for alternative providers
-- `ANTHROPIC_DEFAULT_SONNET_MODEL`: Override model name
-- `LANGFUSE_PUBLIC_KEY`: Langfuse API key (pre-configured for self-hosted setup)
-- `LANGFUSE_SECRET_KEY`: Langfuse secret key (pre-configured for self-hosted setup)
-- `GEMINI_API_KEY`: Google Gemini API key for semantic code search embeddings
-
-### Using Alternative AI Providers
-
-You can use alternative providers instead of Anthropic's API:
-
-**Option 1: Z.AI (GLM models via Anthropic-compatible API)**
-
-```bash
-# .env
-ANTHROPIC_API_KEY=your_zai_api_key
-ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic
-ANTHROPIC_DEFAULT_SONNET_MODEL=GLM-4.7
-ANTHROPIC_DEFAULT_HAIKU_MODEL=GLM-4.5-Air
-ANTHROPIC_DEFAULT_OPUS_MODEL=GLM-4.7
-```
-
-**Option 2: Vertex AI (Claude models via Google Cloud)**
-
-```bash
-# 1. Authenticate with gcloud
-gcloud auth application-default login
-
-# 2. Configure .env
-ANTHROPIC_API_KEY=sk-ant-unused
-ANTHROPIC_VERTEX_PROJECT_ID=your-gcp-project-id
-ANTHROPIC_VERTEX_REGION=global
-
-# 3. Recreate worker with new env vars
-docker-compose up -d worker
-```
-
-The agent works identically with all providers - just toggle the environment variables and recreate the container.
-
-## Testing
-
-```bash
-# Run all tests
-pytest
-
-# Run with coverage
-pytest --cov=shared --cov=services --cov-report=html
-```
-
-See [docs/TESTING.md](docs/TESTING.md) for the complete testing guide.
-
-Tests run automatically on every PR via GitHub Actions.
-
-## Development
-
-### Project Structure
-
-```
-claude-code-github-agent/
-├── services/
-│   ├── agent_worker/         # Job coordinator
-│   ├── repo_sync/            # Repository cache manager
-│   ├── sandbox_executor/     # Sandbox worker pool
-│   └── webhook/              # Webhook receiver
-├── shared/
-│   ├── github_auth.py       # Shared authentication
-│   ├── queue.py             # Message queue abstraction
-│   └── job_queue.py         # Job queue abstraction
-├── docker-compose.yml       # Docker Compose config
-└── docs/                    # Documentation
-```
-
-### Troubleshooting
-
-```bash
-# View logs
-docker-compose logs -f
-
-# View specific service
-docker-compose logs -f worker
-docker-compose logs -f webhook
-docker-compose logs -f sandbox_worker
-docker-compose logs -f repo_sync
-
-# Check status
-docker-compose ps
-```
-
-> [!WARNING]
-> This agent has full write access to your repositories and can autonomously create branches, commit changes, and open PRs. The current implementation auto-approves all GitHub MCP tool calls (configured with `autoApprove: ['*']`) to allow Claude Code to operate without manual confirmation. Fine-grained permission controls are not yet implemented. Use with caution.
+See [DEVELOPMENT.md](docs/DEVELOPMENT.md) for the full guide.
 
 ## License
 
-MIT
+[MIT](LICENSE)
