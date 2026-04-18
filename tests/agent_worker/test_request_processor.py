@@ -100,6 +100,7 @@ class TestRequestProcessorExecution:
 
                 processor = RequestProcessor(token_manager, http_client, job_queue)
                 processor.context_loader.fetch_claude_md = AsyncMock(return_value="")
+                processor.context_loader.fetch_memory_index = AsyncMock(return_value="")
 
                 job_id = await processor._execute(
                     repo="owner/repo",
@@ -141,6 +142,7 @@ class TestRequestProcessorExecution:
 
                 processor = RequestProcessor(token_manager, http_client, job_queue)
                 processor.context_loader.fetch_claude_md = AsyncMock(return_value="")
+                processor.context_loader.fetch_memory_index = AsyncMock(return_value="")
 
                 job_id = await processor._execute(
                     repo="owner/repo",
@@ -179,6 +181,9 @@ class TestRequestProcessorExecution:
                 processor.context_loader.fetch_claude_md = AsyncMock(
                     return_value="# Repository Guidelines"
                 )
+                processor.context_loader.fetch_memory_index = AsyncMock(
+                    return_value="# Memory content"
+                )
 
                 job_id = await processor._execute(
                     repo="owner/repo",
@@ -193,8 +198,17 @@ class TestRequestProcessorExecution:
                 processor.context_loader.fetch_claude_md.assert_called_once_with(
                     "owner/repo"
                 )
+                processor.context_loader.fetch_memory_index.assert_called_once_with(
+                    "owner/repo"
+                )
+
+                # Verify CLAUDE.md and memory are passed separately, not in prompt
                 call_args = job_queue.create_job.call_args[0][0]
-                assert "# Repository Guidelines" in call_args["prompt"]
+                assert call_args["claude_md"] == "# Repository Guidelines"
+                assert call_args["memory_index"] == "# Memory content"
+                # Prompt should be clean (no CLAUDE.md or memory injected)
+                assert "# Repository Guidelines" not in call_args["prompt"]
+                assert "# Memory content" not in call_args["prompt"]
 
     @pytest.mark.asyncio
     async def test_execute_no_workflow_provided(self):
@@ -248,6 +262,7 @@ class TestRequestProcessorExecution:
                 processor.context_loader.fetch_claude_md = AsyncMock(
                     side_effect=Exception("Network error")
                 )
+                processor.context_loader.fetch_memory_index = AsyncMock(return_value="")
 
                 job_id = await processor._execute(
                     repo="owner/repo",
@@ -275,7 +290,7 @@ class TestRequestProcessorExecution:
         mock_span.update = MagicMock()
         mock_span.__enter__ = MagicMock(return_value=mock_span)
         mock_span.__exit__ = MagicMock(return_value=False)
-        langfuse_client.start_as_current_span = MagicMock(return_value=mock_span)
+        langfuse_client.start_as_current_observation = MagicMock(return_value=mock_span)
         langfuse_client.flush = MagicMock()
 
         with patch(
@@ -294,6 +309,7 @@ class TestRequestProcessorExecution:
                     token_manager, http_client, job_queue, langfuse_client
                 )
                 processor.context_loader.fetch_claude_md = AsyncMock(return_value="")
+                processor.context_loader.fetch_memory_index = AsyncMock(return_value="")
 
                 job_id = await processor.process(
                     repo="owner/repo",
@@ -305,5 +321,5 @@ class TestRequestProcessorExecution:
                 )
 
                 assert job_id == "job-303"
-                langfuse_client.start_as_current_span.assert_called_once()
+                langfuse_client.start_as_current_observation.assert_called_once()
                 langfuse_client.flush.assert_called_once()

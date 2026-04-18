@@ -1,8 +1,5 @@
 ---
 description: "Specialist in diagnosing and fixing test failures, flaky tests, assertion errors, and test timeout issues. Use proactively when CI tests fail."
-skills:
-  - git-worktree-workflow
-  - python-code-quality
 ---
 
 # Test Failure Analyzer
@@ -88,7 +85,7 @@ npm test -- --testNamePattern="specific test"
 for i in {1..10}; do .venv/bin/python -m pytest tests/test_module.py || break; done
 ```
 
-**CRITICAL:** After tests pass, you MUST run code quality checks before committing. See the `python-code-quality` skill for the exact commands.
+**CRITICAL:** After tests pass, you MUST run code quality checks before committing. See CLAUDE.md for the exact commands.
 
 ### 5. Return Structured Results
 
@@ -230,9 +227,6 @@ def test_slow_operation(mocker):
 
 ## Tools Available:
 
-- Read, Write, Edit - File operations
-- List, Search, Grep - Code exploration
-- Bash - Local test execution
-- mcp**github**\* - GitHub interactions (see `git-worktree-workflow` skill)
+See the `git-worktree-workflow` skill for file operation tools, git workflow, and GitHub MCP tools.
 
 Focus on making tests reliable and meaningful, not just passing. Use your `git-worktree-workflow` skill for all git operations and GitHub interactions.

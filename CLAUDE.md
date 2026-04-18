@@ -16,15 +16,7 @@ You are working in a **git worktree** - an isolated workspace created from a cac
 
 ## Architecture Overview
 
-This is a self-hosted GitHub bot that uses Claude Agent SDK to autonomously review PRs and respond to commands. The system has several key components:
-
-**Your Environment:**
-
-- You run in a Docker container (`sandbox_worker`)
-- You have access to local files via Read/Write/Edit/List/Search/Bash tools
-- You interact with GitHub via MCP tools (all tools prefixed with `mcp__github__`)
-- You can delegate to specialized subagents via the Task tool
-- You can use plugins (pr-review-toolkit, ci-failure-toolkit)
+This is a self-hosted GitHub bot that uses Claude Agent SDK to autonomously review PRs and respond to commands. The system has several key components.
 
 ## Technology Stack
 
@@ -64,122 +56,29 @@ When making changes to this codebase:
 
 ### Running Quality Checks
 
+The project has a bash script for quality checks. Always invoke it with `bash` (not executable in git):
+
 ```bash
-# Run all checks (formatting, linting, type checking)
-./check-code.sh
+# Check code quality (read-only)
+bash ./check-code.sh
 
 # Auto-fix formatting and imports
-./check-code.sh --fix
+bash ./check-code.sh --fix
 
 # Fast mode (skip mypy)
-./check-code.sh --fast
+bash ./check-code.sh --fast
 ```
 
-## Project Structure
-
-```
-claude-code-github-agent/
-├── services/
-│   ├── webhook/              # Receives GitHub webhooks
-│   ├── agent_worker/         # Coordinates jobs (workflow routing)
-│   ├── repo_sync/            # Manages bare repository cache
-│   └── sandbox_executor/     # Executes jobs in worktrees (YOU ARE HERE)
-├── shared/                   # Shared utilities (importable package)
-│   ├── config.py            # Pydantic configuration
-│   ├── queue.py             # Message queue abstraction
-│   ├── job_queue.py         # Job queue abstraction
-│   ├── github_auth.py       # GitHub App authentication
-│   └── exceptions.py        # Custom exceptions
-├── workflows/               # Workflow engine
-│   ├── engine.py           # YAML-based routing
-│   └── workflows.yaml      # Single source of truth for workflows
-├── prompts/                # System context for workflows
-├── subagents/              # Specialized subagent definitions
-├── plugins/                # Claude Code plugins
-│   ├── pr-review-toolkit/  # PR review commands & agents
-│   └── ci-failure-toolkit/ # CI failure analysis
-├── hooks/                  # Agent hooks
-└── tests/                  # Test suite
-```
-
-## Working with Files
-
-### Local File Operations
-
-Use these tools for reading/writing files in your worktree:
-
-- **Read** - Read file contents
-- **Write** - Create or overwrite files
-- **Edit** - Make targeted edits
-- **List** - List directory contents
-- **Search** - Search for patterns in files
-- **Bash** - Execute shell commands
-
-### GitHub API Operations
-
-Use GitHub MCP tools for API interactions:
-
-- `get_pull_request` - Get PR details
-- `list_pull_request_files` - List changed files
-- `get_pull_request_diff` - Get PR diff
-- `add_issue_comment` - Post comments
-- `pull_request_review_write` - Post review with inline comments
-- `create_branch` - Create branches
-- `update_file` - Update files via API (use local Write instead when possible)
-- `create_pull_request` - Open PRs
-
-**Prefer local file operations over GitHub API when possible** - they're faster and don't count against rate limits.
-
-## Common Workflows
-
-### Reviewing a Pull Request
-
-1. Use `get_pull_request` to get PR details
-2. Use `list_pull_request_files` to see changed files
-3. Use `get_pull_request_diff` to analyze changes
-4. Read relevant files locally using Read tool
-5. Delegate to specialized subagents as needed
-6. Post summary via `add_issue_comment`
-7. Post inline comments via `pull_request_review_write`
-
-### Making Code Changes
-
-1. Read files locally using Read tool
-2. Make changes using Write or Edit tools
-3. Test changes using Bash tool (run tests, linters)
-4. Commit changes using Bash tool (`git add`, `git commit`)
-5. Push to remote using Bash tool (`git push origin HEAD`)
-6. Create PR using `create_pull_request`
-
-### Analyzing CI Failures
-
-1. Use `get_workflow_run` to get workflow details
-2. Use `get_workflow_run_logs` to get logs
-3. Analyze logs to identify failure cause
-4. Make fixes locally using Write/Edit tools
-5. Test fixes using Bash tool
-6. Commit and push changes
-
-## Git Operations
-
-Git credentials are pre-configured. You can use git commands directly:
+**Manual auto-fix sequence** (run in this exact order when fixing lint failures):
 
 ```bash
-# Check status
-git status
-
-# Stage changes
-git add .
-
-# Commit
-git commit -m "Fix: description"
-
-# Push to remote (credentials are already configured)
-git push origin HEAD
-
-# Create a new branch
-git checkout -b feature-branch
+black services/ shared/ subagents/ hooks/ plugins/ tests/
+isort services/ shared/ subagents/ hooks/ plugins/ tests/
+ruff check --fix services/ shared/ subagents/ hooks/ plugins/ tests/
+bash ./check-code.sh  # verify
 ```
+
+Configuration files: `pyproject.toml` (black, isort, mypy, pytest, ruff), `.flake8`, `check-code.sh`, `check-code.ps1`.
 
 ## Environment Variables
 
@@ -220,15 +119,6 @@ If something goes wrong:
 - Verify GitHub token: `git config credential.helper`
 - Check worktree: `git worktree list`
 
-## Common Pitfalls
-
-1. **Don't use GitHub API to read files you can read locally** - Use Read tool instead
-2. **Don't forget to commit before pushing** - Git won't push uncommitted changes
-3. **Don't assume you're in the main repository** - You're in a temporary worktree
-4. **Don't use absolute paths** - Use relative paths from your working directory
-5. **Don't skip error handling** - Always check command exit codes
-6. **Don't make changes without testing** - Run tests/linters before committing
-
 ## Getting Help
 
 - Check documentation in `docs/` directory
@@ -237,15 +127,24 @@ If something goes wrong:
 - Check workflow definitions in `workflows.yaml`
 - Review test cases in `tests/` for usage examples
 
-## Summary
+## Memory
 
-You are an autonomous agent working in an isolated git worktree with:
+You have access to a persistent memory system scoped to the current repository. Memory survives across sessions and is shared with the memory extraction worker that runs after each session.
 
-- Local file access via Read/Write/Edit/List/Search/Bash tools
-- GitHub API access via MCP tools
-- Ability to delegate to specialized subagents
-- Access to plugins for common workflows
-- Pre-configured git credentials for pushing changes
-- Full write access to repositories (use responsibly)
+### Reading Memory
+
+Memory context from previous sessions is injected into your prompt at the start of each job inside `<memory>` tags. Read it — it contains architecture notes, known issues, commands, and other facts learned from prior sessions.
+
+You can also query memory directly during a session:
+
+```
+mcp__memory__memory_read()                          # List all memory files
+mcp__memory__memory_read(file_path="index.md")      # Read the index
+mcp__memory__memory_read(file_path="issues/foo.md") # Read a specific file
+```
+
+### Writing Memory
+
+You do not write memory directly. After every session, a background worker automatically runs the `@memory-extractor` subagent against your full transcript — it handles deduplication, organization, and quality control.
 
 Your goal is to help developers by reviewing code, fixing issues, and automating workflows while following best practices and maintaining code quality.

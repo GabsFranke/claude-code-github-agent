@@ -1,23 +1,6 @@
 ---
 description: "Analyze and fix CI/CD failures using specialized agents"
 argument-hint: "[owner/repo] [run-id-or-pr-number] [failure-type]"
-skills:
-  - git-worktree-workflow
-  - python-code-quality
-allowed-tools:
-  [
-    "Task",
-    "Bash",
-    "Glob",
-    "Grep",
-    "Read",
-    "Write",
-    "Edit",
-    "List",
-    "Search",
-    "mcp__github__*",
-    "mcp__github-actions__*",
-  ]
 ---
 
 # CI/CD Failure Analysis and Fix
@@ -28,6 +11,7 @@ Analyze GitHub Actions workflow failures and coordinate specialized agents to im
 
 - First argument: Repository (owner/repo format, required)
 - Second argument: Workflow run ID or PR number (required)
+  **IMPORTANT:** A workflow run ID (e.g., `24425975972`) is NOT a commit SHA. It is a GitHub Actions run identifier — use it ONLY with `mcp__github-actions__*` tools (e.g., `get_workflow_run_summary`). Never pass it to `mcp__github__get_commit` or any tool that expects a commit SHA.
 - Third argument: Failure type (optional: build, test, lint, deploy, all)
 
 **Context Variables Available:**
@@ -60,6 +44,7 @@ You are the main coordinator with these responsibilities:
 - **Subagents implement ALL fixes** - They work in your branch and commit their changes
 - **YOU create the PR** - After all fixes are committed by agents
 - **YOU post the final summary** - Comprehensive results to GitHub
+- **`gh` CLI is NOT available** - Never attempt `gh` commands; use `mcp__github__*` and `mcp__github-actions__*` tools exclusively
 
 **CRITICAL - Your Job is Coordination, NOT Implementation:**
 
@@ -78,7 +63,9 @@ You are the main coordinator with these responsibilities:
 **CRITICAL - Log Access:**
 
 - ❌ **NEVER use Read or Bash to access workflow logs** - They are too large (often 50KB+) and will be truncated
-- ✅ **ALWAYS use GitHub Actions MCP tools** - They handle large logs efficiently and provide structured output
+- ❌ **NEVER use `curl`, `gh` CLI, or direct HTTP requests to fetch logs** - Always use MCP tools instead
+- ❌ **NEVER extract tokens from git config or remote URLs** - Credentials are pre-configured; MCP tools handle auth automatically
+- ✅ **ALWAYS use GitHub Actions MCP tools (`mcp__github-actions__*`)** - They handle large logs efficiently and provide structured output
 - ✅ **Use `get_failed_steps` with `log_lines_per_step: 200`** - This gives you ALL errors in one call
 - ✅ **Pass the COMPLETE failed steps output to subagents** - Don't just pass a snippet or the first error
 
@@ -137,6 +124,8 @@ Extract from $ARGUMENTS:
 **Use the GitHub Actions MCP tools - they fetch logs via API and handle size limits:**
 
 All tools use the `mcp__github-actions__` prefix. Call them directly as MCP tools.
+
+**Do NOT fall back to `curl`, `gh` CLI, or other direct methods if MCP tools seem unavailable.** If a `mcp__github-actions__*` tool call fails, try the next one in the recommended flow before considering alternatives. These tools are the only approved way to access logs.
 
 **IMPORTANT: You are ONLY gathering information here. Do NOT attempt to fix anything yourself.**
 
@@ -232,6 +221,27 @@ Useful for finding specific errors in very long logs
 - Read in 500-line chunks - manageable size
 - Errors are usually at the END, so start there
 - You can read the entire log by paginating through it
+
+**Fallback: When GitHub Actions MCP Tools Are Unavailable**
+
+If `mcp__github-actions__*` tools are not available or return errors, use this alternative approach to gather failure information:
+
+1. **Find the associated PR** using `mcp__github__search_pull_requests` with the head branch name from your context
+2. **Get check run details** using `mcp__github__pull_request_read` with `method: "get_check_runs"` — this shows which jobs passed/failed and their IDs
+3. **Check annotations** from check runs for error summaries (may be limited but often enough for simple failures)
+4. **Run the failing tests locally** to reproduce and identify exact failures:
+   ```bash
+   # Install dependencies if needed
+   pip install -r requirements-dev.txt
+
+   # Run the test suite
+   python3 -m pytest tests/ -v --tb=short
+   ```
+5. Use the local test output to identify exact failures, then delegate to specialist agents with the local output
+
+**Why this works:** Running tests locally is the most reliable fallback when CI logs are inaccessible. The local test suite matches CI, so failures reproduced locally directly correspond to CI failures.
+
+**When to use this fallback:** Only when `mcp__github-actions__*` tools are genuinely unavailable. Always try the primary approach first — it provides richer context (logs, stack traces, timing info) that local runs may not surface.
 
 ### Step 3: Analyze Failure Scope and Type
 
@@ -449,7 +459,7 @@ Instructions:
 2. Analyze build failures in services/webhook/ only
 3. Implement fixes using Read/Write/Edit tools
 4. Test locally: run the same build command that failed for webhook service
-5. Run code quality checks (see python-code-quality skill)
+5. Run code quality checks (see CLAUDE.md for code quality commands)
 6. Commit changes: git add . && git commit -m "fix: resolve webhook build failures"
 7. Push: git push origin HEAD
 8. Return a structured summary of fixes applied
@@ -497,7 +507,7 @@ Instructions:
 2. Analyze all 8 test failures in services/webhook/ from the log above
 3. Implement fixes for all failures using Read/Write/Edit tools
 4. Run tests locally: .venv/bin/python -m pytest services/webhook/tests/ -v
-5. Run code quality checks (see python-code-quality skill)
+5. Run code quality checks (see CLAUDE.md for code quality commands)
 6. Commit changes: git add . && git commit -m "fix: resolve webhook test failures (8 tests)"
 7. Push: git push origin HEAD
 8. Return a structured summary of all fixes applied
@@ -547,7 +557,7 @@ IMPORTANT: You are working in a shared worktree. The main agent has already crea
 
 Instructions:
 1. Verify you're on the correct branch: git branch --show-current (should show {current_branch})
-2. Run auto-fixers first (see python-code-quality skill):
+2. Run auto-fixers first (see CLAUDE.md for code quality commands):
    - black shared/
    - isort shared/
    - ruff check --fix shared/
@@ -762,7 +772,8 @@ All agents have the `git-worktree-workflow` skill and know how to:
 - **You create the branch first** - Before delegating to agents
 - **Agents commit to your branch** - They work in the same worktree
 - **You create the PR** - After all fixes are done
-- **GitHub MCP only** - Use `mcp__github__*` tools, NOT `gh` CLI
+- **GitHub MCP only** - Use `mcp__github__*` tools and `mcp__github-actions__*` tools, NOT `gh` CLI, `curl`, or direct HTTP requests
+- **Never extract credentials** - Do not read git config or remote URLs to obtain tokens; MCP tools handle auth automatically
 - **Delegate with context** - Provide error logs and clear instructions
 - **Trust the agents** - They have the `git-worktree-workflow` skill
 

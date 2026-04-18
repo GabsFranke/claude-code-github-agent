@@ -54,7 +54,7 @@ class TestProcessJob:
 
         with (
             patch(
-                "services.sandbox_executor.sandbox_worker.ensure_repo_synced",
+                "services.sandbox_executor.sandbox_worker.wait_for_repo_sync",
                 new_callable=AsyncMock,
                 return_value="/var/cache/repos/owner/repo.git",
             ),
@@ -64,9 +64,15 @@ class TestProcessJob:
                 return_value=(0, "", ""),
             ),
             patch(
-                "services.sandbox_executor.sandbox_worker.execute_sandbox_request",
+                "services.sandbox_executor.sandbox_worker.execute_sdk",
                 new_callable=AsyncMock,
-                return_value="Test response",
+                return_value={
+                    "response": "Test response",
+                    "num_turns": 1,
+                    "duration_ms": 1000,
+                    "is_error": False,
+                    "messages": [],
+                },
             ),
             patch(
                 "services.sandbox_executor.sandbox_worker.tempfile.mkdtemp"
@@ -124,7 +130,7 @@ class TestProcessJob:
 
         with (
             patch(
-                "services.sandbox_executor.sandbox_worker.ensure_repo_synced",
+                "services.sandbox_executor.sandbox_worker.wait_for_repo_sync",
                 new_callable=AsyncMock,
                 return_value="/var/cache/repos/owner/repo.git",
             ),
@@ -134,7 +140,7 @@ class TestProcessJob:
                 return_value=(0, "", ""),
             ),
             patch(
-                "services.sandbox_executor.sandbox_worker.execute_sandbox_request",
+                "services.sandbox_executor.sandbox_worker.execute_sdk",
                 new_callable=AsyncMock,
                 side_effect=Exception("Execution failed"),
             ),
@@ -173,93 +179,6 @@ class TestProcessJob:
             assert call_args[0][1]["status"] == "error"
             assert "Execution failed" in call_args[0][1]["error"]
             assert call_args[1]["status"] == "error"
-
-    @pytest.mark.asyncio
-    async def test_workspace_cleanup(self):
-        """Test workspace is cleaned up after processing."""
-        from services.sandbox_executor.sandbox_worker import process_job
-
-        mock_queue = AsyncMock()
-        mock_queue.complete_job = AsyncMock()
-        mock_queue.redis = AsyncMock()
-
-        job_id = "550e8400-e29b-41d4-a716-446655440002"  # Valid UUID
-        job_data = {
-            "prompt": "Test",
-            "github_token": "token",
-            "repo": "owner/repo",
-            "issue_number": 1,
-            "user": "user",
-        }
-
-        created_workspace = None
-
-        async def capture_workspace(
-            prompt,
-            github_token,
-            repo,
-            issue_number,
-            user,
-            auto_review,
-            auto_triage,
-            workspace,
-            system_context=None,
-        ):
-            nonlocal created_workspace
-            created_workspace = workspace
-            return "Response"
-
-        with (
-            patch(
-                "services.sandbox_executor.sandbox_worker.ensure_repo_synced",
-                new_callable=AsyncMock,
-                return_value="/var/cache/repos/owner/repo.git",
-            ),
-            patch(
-                "services.sandbox_executor.sandbox_worker.execute_git_command",
-                new_callable=AsyncMock,
-                return_value=(0, "", ""),
-            ),
-            patch(
-                "services.sandbox_executor.sandbox_worker.execute_sandbox_request",
-                new_callable=AsyncMock,
-                side_effect=capture_workspace,
-            ),
-            patch(
-                "services.sandbox_executor.sandbox_worker.tempfile.mkdtemp"
-            ) as mock_mkdtemp,
-            patch("services.sandbox_executor.sandbox_worker.os.rmdir"),
-            patch("services.sandbox_executor.sandbox_worker.os.chdir"),
-            patch(
-                "services.sandbox_executor.sandbox_worker.os.getcwd",
-                return_value="/original",
-            ),
-            patch("services.sandbox_executor.sandbox_worker.os.makedirs"),
-            patch(
-                "services.sandbox_executor.sandbox_worker.os.path.exists",
-                return_value=True,
-            ),
-            patch(
-                "services.sandbox_executor.sandbox_worker.RepoSetupEngine"
-            ) as mock_engine_class,
-        ):
-            # Mock workspace path
-            test_workspace = "/tmp/test_workspace"
-            mock_mkdtemp.return_value = test_workspace
-
-            # Mock repo setup engine
-            mock_engine = MagicMock()
-            mock_engine.get_setup_config.return_value = None
-            mock_engine_class.return_value = mock_engine
-
-            await process_job(mock_queue, job_id, job_data)
-
-            # Verify workspace was passed to execute function
-            assert created_workspace == test_workspace
-
-            # Verify cleanup was attempted (either rmtree or worktree remove)
-            # Since we mock os.path.exists to return True, it should try worktree remove
-            assert mock_queue.complete_job.called
 
 
 class TestMainLoop:

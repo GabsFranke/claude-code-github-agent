@@ -27,6 +27,7 @@ from .exceptions import (
     WebhookValidationError,
     WorktreeCreationError,
 )
+from .file_tree import EXCLUDE_DIRS, EXCLUDE_FILES, EXCLUDE_SUFFIXES, load_ignore_spec
 from .git_utils import execute_git_command
 from .github_auth import (
     GitHubAuthService,
@@ -38,10 +39,11 @@ from .http_client import AsyncHTTPClient, close_http_client, get_http_client
 from .job_queue import JobQueue
 from .logging_utils import setup_logging
 from .models import AgentRequest, AgentResponse
-from .queue import MessageQueue, PubSubQueue, RedisQueue, get_queue
+from .queue import MessageQueue, PubSubQueue, RedisQueue, get_queue, wait_for_repo_sync
 from .rate_limiter import MultiRateLimiter, RateLimiter
 from .retry import async_retry
 from .signals import setup_graceful_shutdown
+from .utils import resolve_path
 
 __all__ = [
     # Config
@@ -94,6 +96,7 @@ __all__ = [
     "RedisQueue",
     "PubSubQueue",
     "get_queue",
+    "wait_for_repo_sync",
     # Rate Limiting
     "RateLimiter",
     "MultiRateLimiter",
@@ -101,4 +104,11 @@ __all__ = [
     "async_retry",
     # Signals
     "setup_graceful_shutdown",
+    # Utils
+    "resolve_path",
+    # File tree
+    "EXCLUDE_DIRS",
+    "EXCLUDE_FILES",
+    "EXCLUDE_SUFFIXES",
+    "load_ignore_spec",
 ]

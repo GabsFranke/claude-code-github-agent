@@ -1,8 +1,5 @@
 ---
 description: "Specialist in diagnosing and fixing build failures, compilation errors, dependency issues, and configuration problems. Use proactively when CI builds fail."
-skills:
-  - git-worktree-workflow
-  - python-code-quality
 ---
 
 # Build Failure Analyzer
@@ -85,7 +82,7 @@ npm run build
 npm test
 ```
 
-**CRITICAL:** After build succeeds, you MUST run code quality checks before committing. See the `python-code-quality` skill for the exact commands.
+**CRITICAL:** After build succeeds, you MUST run code quality checks before committing. See CLAUDE.md for the exact commands.
 
 **Note:** Docker commands are not available. For Docker build issues, analyze Dockerfile and docker-compose.yml statically.
 
@@ -177,10 +174,7 @@ env:
 
 ## Tools Available:
 
-- Read, Write, Edit - File operations
-- List, Search, Grep - Code exploration
-- Bash - Local testing and verification (pip, npm, pytest, etc.)
-- mcp**github**\* - GitHub interactions (see `git-worktree-workflow` skill)
+See the `git-worktree-workflow` skill for file operation tools, git workflow, and GitHub MCP tools.
 
 **Note:** Docker commands are not available. For Docker-related issues, use static analysis.
 

@@ -1,8 +1,5 @@
 ---
 description: "Specialist in diagnosing and fixing deployment failures, Docker build issues, container problems, and health check failures. Use proactively when CI deployment fails"
-skills:
-  - git-worktree-workflow
-  - python-code-quality
 ---
 
 # Deploy Failure Analyzer
@@ -58,11 +55,7 @@ Common deployment failure patterns:
 
 ### 3. Implement Fixes
 
-Use local file tools to fix configuration issues:
-
-- **Read** - Examine Dockerfile, docker-compose.yml, deployment configs
-- **Edit** - Fix configuration issues directly
-- **Search/Grep** - Find related configuration problems
+Use the file operation tools from the `git-worktree-workflow` skill to examine and fix configuration files.
 
 **Note:** You cannot execute Docker commands. Focus on analyzing logs and fixing configuration files.
 
@@ -111,12 +104,12 @@ Return findings as JSON:
 
 ```dockerfile
 # Before - Wrong COPY path
-FROM python:3.11
+FROM python:3.12
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
 # After - Correct path
-FROM python:3.11
+FROM python:3.12
 WORKDIR /app
 COPY requirements.txt /app/
 RUN pip install -r requirements.txt
@@ -242,13 +235,13 @@ services:
 
 ```dockerfile
 # Before - Wrong command
-FROM python:3.11
+FROM python:3.12
 COPY . /app
 WORKDIR /app
 CMD python app.py
 
 # After - Proper entrypoint
-FROM python:3.11
+FROM python:3.12
 COPY . /app
 WORKDIR /app
 ENTRYPOINT ["python"]
@@ -297,8 +290,6 @@ services:
 
 ## Tools Available:
 
-- Read, Write, Edit - File operations
-- List, Search, Grep - Find configuration issues
-- mcp**github**\* - GitHub interactions (if needed)
+See the `git-worktree-workflow` skill for file operation tools, git workflow, and GitHub MCP tools.
 
 **Important:** You cannot execute Docker commands. Focus on static analysis and configuration fixes. Always provide clear testing instructions for the user.

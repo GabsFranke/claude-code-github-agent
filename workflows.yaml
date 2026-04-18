@@ -18,6 +18,10 @@ workflows:
       template: "/pr-review-toolkit:review-pr {repo} {issue_number}"
       # system_context: "review.md" # Load from prompts/review.md
     description: "Review a pull request"
+    context:
+      repomap_budget: 4096
+      personalized: true
+      include_test_files: true
     # skip_self defaults to true (can be omitted)
 
   triage-issue:
@@ -27,17 +31,21 @@ workflows:
       commands:
         - /triage
         - /triage-issue
-
     prompt:
       template: "Triage issue #{issue_number} in {repo}"
       system_context: "triage.md" # Load from prompts/triage.md
     description: "Triage an issue"
+    context:
+      repomap_budget: 1024
+      personalized: false
     # skip_self defaults to true (can be omitted)
 
   fix-ci:
     triggers:
       events:
         - workflow_job.completed
+      filters:
+        workflow_job.conclusion: "failure"
       commands:
         - /fix-ci
         - /fix-build
@@ -46,7 +54,24 @@ workflows:
       template: "/ci-failure-toolkit:fix-ci {repo} {issue_number}"
       # system_context: "fix-ci.md"
     description: "Analyze and fix CI/CD failures"
+    context:
+      repomap_budget: 4096
+      personalized: true
+      priority_focus: ["build_system", "test_structure"]
     skip_self: true # Explicitly set - don't auto-fix CI failures on bot's own PRs
+
+  test-toolkit:
+    triggers:
+      commands:
+        - /test
+    prompt:
+      template: "/test-toolkit:test {user_query}"
+      # Uses commands/test.md — same layout as pr-review-toolkit and ci-failure-toolkit
+    description: "Run a generic task via test-toolkit plugin to verify tool/skill inheritance"
+    context:
+      repomap_budget: 4096
+      personalized: false
+    skip_self: false
 
   generic:
     triggers:
@@ -56,4 +81,24 @@ workflows:
       template: "{user_query}"
       system_context: "generic.md" # Load from prompts/generic.md
     description: "Generic agent request"
+    context:
+      repomap_budget: 4096
+      personalized: false
     skip_self: false # Allow bot to respond to its own /agent commands if needed
+
+  triage-on-label:
+    triggers:
+      events:
+        - issues.labeled
+      filters:
+        label.name: "triage"
+      commands:
+        - /triage
+    prompt:
+      template: "Triage issue #{issue_number} in {repo}"
+      system_context: "triage.md"
+    description: "Triage when an issue is labeled 'triage'"
+    context:
+      repomap_budget: 1024
+      personalized: true
+      include_test_files: true

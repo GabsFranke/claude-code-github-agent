@@ -1,13 +1,13 @@
 """Sandbox worker that pulls jobs from queue and executes them in isolated workspaces."""
 
 import asyncio
-import json
 import logging
 import os
 import shutil
 import sys
 import tempfile
 import uuid
+from pathlib import Path
 
 from repo_setup import RepoSetupEngine  # noqa: E402
 from shared import (  # noqa: E402
@@ -18,10 +18,16 @@ from shared import (  # noqa: E402
     WorktreeCreationError,
     execute_git_command,
     setup_graceful_shutdown,
+    wait_for_repo_sync,
+)
+from shared.context_builder import (  # noqa: E402
+    find_priority_focus_files,
+    generate_structural_context,
 )
 from shared.logging_utils import setup_logging  # noqa: E402
-
-from .sdk_executor import execute_sandbox_request  # noqa: E402
+from shared.sdk_executor import execute_sdk  # noqa: E402
+from shared.sdk_factory import SDKOptionsBuilder  # noqa: E402
+from subagents import AGENTS  # noqa: E402
 
 # Configure logging
 setup_logging(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -30,69 +36,12 @@ logger = logging.getLogger(__name__)
 # Configure Claude Agent SDK logger to match our log level
 logging.getLogger("claude_agent_sdk").setLevel(os.getenv("LOG_LEVEL", "INFO"))
 
+# SDK retry configuration
+SDK_MAX_RETRIES = int(os.getenv("SDK_MAX_RETRIES", "3"))
+SDK_RETRY_BASE_DELAY = float(os.getenv("SDK_RETRY_BASE_DELAY", "5.0"))
+
 # Global state
 shutdown_event = asyncio.Event()
-
-
-async def ensure_repo_synced(
-    repo: str, ref: str, redis_client, github_token: str
-) -> str:
-    """Ensure bare repo is synced by waiting for completion event via pub/sub.
-
-    This function subscribes to Redis pub/sub and waits for the repo sync worker
-    to publish a completion event. No polling, no arbitrary timeouts.
-    """
-    complete_key = f"agent:sync:complete:{repo}:{ref}"
-    cache_base = "/var/cache/repos"
-    repo_dir = os.path.join(cache_base, f"{repo}.git")
-
-    # First check if already synced (fast path)
-    is_complete = await redis_client.get(complete_key)
-    if is_complete:
-        logger.info(f"Repo {repo} already synced (cached)")
-        return repo_dir
-
-    # Subscribe to completion events
-    completion_channel = "agent:sync:events"
-    pubsub = redis_client.pubsub()
-    await pubsub.subscribe(completion_channel)
-
-    logger.info(f"Waiting for sync completion event for {repo}...")
-
-    try:
-        # Wait for completion event with reasonable timeout (5 minutes for large repos)
-        timeout = 300  # 5 minutes
-        start_time = asyncio.get_event_loop().time()
-
-        async for message in pubsub.listen():
-            # Check timeout
-            if asyncio.get_event_loop().time() - start_time > timeout:
-                raise RepositorySyncError(
-                    f"Sync timeout for {repo} after {timeout}s - repo sync worker may be down"
-                )
-
-            if message["type"] == "message":
-                try:
-                    event = json.loads(message["data"])
-                    if event.get("repo") == repo and event.get("ref") == ref:
-                        if event.get("status") == "complete":
-                            logger.info(f"Received sync completion event for {repo}")
-                            return repo_dir
-                        elif event.get("status") == "error":
-                            raise RepositorySyncError(
-                                f"Repo sync failed for {repo}: {event.get('error', 'unknown error')}"
-                            )
-                except json.JSONDecodeError:
-                    logger.warning(f"Invalid JSON in sync event: {message['data']}")
-                    continue
-
-        # If we exit the loop without returning, something went wrong
-        raise RepositorySyncError(
-            f"Sync event stream ended unexpectedly for {repo} - no completion event received"
-        )
-    finally:
-        await pubsub.unsubscribe(completion_channel)
-        await pubsub.close()
 
 
 async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
@@ -105,6 +54,7 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
     """
     workspace = None
     repo_dir = None
+    builder = None
 
     try:
         # Validate job_id format for security (prevent directory traversal)
@@ -131,9 +81,7 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
         logger.info(f"Job data ref value: {job_data.get('ref', 'NOT_FOUND')}")
         logger.info(f"Setting up worktree for {repo} (ref {ref})")
 
-        repo_dir = await ensure_repo_synced(
-            repo, ref, job_queue.redis, job_data["github_token"]
-        )
+        repo_dir = await wait_for_repo_sync(repo, ref, job_queue.redis)
 
         # Create isolated workspace under /tmp — cleaned up explicitly after job
         workspace_base = tempfile.mkdtemp(
@@ -218,8 +166,14 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
         home_dir = os.path.expanduser("~")
         os.makedirs(home_dir, exist_ok=True)
         credentials_file = os.path.join(home_dir, ".git-credentials")
-        with open(credentials_file, "w", encoding="utf-8") as f:
-            f.write(f"https://x-access-token:{job_data['github_token']}@github.com\n")
+        fd = os.open(credentials_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(
+                fd,
+                f"https://x-access-token:{job_data['github_token']}@github.com\n".encode(),
+            )
+        finally:
+            os.close(fd)
 
         # Configure git user for commits (required for git commit to work)
         bot_username = os.getenv("BOT_USERNAME", "Claude Code Agent")
@@ -271,26 +225,147 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
             )
             # Don't fail the job if setup fails - agent can still work with source code
 
-        # Change to workspace directory before executing
-        original_cwd = os.getcwd()
-        os.chdir(workspace)
-
+        # Generate structural context (file tree + repomap)
+        # This is an async step outside the synchronous builder
+        file_tree_text = ""
+        repomap_text = ""
         try:
-            # Execute using shared executor function
-            response = await execute_sandbox_request(
-                prompt=job_data["prompt"],
-                github_token=job_data["github_token"],
-                repo=job_data["repo"],
-                issue_number=job_data["issue_number"],
-                user=job_data["user"],
-                auto_review=job_data.get("auto_review", False),
-                auto_triage=job_data.get("auto_triage", False),
-                workspace=workspace,  # Pass workspace explicitly
-                system_context=job_data.get("system_context"),  # Pass system context
+            # Determine personalization from workflow context
+            mentioned_files = []
+            context_budget = 4096  # Default repomap budget
+            include_test_files = True  # Default: include test files
+
+            # Get context profile from job data (set by WorkflowEngine)
+            context_profile = job_data.get("context_profile", {})
+            if context_profile:
+                context_budget = context_profile.get("repomap_budget", 4096)
+                include_test_files = context_profile.get("include_test_files", True)
+
+            # Personalize repomap toward relevant files when configured
+            workflow_name = job_data.get("workflow_name")
+            if context_profile.get("personalized", False):
+                # Strategy 1: Fetch PR changed files (works for PR-triggered workflows)
+                issue_number = job_data.get("issue_number")
+                github_token = job_data.get("github_token")
+                if issue_number and github_token:
+                    try:
+                        import httpx
+
+                        async with httpx.AsyncClient() as client:
+                            url = f"https://api.github.com/repos/{repo}/pulls/{issue_number}/files"
+                            headers = {
+                                "Authorization": f"Bearer {github_token}",
+                                "Accept": "application/vnd.github.v3+json",
+                            }
+                            resp = await client.get(url, headers=headers, timeout=10.0)
+                            if resp.status_code == 200:
+                                files = resp.json()
+                                mentioned_files = [
+                                    f["path"] for f in files if "path" in f
+                                ]
+                                logger.info(
+                                    f"Personalizing repomap toward {len(mentioned_files)} changed files"
+                                )
+                    except Exception as e:
+                        logger.debug(
+                            f"PR file fetch skipped (not a PR or API error): {e}"
+                        )
+
+                # Strategy 2: Add files matching priority_focus patterns
+                priority_focus = context_profile.get("priority_focus", [])
+                if priority_focus:
+                    focus_files = find_priority_focus_files(
+                        Path(workspace), priority_focus
+                    )
+                    mentioned_files.extend(focus_files)
+                    if focus_files:
+                        logger.info(
+                            f"Added {len(focus_files)} priority focus files "
+                            f"for areas: {priority_focus}"
+                        )
+
+            file_tree_text, repomap_text = await generate_structural_context(
+                repo_path=Path(workspace),
+                repo=repo,
+                mentioned_files=mentioned_files,
+                token_budget=context_budget,
+                include_test_files=include_test_files,
+                cache_dir=Path("/home/bot/agent-memory"),
             )
-        finally:
-            # Restore original directory
-            os.chdir(original_cwd)
+            logger.info(
+                f"Generated structural context: "
+                f"file_tree={len(file_tree_text)} chars, "
+                f"repomap={len(repomap_text)} chars"
+            )
+        except Exception as e:
+            logger.warning(
+                f"Structural context generation failed, continuing without: {e}",
+                exc_info=True,
+            )
+
+        # Build SDK options using the factory builder
+        model = os.getenv("ANTHROPIC_DEFAULT_SONNET_MODEL", "claude-sonnet-4-20250514")
+        github_token = job_data["github_token"]
+        workflow_name = job_data.get("workflow_name")
+        system_context = job_data.get("system_context")
+        claude_md = job_data.get("claude_md")
+        memory_index = job_data.get("memory_index")
+
+        # Inject GitHub token for tools/plugins to use
+        os.environ["GITHUB_TOKEN"] = github_token
+
+        # Log token availability for debugging (length only, no partial tokens)
+        if github_token:
+            logger.info(f"GitHub token available: {len(github_token)} characters")
+        else:
+            logger.warning("No GitHub token provided to sandbox executor")
+
+        # Start with base configuration
+        builder = SDKOptionsBuilder(cwd=workspace).with_model(model)
+
+        # Add MCP servers conditionally
+        if github_token:
+            builder.with_github_mcp(github_token).with_github_actions_mcp(github_token)
+
+        builder.with_memory_mcp(repo)
+        builder.with_codebase_tools(workspace)
+        builder.with_semantic_search(repo)
+
+        # Get parent span ID for trace linking (if enabled)
+        parent_span_id = job_data.get("parent_span_id")
+
+        # Build final options with all sandbox-specific features
+        builder = (
+            builder.with_auto_discovered_plugins()
+            .with_full_toolset()
+            .with_agents(AGENTS)
+            .with_langfuse_hooks(parent_span_id=parent_span_id)
+            .with_transcript_staging(repo, workflow_name, ref=ref)
+            .with_writable_dir(f"/home/bot/agent-memory/{repo}/memory")
+            .with_system_prompt(system_context)  # Workflow-specific system context
+            .with_repository_context(
+                claude_md=claude_md, memory_index=memory_index
+            )  # Repository context (prepended to system prompt)
+            .with_structural_context(
+                file_tree=file_tree_text, repomap=repomap_text
+            )  # Structural context (file tree + repomap)
+        )
+
+        # Execute via centralized executor with retry
+        result = await execute_sdk(
+            prompt=job_data["prompt"],
+            options=builder.build(),
+            max_retries=SDK_MAX_RETRIES,
+            retry_base_delay=SDK_RETRY_BASE_DELAY,
+        )
+
+        response = result["response"]
+
+        # Flush buffered post-processing jobs. The SDK may fire
+        # Stop/SubagentStop hooks multiple times per session — the
+        # flush deduplicates by (transcript, event, job_type) and
+        # enqueues only the final set.
+        await builder.flush_pending_post_jobs()
 
         # Mark job as complete (agent already posted to GitHub via MCP)
         await job_queue.complete_job(
@@ -308,6 +383,14 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
 
     except Exception as e:
         import time
+
+        # Flush buffered jobs even on failure — partial sessions can
+        # still produce useful retrospection data.
+        try:
+            if builder is not None:
+                await builder.flush_pending_post_jobs()
+        except Exception as flush_err:
+            logger.error(f"Failed to flush post-processing jobs: {flush_err}")
 
         logger.error(f"Job {job_id} failed: {e}", exc_info=True)
 
@@ -339,6 +422,11 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
         )
 
     finally:
+        # CRITICAL: Clean up GITHUB_TOKEN from environment
+        if "GITHUB_TOKEN" in os.environ:
+            del os.environ["GITHUB_TOKEN"]
+            logger.debug("Cleaned up GITHUB_TOKEN from environment")
+
         # Cleanup credentials
         try:
             credentials_file = os.path.join(os.path.expanduser("~"), ".git-credentials")

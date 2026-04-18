@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 # Create non-root user early
 RUN useradd -m -u 1000 -s /bin/bash bot
@@ -17,11 +17,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     unzip \
     zip \
     sudo \
+    ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
 # The sandbox needs the shared agent definitions and shared utilities
 COPY subagents/ ./subagents/
 COPY shared/ ./shared/
+
+# Copy MCP servers
+COPY mcp_servers/ ./mcp_servers/
 
 # Copy repo_setup module for dependency installation
 COPY repo_setup/ ./repo_setup/
@@ -29,16 +33,12 @@ COPY repo_setup/ ./repo_setup/
 # Copy repo-setup.yaml configuration
 COPY repo-setup.yaml ./repo-setup.yaml
 
-# Hook scripts for Langfuse
+# Hook scripts
 COPY hooks/langfuse_hook.py /app/hooks/langfuse_hook.py
 RUN chmod +x /app/hooks/langfuse_hook.py
 
 COPY services/sandbox_executor/requirements.txt ./
 RUN pip3 install --no-cache-dir -r requirements.txt
-
-# Try to install claude-agent-sdk directly as it might be required
-# If it's a private repo, we might need a requirements.txt with the correct index
-RUN pip3 install uvicorn fastapi pydantic httpx langfuse
 
 # Sandbox Executor source code
 COPY services/sandbox_executor/ /app/services/sandbox_executor/
@@ -50,6 +50,12 @@ COPY skills/ /home/bot/.claude/skills/
 
 # Create repo cache directory and set ownership to bot user
 RUN mkdir -p /var/cache/repos && chown -R bot:bot /var/cache/repos
+
+# Create agent memory directory structure and set ownership to bot user
+RUN mkdir -p /home/bot/.claude/projects && chown -R bot:bot /home/bot/.claude/projects
+
+# Create agent memory directory and transcript staging directory
+RUN mkdir -p /home/bot/agent-memory /home/bot/transcripts && chown -R bot:bot /home/bot/agent-memory /home/bot/transcripts
 
 # Set ownership to bot user
 RUN chown -R bot:bot /app /home/bot/.claude
@@ -64,7 +70,6 @@ ENV USER=bot
 USER bot
 
 WORKDIR /app
-EXPOSE 8000
 
-# Run uvicorn using the top-level module path so Python can find both 'services' and 'subagents'
-CMD ["uvicorn", "services.sandbox_executor.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Default command runs the sandbox worker (docker-compose overrides this)
+CMD ["python", "-m", "services.sandbox_executor.sandbox_worker"]
