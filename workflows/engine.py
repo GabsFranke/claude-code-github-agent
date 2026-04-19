@@ -23,14 +23,28 @@ class PromptConfig(BaseModel):
     )
 
 
+class EventTrigger(BaseModel):
+    """A single event trigger with optional per-event filters."""
+
+    event: str = Field(..., description="GitHub event trigger (e.g., 'pull_request.opened')")
+    filters: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Payload field filters specific to this event. "
+        "Overrides workflow-level filters when present.",
+    )
+
+
 class TriggersConfig(BaseModel):
     """Trigger configuration for a workflow."""
 
-    events: list[str] = Field(default_factory=list, description="GitHub event triggers")
+    events: list[str | EventTrigger] = Field(
+        default_factory=list, description="GitHub event triggers"
+    )
     commands: list[str] = Field(default_factory=list, description="Command triggers")
     filters: dict[str, Any] = Field(
         default_factory=dict,
         description="Payload field filters (dot-path: expected_value). "
+        "Applied to events without per-event filters. "
         "All filters must match for the workflow to trigger.",
     )
 
@@ -220,12 +234,19 @@ class WorkflowEngine:
         # Build lookup tables for fast routing
         self._event_map: dict[str, str] = {}
         self._command_map: dict[str, str] = {}
+        self._event_filters: dict[tuple[str, str], dict[str, Any]] = {}
 
         for workflow_name, workflow in self.workflows.items():
-            # Map events to workflows
-            for event in workflow.triggers.events:
-                self._event_map[event] = workflow_name
-                logger.debug(f"Mapped event '{event}' -> workflow '{workflow_name}'")
+            # Map events to workflows, normalizing to EventTrigger
+            for entry in workflow.triggers.events:
+                if isinstance(entry, str):
+                    trigger = EventTrigger(event=entry)
+                else:
+                    trigger = entry
+                self._event_map[trigger.event] = workflow_name
+                if trigger.filters:
+                    self._event_filters[(workflow_name, trigger.event)] = trigger.filters
+                logger.debug(f"Mapped event '{trigger.event}' -> workflow '{workflow_name}'")
 
             # Map commands to workflows
             for command in workflow.triggers.commands:
@@ -302,16 +323,25 @@ class WorkflowEngine:
         """
         return self._command_map.get(command)
 
-    def check_filters(self, workflow_name: str, payload: dict) -> bool:
+    def check_filters(
+        self,
+        workflow_name: str,
+        payload: dict,
+        event_key: str | None = None,
+    ) -> bool:
         """Check if a payload matches the workflow's declarative filters.
 
-        Each filter is a dot-path key and expected value. If the expected
-        value is a list, the actual value must be in that list. Otherwise
-        exact equality is checked. All filters must pass (AND logic).
+        Per-event filters (stored in _event_filters) take precedence over
+        workflow-level triggers.filters. Each filter is a dot-path key and
+        expected value. If the expected value is a list, the actual value
+        must be in that list. Otherwise exact equality is checked.
+        All filters must pass (AND logic).
 
         Args:
             workflow_name: Name of the workflow.
             payload: The parsed webhook payload dict.
+            event_key: The matched event key (e.g., "pull_request.opened").
+                When provided, per-event filters are checked first.
 
         Returns:
             True if all filters match (or no filters defined), False otherwise.
@@ -319,7 +349,12 @@ class WorkflowEngine:
         if workflow_name not in self.workflows:
             return False
 
-        filters = self.workflows[workflow_name].triggers.filters
+        # Per-event filters take precedence
+        if event_key and (workflow_name, event_key) in self._event_filters:
+            filters = self._event_filters[(workflow_name, event_key)]
+        else:
+            filters = self.workflows[workflow_name].triggers.filters
+
         if not filters:
             return True
 

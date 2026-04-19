@@ -68,7 +68,13 @@ class TestWorkflowEngine:
             "workflows": {
                 "review-pr": {
                     "triggers": {
-                        "events": ["pull_request.opened"],
+                        "events": [
+                            {"event": "pull_request.opened"},
+                            {
+                                "event": "pull_request.labeled",
+                                "filters": {"label.name": ["review"]},
+                            },
+                        ],
                         "commands": ["/review", "/pr-review"],
                     },
                     "prompt": {
@@ -79,7 +85,7 @@ class TestWorkflowEngine:
                 },
                 "triage-issue": {
                     "triggers": {
-                        "events": ["issues.opened"],
+                        "events": [{"event": "issues.opened"}],
                         "commands": ["/triage"],
                     },
                     "prompt": {
@@ -598,42 +604,60 @@ class TestCheckFilters:
             "workflows": {
                 "fix-ci": {
                     "triggers": {
-                        "events": ["workflow_job.completed"],
-                        "filters": {"workflow_job.conclusion": "failure"},
+                        "events": [
+                            {
+                                "event": "workflow_job.completed",
+                                "filters": {"workflow_job.conclusion": "failure"},
+                            }
+                        ],
                         "commands": ["/fix-ci"],
                     },
                     "prompt": {"template": "fix {repo}"},
                 },
                 "label-review": {
                     "triggers": {
-                        "events": ["label.created"],
-                        "filters": {"label.name": "review"},
+                        "events": [
+                            {
+                                "event": "label.created",
+                                "filters": {"label.name": "review"},
+                            }
+                        ],
                         "commands": ["/label-review"],
                     },
                     "prompt": {"template": "label {repo}"},
                 },
                 "multi-filter": {
                     "triggers": {
-                        "events": ["workflow_job.completed"],
-                        "filters": {
-                            "workflow_job.conclusion": "failure",
-                            "workflow_job.head_branch": "develop",
-                        },
+                        "events": [
+                            {
+                                "event": "workflow_job.completed",
+                                "filters": {
+                                    "workflow_job.conclusion": "failure",
+                                    "workflow_job.head_branch": "develop",
+                                },
+                            }
+                        ],
                         "commands": ["/multi"],
                     },
                     "prompt": {"template": "multi {repo}"},
                 },
                 "list-filter": {
                     "triggers": {
-                        "events": ["label.created"],
-                        "filters": {"label.name": ["bug", "review", "enhancement"]},
+                        "events": [
+                            {
+                                "event": "label.created",
+                                "filters": {
+                                    "label.name": ["bug", "review", "enhancement"]
+                                },
+                            }
+                        ],
                         "commands": ["/list-filter"],
                     },
                     "prompt": {"template": "list {repo}"},
                 },
                 "no-filter": {
                     "triggers": {
-                        "events": ["issues.opened"],
+                        "events": [{"event": "issues.opened"}],
                         "commands": ["/no-filter"],
                     },
                     "prompt": {"template": "nofilter {repo}"},
@@ -650,19 +674,34 @@ class TestCheckFilters:
         payload = {
             "workflow_job": {"conclusion": "failure", "head_branch": "main"},
         }
-        assert engine_with_filters.check_filters("fix-ci", payload) is True
+        assert (
+            engine_with_filters.check_filters(
+                "fix-ci", payload, "workflow_job.completed"
+            )
+            is True
+        )
 
     def test_single_filter_no_match(self, engine_with_filters):
         """Payload not matching a single filter is rejected."""
         payload = {
             "workflow_job": {"conclusion": "success", "head_branch": "main"},
         }
-        assert engine_with_filters.check_filters("fix-ci", payload) is False
+        assert (
+            engine_with_filters.check_filters(
+                "fix-ci", payload, "workflow_job.completed"
+            )
+            is False
+        )
 
     def test_filter_missing_field(self, engine_with_filters):
         """Payload missing the filtered field is rejected."""
         payload = {"workflow_job": {}}
-        assert engine_with_filters.check_filters("fix-ci", payload) is False
+        assert (
+            engine_with_filters.check_filters(
+                "fix-ci", payload, "workflow_job.completed"
+            )
+            is False
+        )
 
     def test_no_filters_always_passes(self, engine_with_filters):
         """Workflow without filters always passes."""
@@ -681,7 +720,12 @@ class TestCheckFilters:
                 "head_branch": "develop",
             },
         }
-        assert engine_with_filters.check_filters("multi-filter", payload) is True
+        assert (
+            engine_with_filters.check_filters(
+                "multi-filter", payload, "workflow_job.completed"
+            )
+            is True
+        )
 
     def test_multiple_filters_partial_match(self, engine_with_filters):
         """If one filter fails, the whole check fails."""
@@ -691,17 +735,28 @@ class TestCheckFilters:
                 "head_branch": "main",
             },
         }
-        assert engine_with_filters.check_filters("multi-filter", payload) is False
+        assert (
+            engine_with_filters.check_filters(
+                "multi-filter", payload, "workflow_job.completed"
+            )
+            is False
+        )
 
     def test_list_filter_value_matches(self, engine_with_filters):
         """Filter with list value matches when actual is in the list."""
         payload = {"label": {"name": "bug"}}
-        assert engine_with_filters.check_filters("list-filter", payload) is True
+        assert (
+            engine_with_filters.check_filters("list-filter", payload, "label.created")
+            is True
+        )
 
     def test_list_filter_value_no_match(self, engine_with_filters):
         """Filter with list value rejects when actual is not in list."""
         payload = {"label": {"name": "wontfix"}}
-        assert engine_with_filters.check_filters("list-filter", payload) is False
+        assert (
+            engine_with_filters.check_filters("list-filter", payload, "label.created")
+            is False
+        )
 
     def test_unknown_workflow_returns_false(self, engine_with_filters):
         """Unknown workflow name returns False."""
@@ -710,7 +765,134 @@ class TestCheckFilters:
     def test_label_name_filter(self, engine_with_filters):
         """Filter on label.name for the review-on-label workflow."""
         payload = {"label": {"name": "review"}}
-        assert engine_with_filters.check_filters("label-review", payload) is True
+        assert (
+            engine_with_filters.check_filters("label-review", payload, "label.created")
+            is True
+        )
 
         payload = {"label": {"name": "enhancement"}}
-        assert engine_with_filters.check_filters("label-review", payload) is False
+        assert (
+            engine_with_filters.check_filters("label-review", payload, "label.created")
+            is False
+        )
+
+
+class TestPerEventFilters:
+    """Test per-event filter support with structured EventTrigger entries."""
+
+    @pytest.fixture
+    def engine_per_event(self, tmp_path):
+        """Engine with per-event filters on some events."""
+        workflows_yaml = {
+            "workflows": {
+                "review-pr": {
+                    "triggers": {
+                        "events": [
+                            {"event": "pull_request.opened"},
+                            {
+                                "event": "pull_request.labeled",
+                                "filters": {"label.name": ["review", "pr-review"]},
+                            },
+                        ],
+                        "commands": ["/review"],
+                    },
+                    "prompt": {"template": "review {repo} {issue_number}"},
+                },
+                "mixed-format": {
+                    "triggers": {
+                        "events": [
+                            "issues.opened",
+                            {
+                                "event": "issues.labeled",
+                                "filters": {"label.name": "bug"},
+                            },
+                        ],
+                        "commands": ["/mixed"],
+                    },
+                    "prompt": {"template": "mixed {repo}"},
+                },
+            }
+        }
+        workflow_file = tmp_path / "workflows.yaml"
+        with open(workflow_file, "w", encoding="utf-8") as f:
+            yaml.dump(workflows_yaml, f)
+        return WorkflowEngine(workflow_file)
+
+    def test_event_without_filters_passes(self, engine_per_event):
+        """Event with no per-event filters always passes."""
+        payload = {"action": "opened"}
+        assert (
+            engine_per_event.check_filters("review-pr", payload, "pull_request.opened")
+            is True
+        )
+
+    def test_per_event_filter_matches(self, engine_per_event):
+        """Per-event filter matching the payload passes."""
+        payload = {"label": {"name": "review"}}
+        assert (
+            engine_per_event.check_filters("review-pr", payload, "pull_request.labeled")
+            is True
+        )
+
+    def test_per_event_filter_no_match(self, engine_per_event):
+        """Per-event filter rejecting non-matching payload."""
+        payload = {"label": {"name": "wontfix"}}
+        assert (
+            engine_per_event.check_filters("review-pr", payload, "pull_request.labeled")
+            is False
+        )
+
+    def test_event_map_has_both_events(self, engine_per_event):
+        """Both events are in the event map."""
+        assert engine_per_event._event_map["pull_request.opened"] == "review-pr"
+        assert engine_per_event._event_map["pull_request.labeled"] == "review-pr"
+
+    def test_per_event_filters_stored(self, engine_per_event):
+        """Only the labeled event has per-event filters stored."""
+        assert ("review-pr", "pull_request.labeled") in engine_per_event._event_filters
+        assert (
+            "review-pr",
+            "pull_request.opened",
+        ) not in engine_per_event._event_filters
+
+    def test_mixed_string_and_structured_events(self, engine_per_event):
+        """Plain string and structured events coexist in the same workflow."""
+        assert engine_per_event._event_map["issues.opened"] == "mixed-format"
+        assert engine_per_event._event_map["issues.labeled"] == "mixed-format"
+        assert ("mixed-format", "issues.labeled") in engine_per_event._event_filters
+        assert ("mixed-format", "issues.opened") not in engine_per_event._event_filters
+
+    def test_mixed_string_no_filters(self, engine_per_event):
+        """Plain string event (no per-event filters) passes."""
+        payload = {"action": "opened"}
+        assert (
+            engine_per_event.check_filters("mixed-format", payload, "issues.opened")
+            is True
+        )
+
+    def test_mixed_structured_filter_matches(self, engine_per_event):
+        """Structured event filter matches in mixed-format workflow."""
+        payload = {"label": {"name": "bug"}}
+        assert (
+            engine_per_event.check_filters("mixed-format", payload, "issues.labeled")
+            is True
+        )
+
+    def test_no_event_key_falls_back_to_workflow_filters(self, engine_per_event):
+        """Without event_key, falls back to workflow-level filters (empty)."""
+        payload = {"label": {"name": "anything"}}
+        assert engine_per_event.check_filters("review-pr", payload) is True
+
+    def test_per_event_filter_with_list_value(self, engine_per_event):
+        """Per-event filter with list value works correctly."""
+        payload = {"label": {"name": "pr-review"}}
+        assert (
+            engine_per_event.check_filters("review-pr", payload, "pull_request.labeled")
+            is True
+        )
+
+        payload = {"label": {"name": "unknown"}}
+        assert (
+            engine_per_event.check_filters("review-pr", payload, "pull_request.labeled")
+            is False
+        )

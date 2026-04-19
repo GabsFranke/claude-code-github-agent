@@ -9,7 +9,10 @@ workflows:
   review-pr:
     triggers:
       events:
-        - pull_request.opened
+      - event: pull_request.opened
+      - event: pull_request.labeled
+        filters:
+          label.name: ["review", "pr-review", "review-pr"]
       commands:
         - /review
         - /pr-review
@@ -27,7 +30,7 @@ workflows:
   triage-issue:
     triggers:
       events:
-        - issues.opened
+        - event: issues.opened
       commands:
         - /triage
         - /triage-issue
@@ -43,9 +46,9 @@ workflows:
   fix-ci:
     triggers:
       events:
-        - workflow_job.completed
-      filters:
-        workflow_job.conclusion: "failure"
+        - event: workflow_job.completed
+          filters:
+            workflow_job.conclusion: "failure"
       commands:
         - /fix-ci
         - /fix-build
@@ -89,9 +92,9 @@ workflows:
   fix-review:
     triggers:
       events:
-        - pull_request.labeled
-      filters:
-        label.name: ["fix-review", "fix-it", "pr-fix"]
+        - event: pull_request.labeled
+          filters:
+            label.name: ["fix-review", "fix-it", "pr-fix"]
       commands:
         - /fix-it
     prompt:
@@ -106,9 +109,9 @@ workflows:
   triage-on-label:
     triggers:
       events:
-        - issues.labeled
-      filters:
-        label.name: "triage"
+        - event: issues.labeled
+          filters:
+            label.name: "triage"
     prompt:
       template: "Triage issue #{issue_number} in {repo}"
       system_context: "triage.md"

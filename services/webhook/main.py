@@ -195,15 +195,17 @@ async def webhook(request: Request):
             }
 
         # Check declarative payload filters (only for event triggers, not commands)
-        if not command and not workflow_engine.check_filters(workflow_name, data):
-            logger.info(
-                "Workflow '%s' filters did not match payload - ignoring",
-                workflow_name,
-            )
-            return {
-                "status": "ignored",
-                "message": f"Payload did not match filters for workflow '{workflow_name}'",
-            }
+        if not command:
+            event_key = f"{event_type}.{action}" if action else event_type
+            if not workflow_engine.check_filters(workflow_name, data, event_key):
+                logger.info(
+                    "Workflow '%s' filters did not match payload - ignoring",
+                    workflow_name,
+                )
+                return {
+                    "status": "ignored",
+                    "message": f"Payload did not match filters for workflow '{workflow_name}'",
+                }
 
         # Get user who triggered this (from extractor)
         user = fields.user
