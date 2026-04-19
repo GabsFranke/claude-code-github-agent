@@ -147,7 +147,11 @@ claude-code-github-agent/
 workflows:
   review-pr:
     triggers:
-      events: [pull_request.opened]
+      events:
+        - event: pull_request.opened
+        - event: pull_request.labeled
+          filters:
+            label.name: ["review", "pr-review", "review-pr"]
       commands: [/review, /pr-review, /review-pr]
     prompt:
       template: "/pr-review-toolkit:review-pr {repo} {issue_number}"
@@ -158,7 +162,11 @@ workflows:
 
   triage-issue:
     triggers:
-      events: [issues.opened]
+      events:
+        - event: issues.opened
+        - event: issues.labeled
+          filters:
+            label.name: "triage"
       commands: [/triage, /triage-issue]
     prompt:
       template: "Triage issue #{issue_number} in {repo}"
@@ -166,9 +174,10 @@ workflows:
 
   fix-ci:
     triggers:
-      events: [workflow_job.completed]
-      filters:
-        workflow_job.conclusion: "failure"
+      events:
+        - event: workflow_job.completed
+          filters:
+            workflow_job.conclusion: "failure"
       commands: [/fix-ci, /fix-build, /fix-tests]
     prompt:
       template: "/ci-failure-toolkit:fix-ci {repo} {issue_number}"
@@ -194,9 +203,10 @@ workflows:
 
   fix-review:
     triggers:
-      events: [pull_request.labeled]
-      filters:
-        label.name: "fix-review"
+      events:
+        - event: pull_request.labeled
+          filters:
+            label.name: ["fix-review", "fix-it", "pr-fix"]
       commands: [/fix-it]
     prompt:
       template: "/pr-fix:fix-review {repo} {issue_number}"
@@ -205,16 +215,6 @@ workflows:
       personalized: true
       include_test_files: true
     skip_self: true
-
-  triage-on-label:
-    triggers:
-      events: [issues.labeled]
-      filters:
-        label.name: "triage"
-      commands: [/triage]
-    prompt:
-      template: "Triage issue #{issue_number} in {repo}"
-      system_context: "triage.md"
 ```
 
 ### Workflow Routing

@@ -20,7 +20,11 @@ A self-hosted GitHub agent that hooks into **40+ webhook events** and runs Claud
 # workflows.yaml — add new behaviors without touching code
 my-workflow:
   triggers:
-    events: [pull_request.opened, issues.labeled]
+    events:
+      - event: pull_request.opened
+      - event: issues.labeled
+        filters:
+          label.name: "bug"
     commands: [/my-command]
   prompt:
     template: "Analyze {repo} #{issue_number}"
@@ -173,7 +177,8 @@ Edit `workflows.yaml` to define new triggers and behaviors — no code changes n
 workflows:
   my-workflow:
     triggers:
-      events: [issues.opened]
+      events:
+        - event: issues.opened
       commands: [/my-command]
     prompt:
       template: "Analyze {repo} #{issue_number}"

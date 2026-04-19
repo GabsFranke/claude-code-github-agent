@@ -85,7 +85,13 @@ class TestWorkflowEngine:
                 },
                 "triage-issue": {
                     "triggers": {
-                        "events": [{"event": "issues.opened"}],
+                        "events": [
+                            {"event": "issues.opened"},
+                            {
+                                "event": "issues.labeled",
+                                "filters": {"label.name": "triage"},
+                            },
+                        ],
                         "commands": ["/triage"],
                     },
                     "prompt": {
@@ -149,6 +155,7 @@ class TestWorkflowEngine:
 
         assert engine._event_map["pull_request.opened"] == "review-pr"
         assert engine._event_map["issues.opened"] == "triage-issue"
+        assert engine._event_map["issues.labeled"] == "triage-issue"
 
     def test_command_mapping(self, temp_workflow_file):
         """Test command to workflow mapping."""

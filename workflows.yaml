@@ -31,6 +31,9 @@ workflows:
     triggers:
       events:
         - event: issues.opened
+        - event: issues.labeled
+          filters:
+            label.name: "triage"
       commands:
         - /triage
         - /triage-issue
@@ -105,18 +108,3 @@ workflows:
       personalized: true
       include_test_files: true
     skip_self: false # Allow bot's own label trigger from review-pr (loop prevented by reviewer's skip_self)
-
-  triage-on-label:
-    triggers:
-      events:
-        - event: issues.labeled
-          filters:
-            label.name: "triage"
-    prompt:
-      template: "Triage issue #{issue_number} in {repo}"
-      system_context: "triage.md"
-    description: "Triage when an issue is labeled 'triage'"
-    context:
-      repomap_budget: 1024
-      personalized: true
-      include_test_files: true
