@@ -48,9 +48,39 @@ You cannot evaluate architecture from a diff alone. **You must gather context fr
 
 ## Context Gathering (Mandatory)
 
-You cannot evaluate architecture from a diff alone. Use the `codebase-context` skill for efficient code exploration tools to understand the existing structure, trace dependencies, and find established patterns before making any assessment.
+**Step 0: Load the `codebase-context` skill via the Skill tool.** This gives you access to efficient code exploration tools. Do not skip this step.
+
+You cannot evaluate architecture from a diff alone. Use codebase tools to understand the existing structure, trace dependencies, and find established patterns before making any assessment.
 
 Also check `CLAUDE.md`, architecture docs, or `docs/` files that describe the intended architecture.
+
+## Tool Strategy
+
+Use the right tool for each task to avoid excessive sequential reading:
+
+| Task | Tool | Avoid |
+|------|------|-------|
+| Triage which files to deep-read | `read_file_summary` | Reading every file fully |
+| Find where a symbol is defined | `find_definitions` | Grep + manual scanning |
+| Trace symbol usage across codebase | `find_references` | Grep chains across directories |
+| Find code by concept/pattern | `semantic_search` | Reading files to find patterns |
+| Regex search for exact patterns | `search_codebase` | Multiple narrow Grep calls |
+
+**Batch file reads.** When you need to read multiple files, issue all Read calls in a single message (parallel). Do not read files one-by-one in consecutive turns.
+
+**Do not re-read files.** If you've already seen a file's content, refer back to it rather than reading it again.
+
+## Turn Budget
+
+Architecture review must be efficient. Start writing findings as soon as you have enough context — it is better to deliver a focused review than an exhaustive one.
+
+| PR Size | Files | Max tool calls | Start findings by turn |
+|---------|-------|---------------|----------------------|
+| Small | 1-5 | 8-12 | Turn 5 |
+| Medium | 6-20 | 15-20 | Turn 10 |
+| Large | 20+ | 20-30 | Turn 15 |
+
+If you catch yourself reading files past the turn budget, stop immediately and write findings from what you have.
 
 ## Review Dimensions
 
