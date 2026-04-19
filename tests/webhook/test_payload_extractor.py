@@ -46,6 +46,25 @@ class TestResolvePath:
         data = {"a": {"b": {"c": {"d": "deep"}}}}
         assert resolve_path(data, "a.b.c.d") == "deep"
 
+    def test_list_intermediate_returns_none(self):
+        """Return None when an intermediate value is a list (non-dict).
+
+        This documents the expected behavior for payloads where a path
+        segment hits a non-dict intermediate like a list.
+        """
+        data = {"label": [{"name": "bug"}]}
+        assert resolve_path(data, "label.name") is None
+
+    def test_int_intermediate_returns_none(self):
+        """Return None when an intermediate value is an int (non-dict)."""
+        data = {"count": 5}
+        assert resolve_path(data, "count.something") is None
+
+    def test_string_intermediate_returns_none(self):
+        """Return None when an intermediate value is a string (non-dict)."""
+        data = {"label": "bug"}
+        assert resolve_path(data, "label.name") is None
+
 
 # ---------------------------------------------------------------------------
 # ExtractionRule / EventExtractionConfig model tests

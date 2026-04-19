@@ -46,6 +46,12 @@ class TestWorkflowContextProfiles:
         assert profile["personalized"] is True
         assert profile["priority_focus"] == ["build_system", "test_structure"]
 
+    def test_fix_review_profile(self, engine: WorkflowEngine):
+        profile = engine.get_context_profile("fix-review")
+        assert profile["repomap_budget"] == 4096
+        assert profile["personalized"] is True
+        assert profile["include_test_files"] is True
+
     def test_triage_issue_profile(self, engine: WorkflowEngine):
         profile = engine.get_context_profile("triage-issue")
         assert profile["repomap_budget"] == 1024
