@@ -31,6 +31,8 @@ Review unstaged changes from `git diff`. The user may specify different files or
 
 Do not review code in isolation. Use the `codebase-context` skill for efficient code exploration tools before evaluating changes. This prevents false positives (flagging something as non-compliant when it follows established patterns) and catches real issues (missing usage of existing utilities, breaking changes to public APIs).
 
+**File triage strategy:** Before reading a file in full, use `read_file_summary` to get an AST-extracted overview at ~15% token cost. Only deep-read files where the diff references complex logic that needs full context. For checking how a symbol is used or where it flows, use `find_references` instead of reading files to search manually.
+
 Always check `CLAUDE.md` and any project-level configuration for coding standards before evaluating compliance.
 
 ## Core Review Responsibilities
@@ -60,9 +62,11 @@ You have a limited number of turns. Prioritize producing output over exhaustive 
 1. **Read strategically**: Use `git diff` to identify which files matter most. Focus your deep reading on the highest-risk changes. Avoid reading the same file multiple times at small offsets — read larger chunks (200+ lines) instead.
 2. **Set a reading budget**: Allocate no more than 60% of your turns to reading and analysis. Reserve the rest for synthesizing and delivering findings.
 3. **Deliver partial results**: If you've found issues but haven't reviewed every file, produce your output with what you have. Reporting 3 high-confidence findings is better than exhausting your budget and reporting nothing.
-4. **Avoid redundant reads**: If you've already read a file section, use Grep to check specific details rather than re-reading the whole file.
+4. **Avoid redundant reads**: If you've already read a file section, use Grep to check specific details rather than re-reading the whole file. If you need to check another section of a file you've already partially read, use Grep with a targeted pattern instead of calling Read again at a different offset.
 
 **If you've spent more than ~15 turns on reading without producing output, stop and deliver what you have.**
+
+**Experimental verification** (running Python/JS snippets to test library behavior) is valid but should be a last resort. Only do this when documentation is unclear and the behavior directly impacts a finding. Always write multi-line scripts — never try to fit decorators or complex syntax on a single `python3 -c` line, as this wastes turns on syntax errors.
 
 ## Output Format
 
