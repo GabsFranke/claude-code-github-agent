@@ -483,7 +483,7 @@ workflows:
   my-workflow:
     triggers:
       events:
-        - issues.opened
+        - event: issues.opened
       commands:
         - /my-command
     prompt:

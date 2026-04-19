@@ -20,7 +20,11 @@ A self-hosted GitHub agent that hooks into **40+ webhook events** and runs Claud
 # workflows.yaml — add new behaviors without touching code
 my-workflow:
   triggers:
-    events: [pull_request.opened, issues.labeled]
+    events:
+      - event: pull_request.opened
+      - event: issues.labeled
+        filters:
+          label.name: "bug"
     commands: [/my-command]
   prompt:
     template: "Analyze {repo} #{issue_number}"
@@ -62,6 +66,7 @@ The agent runs Claude SDK with the full Claude Code feature set:
 ### Prerequisites
 
 - [Docker](https://docs.docker.com/get-docker/) and Docker Compose
+- [Make](https://www.gnu.org/software/make/) (or use `docker compose` commands directly below)
 - [GitHub App](https://github.com/settings/apps/new) (see setup below)
 - Anthropic-compatible API key (Anthropic, Z.AI, Vertex AI, etc.)
 - ngrok or similar tunnel (for local webhook testing)
@@ -98,6 +103,24 @@ cp repo-setup.example.yaml repo-setup.yaml  # Edit Per-repo dependency setup (op
 ```
 
 ```bash
+# Build, start services, and open ngrok tunnel
+make start
+
+# Or step by step:
+make build    # Build all Docker images
+make up       # Start all services (detached)
+make ngrok    # Open ngrok tunnel to webhook on port 10000
+
+# Minimal setup (no Langfuse)
+make up-minimal
+```
+
+Run `make help` to see all available targets. Service logs are written to `./logs/` per service — use `tail -f logs/webhook.log` or `make logs` to follow along.
+
+<details>
+<summary>Using docker compose directly</summary>
+
+```bash
 # Minimal setup
 docker-compose -f docker-compose.minimal.yml up --build -d
 
@@ -105,7 +128,7 @@ docker-compose -f docker-compose.minimal.yml up --build -d
 docker-compose up --build -d
 ```
 
-That's it. Open a PR on a repo where the app is installed and watch it review.
+</details>
 
 ### Alternative AI Providers
 
@@ -154,7 +177,8 @@ Edit `workflows.yaml` to define new triggers and behaviors — no code changes n
 workflows:
   my-workflow:
     triggers:
-      events: [issues.opened]
+      events:
+        - event: issues.opened
       commands: [/my-command]
     prompt:
       template: "Analyze {repo} #{issue_number}"

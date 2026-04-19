@@ -144,6 +144,10 @@ async def webhook(request: Request):
                 )
             else:
                 logger.debug("Comment does not contain a command")  # type: ignore[unreachable]
+                # Note: This early return means issue_comment events
+                # without commands cannot trigger workflows. If a
+                # workflow needs to respond to all issue_comment events,
+                # this check must be moved after workflow routing.
                 return {"status": "ignored", "message": "No command found in comment"}
 
         # --- Generic extraction for all event types ---
@@ -194,16 +198,18 @@ async def webhook(request: Request):
                 "message": "No workflow configured for this event",
             }
 
-        # Check declarative payload filters
-        if not workflow_engine.check_filters(workflow_name, data):
-            logger.info(
-                "Workflow '%s' filters did not match payload - ignoring",
-                workflow_name,
-            )
-            return {
-                "status": "ignored",
-                "message": f"Payload did not match filters for workflow '{workflow_name}'",
-            }
+        # Check declarative payload filters (only for event triggers, not commands)
+        if not command:
+            event_key = f"{event_type}.{action}" if action else event_type
+            if not workflow_engine.check_filters(workflow_name, data, event_key):
+                logger.info(
+                    "Workflow '%s' filters did not match payload - ignoring",
+                    workflow_name,
+                )
+                return {
+                    "status": "ignored",
+                    "message": f"Payload did not match filters for workflow '{workflow_name}'",
+                }
 
         # Get user who triggered this (from extractor)
         user = fields.user

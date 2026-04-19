@@ -9,7 +9,10 @@ workflows:
   review-pr:
     triggers:
       events:
-        - pull_request.opened
+      - event: pull_request.opened
+      - event: pull_request.labeled
+        filters:
+          label.name: ["review", "pr-review", "review-pr"]
       commands:
         - /review
         - /pr-review
@@ -27,7 +30,10 @@ workflows:
   triage-issue:
     triggers:
       events:
-        - issues.opened
+        - event: issues.opened
+        - event: issues.labeled
+          filters:
+            label.name: "triage"
       commands:
         - /triage
         - /triage-issue
@@ -43,9 +49,9 @@ workflows:
   fix-ci:
     triggers:
       events:
-        - workflow_job.completed
-      filters:
-        workflow_job.conclusion: "failure"
+        - event: workflow_job.completed
+          filters:
+            workflow_job.conclusion: "failure"
       commands:
         - /fix-ci
         - /fix-build
@@ -86,19 +92,19 @@ workflows:
       personalized: false
     skip_self: false # Allow bot to respond to its own /agent commands if needed
 
-  triage-on-label:
+  fix-review:
     triggers:
       events:
-        - issues.labeled
-      filters:
-        label.name: "triage"
+        - event: pull_request.labeled
+          filters:
+            label.name: ["fix-review", "fix-it", "pr-fix"]
       commands:
-        - /triage
+        - /fix-it
     prompt:
-      template: "Triage issue #{issue_number} in {repo}"
-      system_context: "triage.md"
-    description: "Triage when an issue is labeled 'triage'"
+      template: "/pr-fix:fix-review {repo} {issue_number}"
+    description: "Implement fixes based on PR review feedback"
     context:
-      repomap_budget: 1024
+      repomap_budget: 4096
       personalized: true
       include_test_files: true
+    skip_self: false # Allow bot's own label trigger from review-pr (loop prevented by reviewer's skip_self)

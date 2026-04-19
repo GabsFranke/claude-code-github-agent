@@ -11,11 +11,12 @@ my-workflow:
   description: "What this workflow does"
   triggers:
     events:
-      - issues.opened
+      - event: issues.opened
+      - event: issues.labeled
+        filters:
+          label.name: "bug"                # optional, exact match or list
     commands:
       - /my-command
-    filters:
-      label.name: "bug"                    # optional, exact match or list
   prompt:
     template: "Do something with {repo} #{issue_number}"
     system_context: "my-context.md"        # optional, filename from prompts/ or inline
@@ -29,9 +30,8 @@ my-workflow:
 
 | Field | Required | Default | Description |
 |-------|----------|---------|-------------|
-| `triggers.events` | At least one of events/commands | `[]` | GitHub event triggers (`event_type.action`) |
+| `triggers.events` | At least one of events/commands | `[]` | List of event entries (see below) |
 | `triggers.commands` | At least one of events/commands | `[]` | Slash command triggers |
-| `triggers.filters` | No | `{}` | Payload field filters. All must match (AND logic). Values can be a string or list |
 | `prompt.template` | Yes | — | Prompt with placeholders (`{repo}`, `{issue_number}`, `{user_query}`) or plugin invocation |
 | `prompt.system_context` | No | `None` | Agent instructions. Filename from `prompts/` or inline string |
 | `context.repomap_budget` | No | `2048` | Token budget for the repomap |
@@ -40,6 +40,27 @@ my-workflow:
 | `context.priority_focus` | No | `[]` | Focus areas for repomap ranking (e.g. `build_system`, `test_structure`) |
 | `description` | No | `""` | Human-readable description |
 | `skip_self` | No | `true` | Skip events triggered by the bot itself |
+
+### Event Entries
+
+Each entry in `triggers.events` uses the `event:` key with optional per-event `filters`:
+
+```yaml
+events:
+  - event: pull_request.opened             # no filters, always triggers
+  - event: pull_request.labeled            # only triggers when label matches
+    filters:
+      label.name: ["review", "bug"]
+```
+
+Per-event filters are scoped to that event only — different events in the same workflow can have different (or no) filters. Filters use dot-path notation to match fields in the webhook payload. All filters must match (AND logic). Values can be a string for exact match or a list for any-of matching.
+
+Plain strings are also supported for backward compatibility:
+
+```yaml
+events:
+  - pull_request.opened                    # equivalent to: event: pull_request.opened
+```
 
 ## Triggers
 
@@ -50,12 +71,27 @@ Respond to GitHub webhook events using `event_type.action`:
 ```yaml
 triggers:
   events:
-    - pull_request.opened
-    - issues.opened
-    - workflow_job.completed
+    - event: pull_request.opened
+    - event: issues.opened
+    - event: workflow_job.completed
 ```
 
 Some events have no action (e.g. `push`).
+
+#### Per-Event Filters
+
+Attach filters to specific events so different events in the same workflow can have different conditions:
+
+```yaml
+triggers:
+  events:
+    - event: pull_request.opened
+    - event: pull_request.labeled
+      filters:
+        label.name: ["review", "pr-review"]
+```
+
+When `pull_request.opened` fires, no filters are checked. When `pull_request.labeled` fires, only payloads with a matching label pass.
 
 ### Command Triggers
 
@@ -91,33 +127,29 @@ A workflow can have both event and command triggers.
 
 ### Payload Filters
 
-Restrict when a workflow triggers based on payload values. All filters must match (AND logic).
+Restrict when a workflow triggers based on payload values. Filters can be attached per-event (recommended) or at the trigger level (applies to all events without per-event filters). All filters must match (AND logic).
 
 ```yaml
-# Only trigger on CI failures
+# Per-event filters (recommended)
 triggers:
   events:
-    - workflow_job.completed
-  filters:
-    workflow_job.conclusion: "failure"
+    - event: workflow_job.completed
+      filters:
+        workflow_job.conclusion: "failure"
+    - event: issues.labeled
+      filters:
+        label.name: ["bug", "security", "critical"]       # any of these values
 
-# Only trigger for specific labels
+# Combine multiple filters on a single event (all must match)
 triggers:
   events:
-    - issues.labeled
-  filters:
-    label.name: ["bug", "security", "critical"]           # any of these values
-
-# Combine multiple filters (all must match)
-triggers:
-  events:
-    - workflow_job.completed
-  filters:
-    workflow_job.conclusion: "failure"
-    workflow_job.head_branch: "develop"                    # failure AND on develop
+    - event: workflow_job.completed
+      filters:
+        workflow_job.conclusion: "failure"
+        workflow_job.head_branch: "develop"                # failure AND on develop
 ```
 
-If no `filters` are defined, the workflow always triggers on matching events.
+If no `filters` are defined on an event entry, the workflow always triggers on that event.
 
 ## Prompts
 
@@ -166,7 +198,7 @@ workflows:
     description: "What it does"
     triggers:
       events:
-        - issues.opened
+        - event: issues.opened
       commands:
         - /my-command
     prompt:
@@ -197,10 +229,10 @@ docker-compose restart worker
 
 | Workflow | Events | Commands | Description |
 |----------|--------|----------|-------------|
-| `review-pr` | `pull_request.opened` | `/review`, `/pr-review`, `/review-pr` | Full PR review via pr-review-toolkit |
-| `triage-issue` | `issues.opened` | `/triage`, `/triage-issue` | Triage with priority and complexity assessment |
+| `review-pr` | `pull_request.opened`, `pull_request.labeled` (label: `review`, `pr-review`, `review-pr`) | `/review`, `/pr-review`, `/review-pr` | Full PR review via pr-review-toolkit |
+| `triage-issue` | `issues.opened`, `issues.labeled` (label: `triage`) | `/triage`, `/triage-issue` | Triage with priority and complexity assessment |
 | `fix-ci` | `workflow_job.completed` (failure only) | `/fix-ci`, `/fix-build`, `/fix-tests` | Analyze CI logs and push fix via ci-failure-toolkit |
-| `triage-on-label` | `issues.labeled` (label: `triage`) | `/triage` | Triage triggered by label |
+| `fix-review` | `pull_request.labeled` (label: `fix-review`) | `/fix-it` | Read review feedback and implement fixes via pr-fix plugin |
 | `test-toolkit` | — | `/test` | Generic task via test-toolkit plugin |
 | `generic` | — | `/agent` | Free-form request with natural language |
 
@@ -214,10 +246,10 @@ Only trigger on CI failures on specific branches:
 fix-ci-develop:
   triggers:
     events:
-      - workflow_job.completed
-    filters:
-      workflow_job.conclusion: "failure"
-      workflow_job.head_branch: "develop"
+      - event: workflow_job.completed
+        filters:
+          workflow_job.conclusion: "failure"
+          workflow_job.head_branch: "develop"
   prompt:
     template: "/ci-failure-toolkit:fix-ci {repo} {issue_number}"
 ```
@@ -230,9 +262,27 @@ Respond to multiple actions on the same event:
 pr-updated:
   triggers:
     events:
-      - pull_request.opened
-      - pull_request.synchronize
-      - pull_request.reopened
+      - event: pull_request.opened
+      - event: pull_request.synchronize
+      - event: pull_request.reopened
+  prompt:
+    template: "/pr-review-toolkit:review-pr {repo} {issue_number}"
+```
+
+### Mixed Filtered and Unfiltered Events
+
+One workflow with both filtered and unfiltered event triggers:
+
+```yaml
+review-pr:
+  triggers:
+    events:
+      - event: pull_request.opened
+      - event: pull_request.labeled
+        filters:
+          label.name: ["review", "pr-review"]
+    commands:
+      - /review
   prompt:
     template: "/pr-review-toolkit:review-pr {repo} {issue_number}"
 ```

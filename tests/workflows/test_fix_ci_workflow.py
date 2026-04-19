@@ -243,9 +243,15 @@ class TestFixCIWorkflowValidation:
         assert "events" in triggers
         assert "commands" in triggers
 
-        # Should include workflow_job.completed event
+        # Should include workflow_job.completed event (may be plain string or dict)
+        event_names = []
+        for e in triggers["events"]:
+            if isinstance(e, dict):
+                event_names.append(e["event"])
+            else:
+                event_names.append(e)
         assert (
-            "workflow_job.completed" in triggers["events"]
+            "workflow_job.completed" in event_names
         ), "fix-ci workflow must include 'workflow_job.completed' in events triggers"
 
         # Should include command aliases

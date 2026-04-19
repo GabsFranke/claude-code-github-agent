@@ -147,7 +147,11 @@ claude-code-github-agent/
 workflows:
   review-pr:
     triggers:
-      events: [pull_request.opened]
+      events:
+        - event: pull_request.opened
+        - event: pull_request.labeled
+          filters:
+            label.name: ["review", "pr-review", "review-pr"]
       commands: [/review, /pr-review, /review-pr]
     prompt:
       template: "/pr-review-toolkit:review-pr {repo} {issue_number}"
@@ -158,7 +162,11 @@ workflows:
 
   triage-issue:
     triggers:
-      events: [issues.opened]
+      events:
+        - event: issues.opened
+        - event: issues.labeled
+          filters:
+            label.name: "triage"
       commands: [/triage, /triage-issue]
     prompt:
       template: "Triage issue #{issue_number} in {repo}"
@@ -166,9 +174,10 @@ workflows:
 
   fix-ci:
     triggers:
-      events: [workflow_job.completed]
-      filters:
-        workflow_job.conclusion: "failure"
+      events:
+        - event: workflow_job.completed
+          filters:
+            workflow_job.conclusion: "failure"
       commands: [/fix-ci, /fix-build, /fix-tests]
     prompt:
       template: "/ci-failure-toolkit:fix-ci {repo} {issue_number}"
@@ -192,15 +201,20 @@ workflows:
       system_context: "generic.md"
     skip_self: false
 
-  triage-on-label:
+  fix-review:
     triggers:
-      events: [issues.labeled]
-      filters:
-        label.name: "triage"
-      commands: [/triage]
+      events:
+        - event: pull_request.labeled
+          filters:
+            label.name: ["fix-review", "fix-it", "pr-fix"]
+      commands: [/fix-it]
     prompt:
-      template: "Triage issue #{issue_number} in {repo}"
-      system_context: "triage.md"
+      template: "/pr-fix:fix-review {repo} {issue_number}"
+    context:
+      repomap_budget: 4096
+      personalized: true
+      include_test_files: true
+    skip_self: true
 ```
 
 ### Workflow Routing
@@ -642,6 +656,7 @@ Each plugin follows the Claude Code plugin structure (`.claude-plugin/plugin.jso
 | `pr-review-toolkit` | PR review workflow | code-reviewer, code-architecture-reviewer, code-simplifier, comment-analyzer, pr-test-analyzer, silent-failure-hunter, type-design-analyzer | `review-pr` |
 | `ci-failure-toolkit` | CI failure analysis | deploy-failure-analyzer, test-failure-analyzer, build-failure-analyzer, lint-failure-analyzer | `fix-ci` |
 | `test-toolkit` | Generic task testing | generic-worker | `test` |
+| `pr-fix` | PR review feedback fixes | — | `fix-review` |
 | `retrospector` | Self-improvement analysis | — | `retrospect` |
 
 Plugins are auto-discovered from `~/.claude/plugins/` at SDK build time via `SDKOptionsBuilder.with_auto_discovered_plugins()`.
@@ -733,6 +748,17 @@ Plugins are auto-discovered from `~/.claude/plugins/` at SDK build time via `SDK
 4. Sandbox worker executes CI failure analysis with `ci-failure-toolkit` plugin
 5. Agent analyzes CI logs via GitHub Actions MCP, identifies root cause
 6. Agent creates branch, pushes fix, opens PR
+
+### Review Feedback Fix
+
+1. Developer comments `/fix-it` or adds `fix-review` label on a reviewed PR
+2. Webhook matches to `fix-review` workflow (command or `pull_request.labeled` + label filter)
+3. Sandbox worker creates worktree from PR head ref
+4. Agent reads all review feedback (reviews, inline comments, conversation) via GitHub MCP
+5. Agent parses findings, deduplicates, builds fix plan
+6. Agent delegates fix implementation to subagents via Agent tool
+7. Agent creates PR targeting the original PR's feature branch
+8. Agent posts summary comment on the original PR
 
 ### Manual Command
 
