@@ -3,12 +3,14 @@
 import asyncio
 import logging
 import os
+import re
 from typing import TYPE_CHECKING, Literal, Optional
 
 import httpx
 from langfuse import Langfuse
 
 from shared import GitHubAuthService, JobQueue
+from shared.session_store import SessionStore, resolve_thread_type
 from workflows import WorkflowEngine
 
 from .repository_context_loader import RepositoryContextLoader
@@ -17,6 +19,34 @@ if TYPE_CHECKING:
     from shared import HealthChecker, MultiRateLimiter
 
 logger = logging.getLogger(__name__)
+
+_SESSION_FLAG_RE = re.compile(
+    r"^\s*/\S+\s+(-c|-f|--continue|--fork|--new)?\s*(.*)",
+)
+
+
+def _parse_session_flag(user_query: str) -> str:
+    """Extract session continuation flag from user query.
+
+    Returns:
+        ``"resume"`` for ``-c`` / ``--continue``,
+        ``"fork"`` for ``-f`` / ``--fork``,
+        ``"new"`` for ``--new``,
+        ``""`` if no flag found.
+    """
+    if not user_query:
+        return ""
+    m = _SESSION_FLAG_RE.match(user_query)
+    if not m:
+        return ""  # type: ignore[unreachable]
+    flag = (m.group(1) or "").strip()
+    if flag in ("-c", "--continue"):
+        return "resume"
+    if flag in ("-f", "--fork"):
+        return "fork"
+    if flag == "--new":
+        return "new"
+    return ""
 
 
 # Type alias for process return value
@@ -215,6 +245,69 @@ class RequestProcessor:
         # Get context profile for structural context generation
         context_profile = self.workflow_engine.get_context_profile(workflow_name)
 
+        # Get conversation config and resolve session
+        conversation_config = self.workflow_engine.get_conversation_config(
+            workflow_name
+        )
+        session_mode = "new"
+        session_id = None
+        conversation_summary = None
+        thread_type = resolve_thread_type(event_data)
+
+        if conversation_config.persist and issue_number:
+            try:
+                session_store = SessionStore(self.job_queue.redis)
+                existing_session = await session_store.get_session(
+                    repo=repo,
+                    thread_type=thread_type,
+                    thread_id=str(issue_number),
+                    workflow=workflow_name,
+                )
+                if existing_session:
+                    # Check if user explicitly requested continuation
+                    session_flag = _parse_session_flag(user_query)
+                    if session_flag == "resume":
+                        session_mode = "resume"
+                        session_id = existing_session.session_id
+                    elif session_flag == "fork":
+                        session_mode = "fork"
+                        session_id = existing_session.session_id
+                    elif session_flag == "new":
+                        session_mode = "new"
+                    elif conversation_config.auto_continue:
+                        # Auto-continue for follow-up replies
+                        session_mode = "resume"
+                        session_id = existing_session.session_id
+
+                    # Check turn limit
+                    if (
+                        session_mode != "new"
+                        and existing_session.turn_count >= conversation_config.max_turns
+                    ):
+                        logger.info(
+                            f"Session reached turn limit "
+                            f"({existing_session.turn_count}/{conversation_config.max_turns}), "
+                            f"starting fresh"
+                        )
+                        session_mode = "new"
+                        session_id = None
+
+                    # Provide summary as fallback
+                    if (
+                        session_mode in ("resume", "continue")
+                        and conversation_config.summary_fallback
+                        and existing_session.summary
+                    ):
+                        conversation_summary = existing_session.summary
+
+                    if session_mode != "new":
+                        logger.info(
+                            f"Session: mode={session_mode}, "
+                            f"id={session_id[:8] if session_id else 'N/A'}..."
+                        )
+            except Exception as e:
+                logger.warning(f"Session lookup failed, starting fresh: {e}")
+
         # Fetch repository context (CLAUDE.md and memory) for system prompt
         # These will be injected by the SDK factory, not prepended to user prompt
         claude_md = None
@@ -271,6 +364,19 @@ class RequestProcessor:
                 "event_data": event_data,
                 "parent_span_id": parent_span_id,  # For Langfuse trace linking
                 "context_profile": context_profile,  # Structural context config
+                # Session persistence fields
+                "session_mode": session_mode,
+                "session_id": session_id,
+                "thread_type": thread_type,
+                "thread_id": str(issue_number) if issue_number else "0",
+                "conversation_config": {
+                    "persist": conversation_config.persist,
+                    "ttl_hours": conversation_config.ttl_hours,
+                    "max_turns": conversation_config.max_turns,
+                    "auto_continue": conversation_config.auto_continue,
+                    "summary_fallback": conversation_config.summary_fallback,
+                },
+                "conversation_summary": conversation_summary,
             }
         )
 

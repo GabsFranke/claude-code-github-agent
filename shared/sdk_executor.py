@@ -174,6 +174,7 @@ async def _execute_sdk_once(
                             "num_turns": message.num_turns,
                             "duration_ms": message.duration_ms,
                             "is_error": message.is_error,
+                            "session_id": getattr(message, "session_id", None),
                         }
                         logger.info(
                             f"SDK completed - {message.num_turns} turns, "
@@ -211,5 +212,6 @@ async def _execute_sdk_once(
     return {
         "response": response,
         "messages": all_messages,
-        **result_info,
+        "session_id": result_info.get("session_id"),
+        **{k: v for k, v in result_info.items() if k != "session_id"},
     }

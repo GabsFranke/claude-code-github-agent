@@ -9,6 +9,7 @@ from typing import Any
 import yaml  # type: ignore[import-untyped]
 from pydantic import BaseModel, Field, ValidationError
 
+from shared.session_store import ConversationConfig as ConversationConfigModel
 from shared.utils import resolve_path
 
 logger = logging.getLogger(__name__)
@@ -67,6 +68,10 @@ class WorkflowConfig(BaseModel):
     context: ContextProfile = Field(
         default_factory=ContextProfile,
         description="Context profile for structural context generation",
+    )
+    conversation: ConversationConfigModel = Field(
+        default_factory=ConversationConfigModel,
+        description="Conversation persistence settings",
     )
 
 
@@ -507,6 +512,19 @@ class WorkflowEngine:
             "include_test_files": profile.include_test_files,
             "priority_focus": profile.priority_focus,
         }
+
+    def get_conversation_config(self, workflow_name: str) -> ConversationConfigModel:
+        """Get the conversation persistence config for a workflow.
+
+        Args:
+            workflow_name: Name of the workflow.
+
+        Returns:
+            ConversationConfigModel instance (defaults if workflow not found).
+        """
+        if workflow_name not in self.workflows:
+            return ConversationConfigModel()
+        return self.workflows[workflow_name].conversation
 
 
 @lru_cache(maxsize=1)
