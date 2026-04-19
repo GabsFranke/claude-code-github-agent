@@ -319,6 +319,7 @@ class SDKOptionsBuilder:
         return self.with_tools(
             "Task",
             "Skill",
+            "Agent",
             "Bash",
             "Read",
             "Write",

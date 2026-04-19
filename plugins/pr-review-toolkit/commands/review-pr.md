@@ -154,6 +154,19 @@ Review agents have access to efficient search tools for code exploration (docume
 
    **If MCP not available:** Display results in console for manual review
 
+8. **Add `fix-review` Label**
+
+   After posting the review, add the `fix-review` label to the PR. This marks the PR as reviewed and makes it easy to trigger automated fix implementation via the `/fix-it` command or the label itself.
+
+   ```
+   mcp__github__add_issue_labels({
+       owner: <owner>,
+       repo: <repo>,
+       issue_number: <pr_number>,
+       labels: ["fix-review"]
+   })
+   ```
+
 ## Usage Examples:
 
 **Full review (default):**

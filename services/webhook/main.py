@@ -194,8 +194,8 @@ async def webhook(request: Request):
                 "message": "No workflow configured for this event",
             }
 
-        # Check declarative payload filters
-        if not workflow_engine.check_filters(workflow_name, data):
+        # Check declarative payload filters (only for event triggers, not commands)
+        if not command and not workflow_engine.check_filters(workflow_name, data):
             logger.info(
                 "Workflow '%s' filters did not match payload - ignoring",
                 workflow_name,

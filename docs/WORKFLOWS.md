@@ -200,6 +200,7 @@ docker-compose restart worker
 | `review-pr` | `pull_request.opened` | `/review`, `/pr-review`, `/review-pr` | Full PR review via pr-review-toolkit |
 | `triage-issue` | `issues.opened` | `/triage`, `/triage-issue` | Triage with priority and complexity assessment |
 | `fix-ci` | `workflow_job.completed` (failure only) | `/fix-ci`, `/fix-build`, `/fix-tests` | Analyze CI logs and push fix via ci-failure-toolkit |
+| `fix-review` | `pull_request.labeled` (label: `fix-review`) | `/fix-it` | Read review feedback and implement fixes via pr-fix plugin |
 | `triage-on-label` | `issues.labeled` (label: `triage`) | `/triage` | Triage triggered by label |
 | `test-toolkit` | — | `/test` | Generic task via test-toolkit plugin |
 | `generic` | — | `/agent` | Free-form request with natural language |
