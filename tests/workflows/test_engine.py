@@ -903,3 +903,72 @@ class TestPerEventFilters:
             engine_per_event.check_filters("review-pr", payload, "pull_request.labeled")
             is False
         )
+
+
+class TestEmptyDictFilters:
+    """Test that filters: {} behaves identically to absent filters (match-all)."""
+
+    @pytest.fixture
+    def engine_empty_filter(self, tmp_path):
+        """Engine with an event that has explicit filters: {}."""
+        workflows_yaml = {
+            "workflows": {
+                "explicit-empty": {
+                    "triggers": {
+                        "events": [
+                            {
+                                "event": "issues.opened",
+                                "filters": {},
+                            }
+                        ],
+                        "commands": ["/empty-filter"],
+                    },
+                    "prompt": {"template": "empty {repo}"},
+                },
+                "no-filter-key": {
+                    "triggers": {
+                        "events": [{"event": "issues.opened"}],
+                        "commands": ["/no-filter-key"],
+                    },
+                    "prompt": {"template": "nofilter {repo}"},
+                },
+            }
+        }
+        workflow_file = tmp_path / "workflows.yaml"
+        with open(workflow_file, "w", encoding="utf-8") as f:
+            yaml.dump(workflows_yaml, f)
+        return WorkflowEngine(workflow_file)
+
+    def test_explicit_empty_dict_matches_all(self, engine_empty_filter):
+        """An EventTrigger with filters: {} matches any payload."""
+        payload = {"action": "opened", "issue": {"number": 1}}
+        assert (
+            engine_empty_filter.check_filters(
+                "explicit-empty", payload, "issues.opened"
+            )
+            is True
+        )
+
+    def test_absent_filter_key_matches_all(self, engine_empty_filter):
+        """An EventTrigger with no filters key also matches any payload."""
+        payload = {"action": "opened", "issue": {"number": 1}}
+        assert (
+            engine_empty_filter.check_filters("no-filter-key", payload, "issues.opened")
+            is True
+        )
+
+    def test_empty_dict_and_absent_filter_are_equivalent(self, engine_empty_filter):
+        """Both filters: {} and missing filters key behave identically."""
+        payloads = [
+            {"action": "opened"},
+            {"action": "opened", "issue": {"number": 99}},
+            {},
+        ]
+        for payload in payloads:
+            result_explicit = engine_empty_filter.check_filters(
+                "explicit-empty", payload, "issues.opened"
+            )
+            result_absent = engine_empty_filter.check_filters(
+                "no-filter-key", payload, "issues.opened"
+            )
+            assert result_explicit == result_absent is True

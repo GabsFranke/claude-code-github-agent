@@ -215,11 +215,11 @@ services:
     environment:
       QDRANT__SERVICE__GRPC_PORT: 6334
     healthcheck:
-      test: ["CMD-SHELL", "exit 0"]
-      interval: 30s
-      timeout: 3s
-      retries: 3
-      start_period: 5s
+      test: ["CMD-SHELL", "wget --spider http://localhost:6333/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   # Background worker: chunks code, generates embeddings, stores in Qdrant
   indexing_worker:

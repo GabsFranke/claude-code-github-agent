@@ -43,7 +43,7 @@ from .queue import MessageQueue, PubSubQueue, RedisQueue, get_queue, wait_for_re
 from .rate_limiter import MultiRateLimiter, RateLimiter
 from .retry import async_retry
 from .signals import setup_graceful_shutdown
-from .utils import resolve_path
+from .utils import _MISSING, resolve_path
 
 __all__ = [
     # Config
@@ -105,6 +105,7 @@ __all__ = [
     # Signals
     "setup_graceful_shutdown",
     # Utils
+    "_MISSING",
     "resolve_path",
     # File tree
     "EXCLUDE_DIRS",

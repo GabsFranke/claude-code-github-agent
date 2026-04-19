@@ -26,7 +26,9 @@ class PromptConfig(BaseModel):
 class EventTrigger(BaseModel):
     """A single event trigger with optional per-event filters."""
 
-    event: str = Field(..., description="GitHub event trigger (e.g., 'pull_request.opened')")
+    event: str = Field(
+        ..., description="GitHub event trigger (e.g., 'pull_request.opened')"
+    )
     filters: dict[str, Any] = Field(
         default_factory=dict,
         description="Payload field filters specific to this event. "
@@ -245,8 +247,12 @@ class WorkflowEngine:
                     trigger = entry
                 self._event_map[trigger.event] = workflow_name
                 if trigger.filters:
-                    self._event_filters[(workflow_name, trigger.event)] = trigger.filters
-                logger.debug(f"Mapped event '{trigger.event}' -> workflow '{workflow_name}'")
+                    self._event_filters[(workflow_name, trigger.event)] = (
+                        trigger.filters
+                    )
+                logger.debug(
+                    f"Mapped event '{trigger.event}' -> workflow '{workflow_name}'"
+                )
 
             # Map commands to workflows
             for command in workflow.triggers.commands:
@@ -347,6 +353,11 @@ class WorkflowEngine:
             True if all filters match (or no filters defined), False otherwise.
         """
         if workflow_name not in self.workflows:
+            logger.warning(
+                "check_filters called with unknown workflow '%s' -- "
+                "config or routing bug?",
+                workflow_name,
+            )
             return False
 
         # Per-event filters take precedence
@@ -360,24 +371,21 @@ class WorkflowEngine:
 
         for dot_path, expected in filters.items():
             actual = resolve_path(payload, dot_path)
-            if isinstance(expected, list):
-                if actual not in expected:
-                    logger.debug(
-                        "Filter '%s' mismatch: got %r, expected one of %s",
-                        dot_path,
-                        actual,
-                        expected,
-                    )
-                    return False
-            else:
-                if actual != expected:
-                    logger.debug(
-                        "Filter '%s' mismatch: got %r, expected %r",
-                        dot_path,
-                        actual,
-                        expected,
-                    )
-                    return False
+            expected_list = expected if isinstance(expected, list) else [expected]
+            if actual not in expected_list:
+                logger.info(
+                    "Filter '%s' mismatch: got %r, expected one of %s",
+                    dot_path,
+                    actual,
+                    expected_list,
+                )
+                logger.debug(
+                    "Full filter context: workflow=%s event_key=%s payload_keys=%s",
+                    workflow_name,
+                    event_key,
+                    list(payload.keys()),
+                )
+                return False
 
         return True
 
@@ -535,16 +543,10 @@ class WorkflowEngine:
         if workflow_name not in self.workflows:
             return {}
 
-        profile = self.workflows[workflow_name].context
-        return {
-            "repomap_budget": profile.repomap_budget,
-            "personalized": profile.personalized,
-            "include_test_files": profile.include_test_files,
-            "priority_focus": profile.priority_focus,
-        }
+        return self.workflows[workflow_name].context.model_dump()
 
 
-@lru_cache(maxsize=1)
+@lru_cache(maxsize=None)
 def get_workflow_engine(config_path: str | None = None) -> WorkflowEngine:
     """Get cached WorkflowEngine instance (singleton per config path).
 

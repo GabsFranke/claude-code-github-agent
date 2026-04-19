@@ -144,6 +144,10 @@ async def webhook(request: Request):
                 )
             else:
                 logger.debug("Comment does not contain a command")  # type: ignore[unreachable]
+                # Note: This early return means issue_comment events
+                # without commands cannot trigger workflows. If a
+                # workflow needs to respond to all issue_comment events,
+                # this check must be moved after workflow routing.
                 return {"status": "ignored", "message": "No command found in comment"}
 
         # --- Generic extraction for all event types ---

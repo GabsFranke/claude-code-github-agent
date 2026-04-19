@@ -49,7 +49,8 @@ class SDKOptionsBuilder:
 
             cfg = IndexingConfig()
             return cfg.is_enabled, cfg.qdrant_url, cfg.gemini_api_key
-        except Exception:
+        except Exception as e:
+            logger.warning("Failed to resolve indexing config: %s", e)
             return (
                 os.getenv("INDEXING_ENABLED", "false").lower() == "true",
                 os.getenv("QDRANT_URL") or "",
