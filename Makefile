@@ -1,4 +1,6 @@
-.PHONY: help build up down restart logs logs-all lint lint-fix test clean ngrok start
+.PHONY: help build up down restart logs logs-all logs-webhook logs-sdk ps \
+       up-minimal down-minimal lint lint-fix lint-fast test test-unit \
+       test-integration clean clean-logs prune ngrok start
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-15s\033[0m %s\n", $$1, $$2}'
