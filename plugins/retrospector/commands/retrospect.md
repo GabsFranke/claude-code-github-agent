@@ -1,6 +1,6 @@
 ---
 description: "Analyse a session transcript and improve agent instructions via a PR to develop"
-argument-hint: "<transcript_summary_path> <workflow_name> <target_repo> [num_turns] [is_error]"
+argument-hint: "<transcript_summary_path> <workflow_name> <target_repo> [num_turns] [is_error] [subagent]"
 ---
 
 # Retrospector
