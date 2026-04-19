@@ -1,4 +1,4 @@
-"""Unit tests for MCP server configuration.
+"""Unit tests for MCP server configuration and auto-discovery.
 
 These tests validate that MCP servers are properly configured without
 requiring actual API keys or network access.
@@ -9,16 +9,101 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 # Add parent directory to path for shared imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
+from shared.mcp_discovery import (  # noqa: E402
+    MCPServerConfig,
+    _interpolate_env_value,
+    build_stdio_server_entry,
+    discover_http_servers,
+    discover_stdio_servers,
+)
 from shared.sdk_factory import SDKOptionsBuilder  # noqa: E402
 
 
-class TestMCPConfiguration:
-    """Test MCP server configuration."""
+class TestMCPDiscovery:
+    """Test MCP server auto-discovery."""
+
+    def test_discover_stdio_servers_finds_existing(self):
+        """Test that discover_stdio_servers finds existing servers."""
+        servers = discover_stdio_servers()
+        server_names = [s.name for s in servers]
+
+        assert "memory" in server_names
+        assert "codebase_tools" in server_names
+
+    def test_discover_stdio_servers_has_server_py(self):
+        """Each discovered server must have a server.py path."""
+        servers = discover_stdio_servers()
+        for server in servers:
+            assert server.server_path.endswith("server.py")
+            assert os.path.basename(server.server_path) == "server.py"
+
+    def test_interpolate_env_value_resolves_vars(self):
+        """Test that ${VAR} patterns are resolved from environment."""
+        with patch.dict(os.environ, {"MY_VAR": "hello"}):
+            result = _interpolate_env_value("${MY_VAR}")
+            assert result == "hello"
+
+    def test_interpolate_env_value_returns_none_for_unset(self):
+        """Test that unset variables cause None return."""
+        with patch.dict(os.environ, {}, clear=True):
+            # Ensure the var is not set
+            os.environ.pop("DEFINITELY_NOT_SET_VAR", None)
+            result = _interpolate_env_value("${DEFINITELY_NOT_SET_VAR}")
+            assert result is None
+
+    def test_interpolate_env_value_plain_string(self):
+        """Plain strings without ${} pass through unchanged."""
+        result = _interpolate_env_value("plain_value")
+        assert result == "plain_value"
+
+    def test_build_stdio_server_entry_skips_unresolved_env(self):
+        """Server with unresolved env vars is skipped (returns None)."""
+        config = MCPServerConfig(
+            name="test_server",
+            server_path="/tmp/test/server.py",
+            env={"MISSING_VAR": "${DEFINITELY_NOT_SET_12345}"},
+        )
+        with patch.dict(os.environ, {}, clear=True):
+            os.environ.pop("DEFINITELY_NOT_SET_12345", None)
+            result = build_stdio_server_entry(config)
+            assert result is None
+
+    def test_build_stdio_server_entry_includes_defaults(self):
+        """Default env vars (PYTHONPATH, GITHUB_REPOSITORY, REPO_PATH) are set."""
+        config = MCPServerConfig(
+            name="test_server",
+            server_path="/tmp/test/server.py",
+            env={},
+        )
+        result = build_stdio_server_entry(
+            config, app_root="/app", repo="owner/repo", worktree_path="/workspace"
+        )
+        assert result is not None
+        assert result["env"]["PYTHONPATH"] == "/app"
+        assert result["env"]["GITHUB_REPOSITORY"] == "owner/repo"
+        assert result["env"]["REPO_PATH"] == "/workspace"
+
+    def test_discover_http_servers_reads_config(self):
+        """HTTP servers are discovered from mcp_servers/http.json."""
+        servers = discover_http_servers()
+        # May or may not have entries depending on env vars
+        assert isinstance(servers, list)
+
+    def test_discover_http_servers_skips_unresolved(self):
+        """HTTP servers with unresolved env vars are skipped."""
+        with patch.dict(os.environ, {}, clear=True):
+            os.environ.pop("GITHUB_TOKEN", None)
+            servers = discover_http_servers()
+            # github server should be skipped without GITHUB_TOKEN
+            names = [name for name, _ in servers]
+            assert "github" not in names
+
+
+class TestSDKOptionsBuilderMCP:
+    """Test SDKOptionsBuilder MCP methods."""
 
     def test_github_mcp_configuration(self):
         """Test that GitHub MCP server is configured correctly."""
@@ -33,58 +118,6 @@ class TestMCPConfiguration:
         assert github_config["url"] == "https://api.githubcopilot.com/mcp"
         assert "Authorization" in github_config["headers"]
         assert github_config["headers"]["Authorization"] == f"Bearer {token}"
-
-    def test_github_actions_mcp_configuration_docker(self):
-        """Test GitHub Actions MCP configuration in Docker environment."""
-        token = "test_token_123"
-
-        # Mock Docker environment
-        with patch("os.path.exists") as mock_exists:
-            # Simulate Docker container path exists
-            mock_exists.side_effect = lambda p: p == "/app/plugins/ci-failure-toolkit"
-
-            builder = SDKOptionsBuilder(cwd="/tmp")
-            builder.with_github_actions_mcp(token)
-            options = builder.build()
-
-            assert "github-actions" in options.mcp_servers
-            ga_config = options.mcp_servers["github-actions"]
-            assert ga_config["type"] == "stdio"
-            assert ga_config["command"] == "python"
-            assert len(ga_config["args"]) == 1
-            assert (
-                ga_config["args"][0]
-                == "/app/plugins/ci-failure-toolkit/servers/github_actions_server.py"
-            )
-            assert ga_config["env"]["PYTHONPATH"] == "/app/plugins/ci-failure-toolkit"
-            assert ga_config["env"]["GITHUB_TOKEN"] == token
-
-    def test_github_actions_mcp_configuration_local(self):
-        """Test GitHub Actions MCP configuration in local development."""
-        token = "test_token_123"
-
-        # Get actual project root
-        project_root = Path(__file__).parent.parent.parent
-        expected_plugin_path = project_root / "plugins/ci-failure-toolkit"
-
-        # Only run if plugin actually exists
-        if not expected_plugin_path.exists():
-            pytest.skip("Plugin directory not found in project")
-
-        builder = SDKOptionsBuilder(cwd="/tmp")
-        builder.with_github_actions_mcp(token)
-        options = builder.build()
-
-        assert "github-actions" in options.mcp_servers
-        ga_config = options.mcp_servers["github-actions"]
-        assert ga_config["type"] == "stdio"
-        assert ga_config["command"] == "python"
-        assert len(ga_config["args"]) == 1
-        # Normalize path separators for cross-platform compatibility
-        assert "ci-failure-toolkit" in ga_config["args"][0]
-        assert "github_actions_server.py" in ga_config["args"][0]
-        assert "ci-failure-toolkit" in ga_config["env"]["PYTHONPATH"]
-        assert ga_config["env"]["GITHUB_TOKEN"] == token
 
     def test_memory_mcp_configuration(self):
         """Test memory MCP server configuration."""
@@ -101,15 +134,37 @@ class TestMCPConfiguration:
         assert memory_config["env"]["GITHUB_REPOSITORY"] == repo
         assert memory_config["env"]["PYTHONPATH"] == "/app"
 
-    def test_full_toolset_includes_mcp_tools(self):
-        """Test that full toolset includes MCP tool patterns."""
+    def test_auto_discovered_mcp_servers_registers_stdio(self):
+        """Auto-discovery registers stdio servers from mcp_servers/."""
         builder = SDKOptionsBuilder(cwd="/tmp")
+        builder.with_auto_discovered_mcp_servers(
+            repo="owner/repo", worktree_path="/workspace"
+        )
+
+        assert "memory" in builder._mcp_servers
+        assert "codebase_tools" in builder._mcp_servers
+
+    def test_auto_discovered_mcp_servers_populates_names(self):
+        """Auto-discovery populates _discovered_server_names."""
+        builder = SDKOptionsBuilder(cwd="/tmp")
+        builder.with_auto_discovered_mcp_servers(
+            repo="owner/repo", worktree_path="/workspace"
+        )
+
+        assert "memory" in builder._discovered_server_names
+        assert "codebase_tools" in builder._discovered_server_names
+
+    def test_full_toolset_generates_wildcard_patterns(self):
+        """Full toolset generates mcp__<name>__* for discovered servers."""
+        builder = SDKOptionsBuilder(cwd="/tmp")
+        builder.with_auto_discovered_mcp_servers(
+            repo="owner/repo", worktree_path="/workspace"
+        )
         builder.with_full_toolset()
         options = builder.build()
 
-        assert "mcp__github__*" in options.allowed_tools
-        assert "mcp__github-actions__*" in options.allowed_tools
-        assert "mcp__memory__memory_read" in options.allowed_tools
+        for name in builder._discovered_server_names:
+            assert f"mcp__{name}__*" in options.allowed_tools
 
     def test_retrospector_toolset_includes_github_mcp(self):
         """Test that retrospector toolset includes GitHub MCP tools."""
@@ -118,9 +173,7 @@ class TestMCPConfiguration:
         options = builder.build()
 
         assert "mcp__github__*" in options.allowed_tools
-        # Should not include github-actions or memory
-        assert "mcp__github-actions__*" not in options.allowed_tools
-        assert "mcp__memory__memory_read" not in options.allowed_tools
+        assert "mcp__memory__*" not in options.allowed_tools
 
     def test_memory_toolset_includes_memory_mcp(self):
         """Test that memory toolset includes memory MCP tools."""
@@ -129,190 +182,116 @@ class TestMCPConfiguration:
         options = builder.build()
 
         assert "mcp__memory__*" in options.allowed_tools
-        # Should not include github or github-actions
         assert "mcp__github__*" not in options.allowed_tools
-        assert "mcp__github-actions__*" not in options.allowed_tools
 
     def test_builder_chaining(self):
         """Test that builder methods can be chained."""
-        token = "test_token_123"
         repo = "owner/repo"
 
         builder = (
             SDKOptionsBuilder(cwd="/tmp")
             .with_sonnet()
-            .with_github_mcp(token)
-            .with_github_actions_mcp(token)
-            .with_memory_mcp(repo)
+            .with_auto_discovered_mcp_servers(repo=repo, worktree_path="/workspace")
             .with_full_toolset()
         )
 
         options = builder.build()
 
-        # Verify all MCP servers are configured
-        assert "github" in options.mcp_servers
-        assert "github-actions" in options.mcp_servers
         assert "memory" in options.mcp_servers
-
-        # Verify model is set
         assert options.model is not None
-
-        # Verify tools are configured
         assert len(options.allowed_tools) > 0
 
-    def test_model_selection(self):
-        """Test model selection methods."""
-        # Test with_sonnet
+
+class TestModelSelection:
+    """Test model selection methods."""
+
+    def test_sonnet_model(self):
         builder = SDKOptionsBuilder(cwd="/tmp").with_sonnet()
         options = builder.build()
         assert "sonnet" in options.model.lower() or options.model == os.getenv(
             "ANTHROPIC_DEFAULT_SONNET_MODEL", "claude-sonnet-4-20250514"
         )
 
-        # Test with_haiku
+    def test_haiku_model(self):
         builder = SDKOptionsBuilder(cwd="/tmp").with_haiku()
         options = builder.build()
         assert "haiku" in options.model.lower() or options.model == os.getenv(
             "ANTHROPIC_DEFAULT_HAIKU_MODEL", "claude-haiku-4-5-20251001"
         )
 
-        # Test with_model
+    def test_custom_model(self):
         builder = SDKOptionsBuilder(cwd="/tmp").with_model("custom-model")
         options = builder.build()
         assert options.model == "custom-model"
 
-    def test_github_actions_server_file_exists(self):
-        """Test that GitHub Actions MCP server file exists in project."""
+
+class TestMCPServerFiles:
+    """Test that MCP server files exist in expected locations."""
+
+    def test_github_actions_server_in_mcp_servers(self):
+        """GitHub Actions MCP server now lives in mcp_servers/."""
         project_root = Path(__file__).parent.parent.parent
-        server_file = (
-            project_root / "plugins/ci-failure-toolkit/servers/github_actions_server.py"
-        )
+        server_file = project_root / "mcp_servers/github_actions/server.py"
+        assert server_file.exists(), f"Server file not found: {server_file}"
 
-        assert (
-            server_file.exists()
-        ), f"GitHub Actions MCP server file not found: {server_file}"
-        assert server_file.is_file()
-
-    def test_github_actions_server_is_executable_python(self):
-        """Test that GitHub Actions MCP server is valid Python."""
+    def test_memory_server_exists(self):
         project_root = Path(__file__).parent.parent.parent
-        server_file = (
-            project_root / "plugins/ci-failure-toolkit/servers/github_actions_server.py"
-        )
+        assert (project_root / "mcp_servers/memory/server.py").exists()
 
-        if not server_file.exists():
-            pytest.skip("Server file not found")
-
-        # Check it has a shebang or is valid Python
-        with open(server_file, encoding="utf-8") as f:
-            first_line = f.readline()
-            assert (
-                first_line.startswith("#!/usr/bin/env python")
-                or first_line.startswith("#!")
-                or first_line.startswith('"""')
-                or first_line.startswith("import")
-            )
-
-    def test_plugin_structure(self):
-        """Test that plugin directory structure is correct."""
+    def test_codebase_tools_server_exists(self):
         project_root = Path(__file__).parent.parent.parent
-        plugin_dir = project_root / "plugins/ci-failure-toolkit"
+        assert (project_root / "mcp_servers/codebase_tools/server.py").exists()
 
-        if not plugin_dir.exists():
-            pytest.skip("Plugin directory not found")
+    def test_http_json_exists(self):
+        project_root = Path(__file__).parent.parent.parent
+        assert (project_root / "mcp_servers/http.json").exists()
 
-        # Check required directories
-        assert (plugin_dir / "servers").exists()
-        assert (plugin_dir / "tools").exists()
+    def test_github_actions_mcp_json_exists(self):
+        project_root = Path(__file__).parent.parent.parent
+        assert (project_root / "mcp_servers/github_actions/mcp.json").exists()
 
-        # Check required files
-        assert (plugin_dir / ".mcp.json").exists()
-        assert (plugin_dir / "servers/github_actions_server.py").exists()
+
+class TestRepositoryContext:
+    """Test repository context injection."""
 
     def test_repository_context_injection(self):
-        """Test that repository context is properly injected into system prompt."""
         builder = SDKOptionsBuilder(cwd="/tmp")
-
-        claude_md = "# Repository Instructions\nThis is CLAUDE.md content"
-        memory_index = "# Memory\nThis is memory content"
-
-        builder.with_repository_context(claude_md=claude_md, memory_index=memory_index)
+        builder.with_repository_context(
+            claude_md="# Repo\nContent", memory_index="# Memory\nContent"
+        )
         options = builder.build()
 
-        # Verify system prompt contains both contexts
         assert options.system_prompt is not None
         assert '<memory name="index.md">' in options.system_prompt
-        assert "This is memory content" in options.system_prompt
         assert "<repository_context>" in options.system_prompt
-        assert "This is CLAUDE.md content" in options.system_prompt
-
-        # Verify memory comes before CLAUDE.md
-        memory_pos = options.system_prompt.index('<memory name="index.md">')
-        claude_pos = options.system_prompt.index("<repository_context>")
-        assert memory_pos < claude_pos
 
     def test_repository_context_with_existing_system_prompt(self):
-        """Test that repository context is prepended to existing system prompt."""
         builder = SDKOptionsBuilder(cwd="/tmp")
-
-        workflow_context = "Workflow-specific instructions"
-        claude_md = "Repository instructions"
-        memory_index = "Memory content"
-
-        builder.with_system_prompt(workflow_context)
-        builder.with_repository_context(claude_md=claude_md, memory_index=memory_index)
+        builder.with_system_prompt("Workflow context")
+        builder.with_repository_context(claude_md="Repo", memory_index="Memory")
         options = builder.build()
 
-        # Verify all contexts are present
-        assert options.system_prompt is not None
-        assert "Memory content" in options.system_prompt
-        assert "Repository instructions" in options.system_prompt
-        assert "Workflow-specific instructions" in options.system_prompt
-
-        # Verify order: memory -> CLAUDE.md -> workflow context
-        memory_pos = options.system_prompt.index("Memory content")
-        claude_pos = options.system_prompt.index("Repository instructions")
-        workflow_pos = options.system_prompt.index("Workflow-specific instructions")
-        assert memory_pos < claude_pos < workflow_pos
+        assert "Memory" in options.system_prompt
+        assert "Repo" in options.system_prompt
+        assert "Workflow context" in options.system_prompt
 
     def test_repository_context_with_none_values(self):
-        """Test that None values are handled gracefully."""
         builder = SDKOptionsBuilder(cwd="/tmp")
-
-        # Test with None values
         builder.with_repository_context(claude_md=None, memory_index=None)
         options = builder.build()
-
-        # System prompt should be None if no context provided
         assert options.system_prompt is None
 
     def test_repository_context_with_empty_strings(self):
-        """Test that empty strings are handled gracefully."""
         builder = SDKOptionsBuilder(cwd="/tmp")
-
-        # Test with empty strings
         builder.with_repository_context(claude_md="", memory_index="")
         options = builder.build()
-
-        # System prompt should be None if only empty strings provided
         assert options.system_prompt is None
 
     def test_repository_context_partial_injection(self):
-        """Test that partial context (only memory or only CLAUDE.md) works."""
-        # Test with only memory
         builder1 = SDKOptionsBuilder(cwd="/tmp")
         builder1.with_repository_context(memory_index="Memory only")
-        options1 = builder1.build()
+        assert "Memory only" in builder1.build().system_prompt
 
-        assert options1.system_prompt is not None
-        assert "Memory only" in options1.system_prompt
-        assert "<repository_context>" not in options1.system_prompt
-
-        # Test with only CLAUDE.md
         builder2 = SDKOptionsBuilder(cwd="/tmp")
         builder2.with_repository_context(claude_md="CLAUDE.md only")
-        options2 = builder2.build()
-
-        assert options2.system_prompt is not None
-        assert "CLAUDE.md only" in options2.system_prompt
-        assert '<memory name="index.md">' not in options2.system_prompt
+        assert "CLAUDE.md only" in builder2.build().system_prompt

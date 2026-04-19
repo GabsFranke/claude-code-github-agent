@@ -1,0 +1,7 @@
+{
+  "env": {
+    "QDRANT_URL": "${QDRANT_URL}",
+    "GEMINI_API_KEY": "${GEMINI_API_KEY}",
+    "EMBEDDING_DIMENSION": "${EMBEDDING_DIMENSION}"
+  }
+}

@@ -323,13 +323,8 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
         # Start with base configuration
         builder = SDKOptionsBuilder(cwd=workspace).with_model(model)
 
-        # Add MCP servers conditionally
-        if github_token:
-            builder.with_github_mcp(github_token).with_github_actions_mcp(github_token)
-
-        builder.with_memory_mcp(repo)
-        builder.with_codebase_tools(workspace)
-        builder.with_semantic_search(repo)
+        # Auto-discover all MCP servers (stdio from mcp_servers/*, HTTP from http.json)
+        builder.with_auto_discovered_mcp_servers(repo=repo, worktree_path=workspace)
 
         # Get parent span ID for trace linking (if enabled)
         parent_span_id = job_data.get("parent_span_id")
