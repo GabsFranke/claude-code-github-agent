@@ -141,8 +141,13 @@ Use `Grep` with patterns like:
 - `fallback`, `default.*=.*None`, `Optional` (potential silent degradation)
 - `continue$` inside except blocks (error suppression)
 
-**Step 3: Read ONLY files with error handling patterns**
-Prioritize by density of matches and by the task description's priorities.
+**Step 3: Triage with file summaries, then deep-read selectively**
+
+Before using `Read` on any file you haven't examined yet, use `read_file_summary` to get an AST-extracted overview at ~15% of the token cost. This reveals the file's structure (classes, functions, imports) so you can quickly decide whether deep-reading is worthwhile and which sections matter.
+
+Then use `Read` (without offset/limit) on files the summary confirms are relevant. **Never read the same file in multiple chunks** with offset/limit — if a file is important enough to audit, read it all at once. Repeated partial reads of the same file (e.g., 5 separate reads of one file) are the fastest way to exhaust your turn budget without delivering findings.
+
+Prioritize files by density of error-handling pattern matches and by the task description's priorities.
 
 ### Handling Large PRs
 
@@ -158,6 +163,16 @@ If `get_diff` or `get_files` API calls fail due to size limits, fall back to:
 git diff main -- <specific-file-path>  # for individual files
 git diff main --stat                    # for overview
 ```
+
+### Tracing Cross-File Error Handling
+
+When you need to understand how an error-handling symbol flows through the codebase (e.g., how a variable is passed from webhook to worker, or where a custom exception is caught):
+
+- Use `find_references` to find every call site and usage of a function or variable
+- Use `find_definitions` to locate where an imported symbol is defined
+- Use `search_codebase` for regex-based cross-file searches
+
+These tools are far more efficient than manually reading files one by one to trace data flow. For example, instead of reading 5 files to find where `context_profile` is set, use `find_references("context_profile")` to get all usages instantly.
 
 ### Do Not Guess File Paths
 

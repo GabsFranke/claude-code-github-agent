@@ -129,6 +129,7 @@ To find the subagent's instruction file:
 3. If no colon (just the agent name), try:
    - First: `Glob plugins/*/agents/{agent-name}.md` to find plugin agents
    - If not found: `subagents/{agent_name}.py` for Python subagents (edit only the `prompt="""..."""` field)
+4. **Fallback when the workflow name looks like a job ID** (hex string, UUID, or similar): The second argument may be a job/run ID rather than a human-readable name. In this case, search the transcript content for the actual task description (e.g., "Hunt for silent failures") and match it against plugin agent files using `Grep` for key phrases from the task.
 
 Example: For agent "comment-analyzer" with type "pr-review-toolkit:comment-analyzer":
 
