@@ -699,6 +699,9 @@ async def _process_cleanup_requests(redis: Any) -> None:
     branch delete) to the ``agent:worktree:cleanup`` Redis list.
     This function drains all pending requests each cycle.
     """
+    if redis is None:
+        return
+
     import json as _json
 
     while True:
