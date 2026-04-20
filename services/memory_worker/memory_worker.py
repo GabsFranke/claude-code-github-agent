@@ -60,7 +60,7 @@ async def process_memory_job(message: dict, redis_client) -> None:
 
     logger.info(f"Processing memory job for {repo} [{hook_event}]: {transcript_path}")
 
-    memory_dir = f"/home/bot/agent-memory/{repo}/memory"
+    memory_dir = f"/home/bot/.claude/memory/{repo}/memory"
     os.makedirs(memory_dir, exist_ok=True)
 
     conversation_text = extract_conversation(transcript_path)

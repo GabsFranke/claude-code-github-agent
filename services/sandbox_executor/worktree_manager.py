@@ -14,7 +14,7 @@ from shared import execute_git_command
 
 logger = logging.getLogger(__name__)
 
-WORKTREE_BASE = Path("/tmp/worktrees")  # nosec B108
+WORKTREE_BASE = Path("/home/bot/.claude/worktrees")  # nosec B108
 
 
 def get_worktree_path(
@@ -24,7 +24,7 @@ def get_worktree_path(
 
     Path structure::
 
-        /tmp/worktrees/{owner--repo}/{thread_type}-{thread_id}/{workflow}/
+        /home/bot/.claude/worktrees/{owner--repo}/{thread_type}-{thread_id}/{workflow}/
 
     Args:
         repo: Repository full name (``owner/repo``).

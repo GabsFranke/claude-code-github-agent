@@ -28,8 +28,7 @@ COPY services/retrospector_worker/ /app/services/retrospector_worker/
 COPY services/sandbox_executor/requirements.txt ./requirements.txt
 RUN pip3 install --no-cache-dir -r requirements.txt
 
-# Transcript staging directory (shared volume with sandbox_worker)
-RUN mkdir -p /home/bot/transcripts && chown -R bot:bot /home/bot/transcripts
+# Claude home directory (bind-mounted from host ~/.claude/)
 RUN mkdir -p /home/bot/.claude && chown -R bot:bot /home/bot/.claude
 
 # Set ownership

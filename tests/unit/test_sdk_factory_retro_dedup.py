@@ -22,7 +22,7 @@ class TestFlushPendingPostJobs:
         """Multiple buffered jobs for the same (path, event, type) are deduped,
         keeping only the last entry."""
         builder = SDKOptionsBuilder(cwd="/tmp")
-        staged_path = "/home/bot/transcripts/test/repo/session1.jsonl"
+        staged_path = "/home/bot/.claude/transcripts/test/repo/session1.jsonl"
 
         # Simulate SDK firing Stop 5 times for the same transcript
         for i in range(5):
@@ -56,7 +56,7 @@ class TestFlushPendingPostJobs:
     async def test_different_events_not_deduped(self):
         """Stop and SubagentStop for the same transcript are NOT deduped."""
         builder = SDKOptionsBuilder(cwd="/tmp")
-        staged_path = "/home/bot/transcripts/test/repo/session1.jsonl"
+        staged_path = "/home/bot/.claude/transcripts/test/repo/session1.jsonl"
 
         builder._pending_post_jobs.append(
             {
@@ -89,7 +89,7 @@ class TestFlushPendingPostJobs:
     async def test_different_types_not_deduped(self):
         """Retrospector and memory jobs for the same (path, event) are NOT deduped."""
         builder = SDKOptionsBuilder(cwd="/tmp")
-        staged_path = "/home/bot/transcripts/test/repo/session1.jsonl"
+        staged_path = "/home/bot/.claude/transcripts/test/repo/session1.jsonl"
 
         builder._pending_post_jobs.append(
             {
@@ -161,7 +161,7 @@ class TestFlushPendingPostJobs:
             {
                 "type": "retrospector",
                 "repo": "test/repo",
-                "staged_path": "/home/bot/transcripts/test/repo/main.jsonl",
+                "staged_path": "/home/bot/.claude/transcripts/test/repo/main.jsonl",
                 "event": "Stop",
                 "workflow_name": "review-pr",
                 "session_meta": {"num_turns": 10},
@@ -171,7 +171,7 @@ class TestFlushPendingPostJobs:
             {
                 "type": "retrospector",
                 "repo": "test/repo",
-                "staged_path": "/home/bot/transcripts/test/repo/subagent.jsonl",
+                "staged_path": "/home/bot/.claude/transcripts/test/repo/subagent.jsonl",
                 "event": "SubagentStop",
                 "workflow_name": "review-pr",
                 "session_meta": {"num_turns": 3, "agent_id": "comment-analyzer"},

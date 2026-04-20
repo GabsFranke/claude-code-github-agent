@@ -310,7 +310,7 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
                 mentioned_files=mentioned_files,
                 token_budget=context_budget,
                 include_test_files=include_test_files,
-                cache_dir=Path("/home/bot/agent-memory"),
+                cache_dir=Path("/home/bot/.claude"),
             )
             logger.info(
                 f"Generated structural context: "
@@ -361,7 +361,7 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
             .with_agents(AGENTS)
             .with_langfuse_hooks(parent_span_id=parent_span_id)
             .with_transcript_staging(repo, workflow_name, ref=ref)
-            .with_writable_dir(f"/home/bot/agent-memory/{repo}/memory")
+            .with_writable_dir(f"/home/bot/.claude/memory/{repo}/memory")
             .with_system_prompt(system_context)  # Workflow-specific system context
             .with_repository_context(
                 claude_md=claude_md, memory_index=memory_index

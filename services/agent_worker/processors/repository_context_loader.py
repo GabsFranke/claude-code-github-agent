@@ -100,7 +100,7 @@ class RepositoryContextLoader:
         """
         import os
 
-        memory_path = f"/home/bot/agent-memory/{repo}/memory/index.md"
+        memory_path = f"/home/bot/.claude/memory/{repo}/memory/index.md"
         if not os.path.exists(memory_path):
             return ""
 

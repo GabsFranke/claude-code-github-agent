@@ -48,7 +48,7 @@ async def stage_transcript(
         logger.error("Transcript not found, cannot stage: %s", transcript_path)
         return None
 
-    staged_dir = f"/home/bot/transcripts/{repo}"
+    staged_dir = f"/home/bot/.claude/transcripts/{repo}"
     await asyncio.to_thread(os.makedirs, staged_dir, exist_ok=True)
 
     suffix = transcript_file.suffix or ".jsonl"
