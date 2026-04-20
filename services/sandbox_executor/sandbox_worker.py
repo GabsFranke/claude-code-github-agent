@@ -28,6 +28,7 @@ from shared.logging_utils import setup_logging  # noqa: E402
 from shared.sdk_executor import execute_sdk  # noqa: E402
 from shared.sdk_factory import SDKOptionsBuilder  # noqa: E402
 from shared.session_store import SessionStore  # noqa: E402
+from shared.worktree_lock import PendingPrompt, WorktreeKey, WorktreeLock  # noqa: E402
 from subagents import AGENTS  # noqa: E402
 
 from .worktree_manager import get_worktree_path, reuse_or_create_worktree  # noqa: E402
@@ -97,6 +98,96 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
 
         persist_session = conversation_config.get("persist", False)
         ttl_hours = conversation_config.get("ttl_hours", 168)
+
+        # Build worktree key for locking (only needed for persistent sessions)
+        worktree_key = None
+        worktree_lock = None
+        pending_prompt: PendingPrompt | None = None
+        interrupted = False  # Flag to track if this job was superseded
+
+        if persist_session:
+            worktree_key = WorktreeKey(
+                repo=repo,
+                thread_type=thread_type,
+                thread_id=thread_id,
+                workflow=workflow_name,
+            )
+            worktree_lock = WorktreeLock(job_queue.redis, worktree_key)
+
+            # Try to acquire lock; if held, set pending prompt and wait
+            acquired = await worktree_lock.acquire(job_id, timeout=0)
+            if not acquired:
+                # Lock held by another job - set pending and wait
+                lock_info = await worktree_lock.get_lock_info()
+                logger.info(
+                    f"Worktree locked by job {lock_info.job_id if lock_info else 'unknown'}, "
+                    f"setting pending prompt and waiting..."
+                )
+                await worktree_lock.set_pending_prompt(
+                    job_id, job_data.get("prompt", "")
+                )
+                await worktree_lock.send_cancel_signal()
+
+                # Wait for lock to be released (with timeout)
+                released = await worktree_lock.wait_for_release(timeout=300)
+                if not released:
+                    logger.error(f"Lock wait timeout for {worktree_key}")
+                    await job_queue.complete_job(
+                        job_id,
+                        {
+                            "status": "error",
+                            "error": "Timeout waiting for worktree lock",
+                            "repo": repo,
+                            "issue_number": job_data.get("issue_number", 0),
+                        },
+                        status="error",
+                    )
+                    return
+
+                # Try to acquire lock now
+                acquired = await worktree_lock.acquire(job_id, timeout=0)
+                if not acquired:
+                    logger.error(
+                        f"Failed to acquire lock after wait for {worktree_key}"
+                    )
+                    await job_queue.complete_job(
+                        job_id,
+                        {
+                            "status": "error",
+                            "error": "Failed to acquire worktree lock",
+                            "repo": repo,
+                            "issue_number": job_data.get("issue_number", 0),
+                        },
+                        status="error",
+                    )
+                    return
+
+                # Check for pending prompt from previous job
+                pending_prompt = await worktree_lock.get_pending_prompt()
+                if pending_prompt:
+                    logger.info(f"Resuming with pending prompt for {worktree_key}")
+                    # Update the prompt
+                    job_data["prompt"] = pending_prompt.prompt
+
+                    # Look up session from SessionStore (previous job saved it)
+                    session_store = SessionStore(job_queue.redis)
+                    existing_session = await session_store.get_session(
+                        repo, thread_type, thread_id, workflow_name
+                    )
+                    if existing_session and existing_session.session_id:
+                        session_mode = "resume"
+                        session_id = existing_session.session_id
+                        logger.info(
+                            f"Resuming interrupted session {session_id[:8]}... "
+                            f"with new prompt"
+                        )
+                    else:
+                        # No previous session found, start fresh
+                        session_mode = "new"
+                        logger.warning(
+                            "Pending prompt found but no previous session, "
+                            "starting fresh"
+                        )
 
         # Use deterministic worktree for persistent sessions, random otherwise
         if persist_session:
@@ -392,13 +483,64 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
                 (system_context or "") + summary_context
             )
 
-        # Execute via centralized executor with retry
-        result = await execute_sdk(
-            prompt=job_data["prompt"],
-            options=builder.build(),
-            max_retries=SDK_MAX_RETRIES,
-            retry_base_delay=SDK_RETRY_BASE_DELAY,
-        )
+        # For persistent sessions, wrap SDK execution with cancel subscription
+        result = None
+        sdk_task: asyncio.Task | None = None
+
+        async def handle_cancel():
+            """Callback when cancel signal received - interrupt SDK."""
+            nonlocal interrupted
+            interrupted = True
+            logger.info(f"Cancel signal received, interrupting SDK for {worktree_key}")
+            if sdk_task and not sdk_task.done():
+                sdk_task.cancel()
+
+        if worktree_lock:
+            async with worktree_lock.cancel_subscription(handle_cancel):
+                # Run SDK in a task so it can be cancelled
+                sdk_task = asyncio.create_task(
+                    execute_sdk(
+                        prompt=job_data["prompt"],
+                        options=builder.build(),
+                        max_retries=SDK_MAX_RETRIES,
+                        retry_base_delay=SDK_RETRY_BASE_DELAY,
+                    )
+                )
+
+                try:
+                    result = await sdk_task
+                except asyncio.CancelledError:
+                    logger.info(f"SDK execution cancelled for {worktree_key}")
+                    interrupted = True
+                    # Update lock status to indicate interruption
+                    await worktree_lock.set_interrupted()
+        else:
+            # No lock needed (non-persistent session), execute normally
+            result = await execute_sdk(
+                prompt=job_data["prompt"],
+                options=builder.build(),
+                max_retries=SDK_MAX_RETRIES,
+                retry_base_delay=SDK_RETRY_BASE_DELAY,
+            )
+
+        # Handle interrupted job
+        if interrupted:
+            logger.info(f"Job {job_id} interrupted, marking as superseded")
+            await job_queue.complete_job(
+                job_id,
+                {
+                    "status": "superseded",
+                    "repo": repo,
+                    "issue_number": job_data.get("issue_number", 0),
+                    "message": "Interrupted by new prompt, session saved for continuation",
+                },
+                status="superseded",
+            )
+            logger.info(f"Job {job_id} completed as superseded")
+            return  # Exit early, lock released in finally
+
+        if not result:
+            raise RuntimeError("SDK execution returned no result")
 
         response = result["response"]
 
@@ -428,6 +570,9 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
                     f"Saved session {new_session_id[:8]}... for "
                     f"{repo}/{thread_type}/{thread_id}/{workflow_name}"
                 )
+                # Update lock with session_id for resume
+                if worktree_lock:
+                    await worktree_lock.set_session_id(new_session_id)
             except Exception as e:
                 logger.warning(f"Failed to save session metadata: {e}")
 
@@ -487,6 +632,14 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
         )
 
     finally:
+        # Release worktree lock if acquired
+        if worktree_lock:
+            try:
+                await worktree_lock.release()
+                logger.debug(f"Released worktree lock for {worktree_key}")
+            except Exception as e:
+                logger.warning(f"Failed to release worktree lock: {e}")
+
         # CRITICAL: Clean up GITHUB_TOKEN from environment
         if "GITHUB_TOKEN" in os.environ:
             del os.environ["GITHUB_TOKEN"]
