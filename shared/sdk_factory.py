@@ -12,9 +12,6 @@ from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
 
 from shared.langfuse_hooks import setup_langfuse_hooks
 from shared.post_processing import flush_pending_post_jobs as _flush_pending_post_jobs
-from shared.post_processing import (
-    stage_transcript_with_retry as _stage_transcript_with_retry,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -404,14 +401,17 @@ class SDKOptionsBuilder:
     def with_transcript_staging(
         self, repo: str, workflow_name: str | None = None, ref: str | None = None
     ) -> "SDKOptionsBuilder":
-        """Add post-session hooks for transcript staging and job buffering.
+        """Add post-session hooks for transcript path capture and job buffering.
 
-        This hook stages transcripts to the shared volume and buffers
+        This hook captures the native transcript path from the SDK and buffers
         post-processing jobs (memory, retrospector, indexing) in
         ``_pending_post_jobs``. Jobs are NOT enqueued immediately — the
         SDK may fire Stop/SubagentStop multiple times per session. The
         caller must invoke ``flush_pending_post_jobs()`` after the SDK
         session ends to deduplicate and enqueue the final set of jobs.
+
+        Workers read transcripts directly from the native SDK path via
+        the shared ``~/.claude/`` volume — no staging copy is needed.
 
         Args:
             repo: Repository identifier (e.g., "owner/repo")
@@ -426,7 +426,6 @@ class SDKOptionsBuilder:
             os.getenv("RETROSPECTOR_ENABLED", "true").lower() == "true"
         )
         indexing_enabled, _, gemini_key = self._resolve_indexing_config()
-        # Preserve original env-fallback guard: require GEMINI_API_KEY
         indexing_enabled = indexing_enabled and bool(gemini_key)
 
         # Capture context from builder for hooks to use
@@ -434,48 +433,31 @@ class SDKOptionsBuilder:
         pending = self._pending_post_jobs
 
         async def capture_and_buffer(input_data, _tool_use_id, _context):
-            """Stage transcript and buffer post-processing jobs for later flush."""
+            """Capture native transcript path and buffer jobs for later flush."""
             event = input_data.get("hook_event_name", "Stop")
 
-            # Select the correct transcript source based on event type.
             if event == "SubagentStop":
-                transcript = input_data.get("agent_transcript_path")
+                transcript_path = input_data.get("agent_transcript_path")
             else:
-                transcript = input_data.get("transcriptPath") or input_data.get(
+                transcript_path = input_data.get("transcriptPath") or input_data.get(
                     "transcript_path"
                 )
 
-            if not transcript:
+            if not transcript_path:
                 logger.warning(
                     "Post-session hook: no transcript path in hook input, "
                     "skipping post-processing"
                 )
                 return {"success": False, "error": "no_transcript_path"}
 
-            logger.debug(f"Post-session hook triggered: {transcript} ({event})")
+            logger.debug(f"Post-session hook triggered: {transcript_path} ({event})")
 
-            # Copy to shared volume for post-processing workers
-            staged_path = await _stage_transcript_with_retry(
-                repo,
-                transcript,
-                hook_event=event,
-                agent_id=input_data.get("agent_id"),
-                workflow_name=workflow_name,
-            )
-            if not staged_path:
-                logger.error(
-                    f"Failed to stage transcript {transcript} after retries, "
-                    "skipping post-processing"
-                )
-                return {"success": False, "error": "transcript_staging_failed"}
-
-            # Buffer the job — don't enqueue yet
             if memory_enabled:
                 pending.append(
                     {
                         "type": "memory",
                         "repo": repo,
-                        "staged_path": staged_path,
+                        "transcript_path": transcript_path,
                         "event": event,
                         "claude_md": repo_context.get("claude_md"),
                         "memory_index": repo_context.get("memory_index"),
@@ -487,7 +469,7 @@ class SDKOptionsBuilder:
                     {
                         "type": "retrospector",
                         "repo": repo,
-                        "staged_path": staged_path,
+                        "transcript_path": transcript_path,
                         "event": event,
                         "workflow_name": workflow_name,
                         "session_meta": {
@@ -528,7 +510,7 @@ class SDKOptionsBuilder:
     async def flush_pending_post_jobs(self) -> None:
         """Flush buffered post-processing jobs after the SDK session ends.
 
-        Deduplicates buffered jobs by (staged_path, event, type) — keeping
+        Deduplicates buffered jobs by (transcript_path, event, type) — keeping
         only the last occurrence — then enqueues them to the respective
         Redis queues. Must be called after ``execute_sdk()`` returns.
 
