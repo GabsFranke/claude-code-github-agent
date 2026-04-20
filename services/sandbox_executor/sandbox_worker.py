@@ -8,6 +8,7 @@ import sys
 import tempfile
 import uuid
 from pathlib import Path
+from typing import Any
 
 from repo_setup import RepoSetupEngine  # noqa: E402
 from shared import (  # noqa: E402
@@ -31,7 +32,12 @@ from shared.session_store import SessionStore  # noqa: E402
 from shared.worktree_lock import PendingPrompt, WorktreeKey, WorktreeLock  # noqa: E402
 from subagents import AGENTS  # noqa: E402
 
-from .worktree_manager import get_worktree_path, reuse_or_create_worktree  # noqa: E402
+from .worktree_manager import (  # noqa: E402
+    cleanup_worktrees,
+    cleanup_worktrees_by_branch,
+    get_worktree_path,
+    reuse_or_create_worktree,
+)
 
 # Configure logging
 setup_logging(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -686,6 +692,58 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
             )
 
 
+async def _process_cleanup_requests(redis: Any) -> None:
+    """Process pending worktree cleanup requests from Redis.
+
+    Webhook service queues cleanup events (PR close, issue close,
+    branch delete) to the ``agent:worktree:cleanup`` Redis list.
+    This function drains all pending requests each cycle.
+    """
+    import json as _json
+
+    while True:
+        raw = await redis.lpop("agent:worktree:cleanup")
+        if not raw:
+            break
+
+        try:
+            msg = _json.loads(raw)
+            action = msg.get("action")
+            repo = msg.get("repo", "")
+
+            if action == "cleanup_thread":
+                thread_type = msg.get("thread_type", "issue")
+                thread_id = msg.get("thread_id", "")
+                logger.info(
+                    f"Cleaning up worktrees for {repo}/{thread_type}/{thread_id}"
+                )
+                await cleanup_worktrees(repo, thread_type, thread_id)
+
+                # Also clean up session metadata
+                try:
+                    session_store = SessionStore(redis)
+                    # Find and delete sessions for this thread
+                    sessions = await session_store.list_sessions(repo)
+                    for s in sessions:
+                        if s.thread_type == thread_type and s.thread_id == thread_id:
+                            await session_store.close_session(
+                                repo, thread_type, thread_id, s.workflow_name
+                            )
+                            logger.info(
+                                f"Closed session for {repo}/{thread_type}/{thread_id}/{s.workflow_name}"
+                            )
+                except Exception as e:
+                    logger.warning(f"Failed to cleanup session metadata: {e}")
+
+            elif action == "cleanup_branch":
+                branch = msg.get("branch", "")
+                logger.info(f"Cleaning up worktrees for branch {branch} in {repo}")
+                await cleanup_worktrees_by_branch(repo, branch)
+
+        except Exception as e:
+            logger.error(f"Failed to process cleanup request: {e}", exc_info=True)
+
+
 async def main():
     """Main sandbox worker loop."""
     logger.info("Starting sandbox worker")
@@ -708,6 +766,9 @@ async def main():
     try:
         while not shutdown_event.is_set():
             try:
+                # Process pending worktree cleanup requests
+                await _process_cleanup_requests(job_queue.redis)
+
                 # Pull next job (blocking with timeout)
                 result = await job_queue.get_next_job(timeout=5)
 
