@@ -4,6 +4,7 @@
 # - prompt: How to build the prompt for Claude Agent SDK
 # - description: Human-readable description
 # - skip_self: Whether to skip events triggered by the bot itself (optional, default: true)
+# - conversation: Persistence settings for multi-turn conversations (optional)
 
 workflows:
   review-pr:
@@ -25,6 +26,9 @@ workflows:
       repomap_budget: 4096
       personalized: true
       include_test_files: true
+    conversation:
+      persist: true
+      ttl_hours: 48
     # skip_self defaults to true (can be omitted)
 
   triage-issue:
@@ -64,6 +68,9 @@ workflows:
       repomap_budget: 4096
       personalized: true
       priority_focus: ["build_system", "test_structure"]
+    conversation:
+      persist: true
+      ttl_hours: 48
     skip_self: true # Explicitly set - don't auto-fix CI failures on bot's own PRs
 
   test-toolkit:
@@ -90,6 +97,10 @@ workflows:
     context:
       repomap_budget: 4096
       personalized: false
+    conversation:
+      persist: true
+      ttl_hours: 168
+      auto_continue: false
     skip_self: false # Allow bot to respond to its own /agent commands if needed
 
   fix-review:

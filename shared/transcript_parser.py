@@ -196,3 +196,113 @@ def extract_retrospector_summary(transcript_path: str) -> str | None:
 {chr(10).join(f'- {err}' for err in tool_errors) if tool_errors else 'No tool errors'}
 """
     return summary
+
+
+def extract_conversation_summary(transcript_path: str) -> str | None:
+    """Extract a compact conversation summary for session fallback context.
+
+    Produces a shorter summary than ``extract_retrospector_summary`` —
+    intended to be injected as system prompt context when a full session
+    resume is not possible.
+
+    Returns None if parsing fails.
+    """
+    turn_count = 0
+    files_examined: set[str] = set()
+    files_modified: set[str] = set()
+    tools_used: set[str] = set()
+    last_action = ""
+    user_queries: list[str] = []
+    assistant_responses: list[str] = []
+
+    try:
+        with open(transcript_path, encoding="utf-8") as f:
+            for raw in f:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    entry = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+
+                entry_type = entry.get("type")
+                if entry_type == "queue-operation":
+                    continue
+
+                msg = entry.get("message", {})
+                role = msg.get("role") or entry_type
+                content = msg.get("content", "")
+
+                if role == "user":
+                    if isinstance(content, str):
+                        user_queries.append(content[:200])
+                    elif isinstance(content, list):
+                        for block in content:
+                            if isinstance(block, dict) and block.get("type") == "text":
+                                user_queries.append(block.get("text", "")[:200])
+
+                elif role == "assistant":
+                    turn_count += 1
+                    if isinstance(content, list):
+                        for block in content:
+                            if not isinstance(block, dict):
+                                continue
+                            btype = block.get("type")
+                            if btype == "text":
+                                text = block.get("text", "")
+                                if text:
+                                    assistant_responses.append(text[:300])
+                                last_action = f"Assistant response ({len(text)} chars)"
+                            elif btype == "tool_use":
+                                tool_name = block.get("name", "")
+                                tools_used.add(tool_name)
+                                tool_input = block.get("input", {})
+
+                                if tool_name == "Read" and "file_path" in tool_input:
+                                    files_examined.add(tool_input["file_path"])
+                                    last_action = f"Read {tool_input['file_path']}"
+                                elif (
+                                    tool_name in ("Edit", "Write")
+                                    and "file_path" in tool_input
+                                ):
+                                    files_modified.add(tool_input["file_path"])
+                                    last_action = (
+                                        f"{tool_name} {tool_input['file_path']}"
+                                    )
+                                elif tool_name == "Bash":
+                                    cmd = tool_input.get("command", "")[:100]
+                                    last_action = f"Bash: {cmd}"
+                                elif tool_name == "Agent":
+                                    last_action = (
+                                        f"Agent: {tool_input.get('name', 'unknown')}"
+                                    )
+                                else:
+                                    last_action = f"{tool_name}"
+
+    except Exception as e:
+        logger.warning(
+            f"Failed to extract conversation summary from {transcript_path}: {e}"
+        )
+        return None
+
+    if turn_count == 0:
+        return None
+
+    parts = [
+        f"Conversation had {turn_count} turns.",
+    ]
+    if user_queries:
+        parts.append(f"User queries: {'; '.join(user_queries[-5:])}")
+    if files_examined:
+        parts.append(f"Files examined: {', '.join(sorted(files_examined)[-20:])}")
+    if files_modified:
+        parts.append(f"Files modified: {', '.join(sorted(files_modified)[-10:])}")
+    if tools_used:
+        parts.append(f"Tools used: {', '.join(sorted(tools_used))}")
+    if last_action:
+        parts.append(f"Last action: {last_action}")
+    if assistant_responses:
+        parts.append(f"Last response excerpt: {assistant_responses[-1][:500]}")
+
+    return "\n".join(parts)

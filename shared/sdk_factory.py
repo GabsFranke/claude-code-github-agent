@@ -77,6 +77,9 @@ class SDKOptionsBuilder:
         self._pending_post_jobs: list[dict] = (
             []
         )  # Buffered during session, flushed after
+        self._resume: str | None = None  # Session ID to resume
+        self._continue_conversation: bool = False  # Continue most recent session
+        self._fork_session: bool = False  # Fork from existing session
 
     # Model selection methods
 
@@ -535,6 +538,51 @@ class SDKOptionsBuilder:
         self._pending_post_jobs = []
         await _flush_pending_post_jobs(jobs)
 
+    # Session persistence methods
+
+    def with_session_resume(self, session_id: str) -> "SDKOptionsBuilder":
+        """Resume an existing SDK session by ID.
+
+        The SDK loads the full conversation history from the session file
+        stored under ``~/.claude/projects/<encoded-cwd>/``.
+
+        Args:
+            session_id: UUID of the session to resume.
+
+        Returns:
+            Self for method chaining
+        """
+        self._resume = session_id
+        return self
+
+    def with_session_continue(self) -> "SDKOptionsBuilder":
+        """Continue the most recent session in ``cwd``.
+
+        The SDK finds the latest session file in the working directory
+        and resumes it automatically.
+
+        Returns:
+            Self for method chaining
+        """
+        self._continue_conversation = True
+        return self
+
+    def with_session_fork(self, session_id: str) -> "SDKOptionsBuilder":
+        """Fork from an existing session without modifying the original.
+
+        Starts a new session that inherits the conversation history of
+        ``session_id`` but diverges from this point forward.
+
+        Args:
+            session_id: UUID of the session to fork from.
+
+        Returns:
+            Self for method chaining
+        """
+        self._resume = session_id
+        self._fork_session = True
+        return self
+
     # Directory methods
 
     def with_writable_dir(self, path: str) -> "SDKOptionsBuilder":
@@ -742,6 +790,9 @@ class SDKOptionsBuilder:
             add_dirs=self._add_dirs,  # type: ignore[arg-type]
             stderr=lambda msg: logger.warning(f"SDK stderr: {msg}"),
             system_prompt=self._system_prompt,
+            resume=self._resume,
+            continue_conversation=self._continue_conversation or None,
+            fork_session=self._fork_session or None,
         )
 
     def _assemble_system_prompt(self) -> str | None:

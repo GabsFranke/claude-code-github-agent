@@ -27,7 +27,10 @@ from shared.context_builder import (  # noqa: E402
 from shared.logging_utils import setup_logging  # noqa: E402
 from shared.sdk_executor import execute_sdk  # noqa: E402
 from shared.sdk_factory import SDKOptionsBuilder  # noqa: E402
+from shared.session_store import SessionStore  # noqa: E402
 from subagents import AGENTS  # noqa: E402
+
+from .worktree_manager import get_worktree_path, reuse_or_create_worktree  # noqa: E402
 
 # Configure logging
 setup_logging(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -55,6 +58,7 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
     workspace = None
     repo_dir = None
     builder = None
+    persist_session = False
 
     try:
         # Validate job_id format for security (prevent directory traversal)
@@ -83,74 +87,90 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
 
         repo_dir = await wait_for_repo_sync(repo, ref, job_queue.redis)
 
-        # Create isolated workspace under /tmp — cleaned up explicitly after job
-        workspace_base = tempfile.mkdtemp(
-            prefix=f"job_{job_id[:8]}_",
-            dir="/tmp",  # nosec B108
-        )
-        os.rmdir(workspace_base)  # git worktree add needs it to not exist
-        workspace = workspace_base
-        logger.info(f"Created workspace for job {job_id}: {workspace}")
+        # Session persistence: determine worktree path and session mode
+        thread_type = job_data.get("thread_type", "issue")
+        thread_id = str(job_data.get("issue_number", "0"))
+        workflow_name = job_data.get("workflow_name", "generic")
+        session_mode = job_data.get("session_mode", "new")
+        session_id = job_data.get("session_id")
+        conversation_config = job_data.get("conversation_config") or {}
 
-        # Create worktree without creating a new branch
-        # The agent will create branches as needed using git commands
-        # Handle different ref formats:
-        # - refs/heads/main -> refs/remotes/origin/main (regular branch)
-        # - refs/pull/30/head -> refs/pull/30/head (PR ref, keep as-is)
-        # - refs/tags/v1.0 -> refs/tags/v1.0 (tag, keep as-is)
-        if ref.startswith("refs/pull/"):
-            # PR refs need to be kept as-is
-            bare_ref = ref
-        elif ref.startswith("refs/tags/"):
-            # Tag refs need to be kept as-is
-            bare_ref = ref
+        persist_session = conversation_config.get("persist", False)
+        ttl_hours = conversation_config.get("ttl_hours", 168)
+
+        # Use deterministic worktree for persistent sessions, random otherwise
+        if persist_session:
+            worktree_path = get_worktree_path(
+                repo, thread_type, thread_id, workflow_name
+            )
+            await reuse_or_create_worktree(
+                bare_repo=repo_dir,
+                ref=ref,
+                worktree_path=worktree_path,
+                session_mode=session_mode,
+            )
+            workspace = str(worktree_path)
+            logger.info(
+                f"Using deterministic worktree: {workspace} (mode={session_mode})"
+            )
         else:
-            # Regular branch refs: convert refs/heads/main -> refs/remotes/origin/main
-            base_ref = (
-                ref.replace("refs/heads/", "")
-                if ref.startswith("refs/heads/")
-                else ref.replace("refs/", "")
+            # Legacy path: ephemeral worktree
+            workspace_base = tempfile.mkdtemp(
+                prefix=f"job_{job_id[:8]}_",
+                dir="/tmp",  # nosec B108
             )
-            bare_ref = f"refs/remotes/origin/{base_ref}"
+            os.rmdir(workspace_base)  # git worktree add needs it to not exist
+            workspace = workspace_base
+            logger.info(f"Created ephemeral workspace for job {job_id}: {workspace}")
 
-        # Create worktree in detached HEAD state - agent will create branches as needed
-        wt_cmd = (
-            f"git --git-dir={repo_dir} worktree add --detach {workspace} {bare_ref}"
-        )
-        code, _out, err = await execute_git_command(wt_cmd)
-
-        if code != 0:
-            logger.warning(
-                f"Worktree ref {bare_ref} failed: {err}. Trying to detect default branch..."
-            )
-
-            # List all branches and pick the first one (usually main or master)
-            list_cmd = f"git --git-dir={repo_dir} branch --list -r"
-            list_code, list_out, list_err = await execute_git_command(list_cmd)
-
-            default_branch = "refs/remotes/origin/main"  # Fallback
-            if list_code == 0 and list_out:
-                # Output is like "  origin/main" or "  origin/master", pick first branch
-                branches = [
-                    b.strip()
-                    for b in list_out.split("\n")
-                    if b.strip() and "origin/" in b
-                ]
-                if branches:
-                    # branches[0] is like "origin/main", convert to refs/remotes/origin/main
-                    branch_name_only = branches[0].replace("origin/", "")
-                    default_branch = f"refs/remotes/origin/{branch_name_only}"
-                    logger.info(f"Detected default branch: {default_branch}")
+            # Create ephemeral worktree (legacy path)
+            if ref.startswith("refs/pull/"):
+                bare_ref = ref
+            elif ref.startswith("refs/tags/"):
+                bare_ref = ref
             else:
-                logger.warning(
-                    f"Could not list branches: {list_err}. Using fallback: {default_branch}"
+                base_ref = (
+                    ref.replace("refs/heads/", "")
+                    if ref.startswith("refs/heads/")
+                    else ref.replace("refs/", "")
                 )
+                bare_ref = f"refs/remotes/origin/{base_ref}"
 
-            # Try with detected default branch in detached HEAD state
-            wt_cmd_fallback = f"git --git-dir={repo_dir} worktree add --detach {workspace} {default_branch}"
-            code, _out, err = await execute_git_command(wt_cmd_fallback)
+            wt_cmd = (
+                f"git --git-dir={repo_dir} worktree add --detach {workspace} {bare_ref}"
+            )
+            code, _out, err = await execute_git_command(wt_cmd)
+
             if code != 0:
-                raise WorktreeCreationError(f"Failed to create worktree: {err}")
+                logger.warning(
+                    f"Worktree ref {bare_ref} failed: {err}. "
+                    "Trying to detect default branch..."
+                )
+                list_cmd = f"git --git-dir={repo_dir} branch --list -r"
+                list_code, list_out, list_err = await execute_git_command(list_cmd)
+                default_branch = "refs/remotes/origin/main"
+                if list_code == 0 and list_out:
+                    branches = [
+                        b.strip()
+                        for b in list_out.split("\n")
+                        if b.strip() and "origin/" in b
+                    ]
+                    if branches:
+                        branch_name_only = branches[0].replace("origin/", "")
+                        default_branch = f"refs/remotes/origin/{branch_name_only}"
+                        logger.info(f"Detected default branch: {default_branch}")
+                else:
+                    logger.warning(
+                        f"Could not list branches: {list_err}. "
+                        f"Using fallback: {default_branch}"
+                    )
+                wt_cmd_fb = (
+                    f"git --git-dir={repo_dir} worktree add --detach "
+                    f"{workspace} {default_branch}"
+                )
+                code, _out, err = await execute_git_command(wt_cmd_fb)
+                if code != 0:
+                    raise WorktreeCreationError(f"Failed to create worktree: {err}")
 
         # Inject git credentials into the workspace
         # Configure git to use credential helper
@@ -351,6 +371,27 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
             )  # Structural context (file tree + repomap)
         )
 
+        # Apply session resume/fork if applicable
+        if session_mode == "resume" and session_id:
+            logger.info(f"Resuming session {session_id[:8]}...")
+            builder = builder.with_session_resume(session_id)
+        elif session_mode == "fork" and session_id:
+            logger.info(f"Forking from session {session_id[:8]}...")
+            builder = builder.with_session_fork(session_id)
+        elif session_mode == "continue":
+            logger.info("Continuing most recent session...")
+            builder = builder.with_session_continue()
+
+        # Inject conversation summary as fallback context when full resume fails
+        conversation_summary = job_data.get("conversation_summary")
+        if conversation_summary and session_mode in ("resume", "continue"):
+            summary_context = (
+                f"\n\n## Previous Conversation Context\n{conversation_summary}"
+            )
+            builder = builder.with_system_prompt(
+                (system_context or "") + summary_context
+            )
+
         # Execute via centralized executor with retry
         result = await execute_sdk(
             prompt=job_data["prompt"],
@@ -367,6 +408,29 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
         # enqueues only the final set.
         await builder.flush_pending_post_jobs()
 
+        # Save session metadata for persistent conversations
+        new_session_id = result.get("session_id")
+        if new_session_id and persist_session:
+            try:
+                session_store = SessionStore(job_queue.redis)
+                await session_store.save_session(
+                    repo=repo,
+                    thread_type=thread_type,
+                    thread_id=thread_id,
+                    workflow=workflow_name,
+                    session_id=new_session_id,
+                    worktree_path=workspace,
+                    ref=ref,
+                    turn_count=result.get("num_turns", 0),
+                    ttl_hours=ttl_hours,
+                )
+                logger.info(
+                    f"Saved session {new_session_id[:8]}... for "
+                    f"{repo}/{thread_type}/{thread_id}/{workflow_name}"
+                )
+            except Exception as e:
+                logger.warning(f"Failed to save session metadata: {e}")
+
         # Mark job as complete (agent already posted to GitHub via MCP)
         await job_queue.complete_job(
             job_id,
@@ -375,6 +439,7 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
                 "response": response,
                 "repo": job_data["repo"],
                 "issue_number": job_data["issue_number"],
+                "session_id": new_session_id,
             },
             status="success",
         )
@@ -436,8 +501,8 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
         except Exception as e:
             logger.warning(f"Failed to cleanup credentials: {e}")
 
-        # Cleanup workspace and worktree
-        if workspace:
+        # Cleanup workspace and worktree (only ephemeral worktrees)
+        if workspace and not persist_session:
             # Try cleanup with retry (up to 3 attempts)
             for attempt in range(3):
                 try:
@@ -461,6 +526,11 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
                             f"Failed to cleanup workspace {workspace} after 3 attempts: {e}",
                             exc_info=True,
                         )
+        elif workspace and persist_session:
+            logger.debug(
+                f"Preserving persistent worktree: {workspace} "
+                f"(cleaned by TTL/event-based cleanup)"
+            )
 
 
 async def main():

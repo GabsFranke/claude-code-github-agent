@@ -42,6 +42,7 @@ from .models import AgentRequest, AgentResponse
 from .queue import MessageQueue, PubSubQueue, RedisQueue, get_queue, wait_for_repo_sync
 from .rate_limiter import MultiRateLimiter, RateLimiter
 from .retry import async_retry
+from .session_store import SessionStore, resolve_thread_type
 from .signals import setup_graceful_shutdown
 from .utils import _MISSING, resolve_path
 
@@ -100,6 +101,9 @@ __all__ = [
     # Rate Limiting
     "RateLimiter",
     "MultiRateLimiter",
+    # Session Store
+    "SessionStore",
+    "resolve_thread_type",
     # Retry
     "async_retry",
     # Signals

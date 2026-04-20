@@ -9,6 +9,7 @@ from typing import Any
 import yaml  # type: ignore[import-untyped]
 from pydantic import BaseModel, Field, ValidationError
 
+from shared.session_store import ConversationConfig as ConversationConfigModel
 from shared.utils import resolve_path
 
 logger = logging.getLogger(__name__)
@@ -83,6 +84,10 @@ class WorkflowConfig(BaseModel):
     context: ContextProfile = Field(
         default_factory=ContextProfile,
         description="Context profile for structural context generation",
+    )
+    conversation: ConversationConfigModel = Field(
+        default_factory=ConversationConfigModel,
+        description="Conversation persistence settings",
     )
 
 
@@ -531,7 +536,7 @@ class WorkflowEngine:
             for name, workflow in self.workflows.items()
         }
 
-    def get_context_profile(self, workflow_name: str) -> dict:
+    def get_context_profile(self, workflow_name: str) -> dict[str, Any]:
         """Get the context profile for a workflow.
 
         Args:
@@ -543,7 +548,21 @@ class WorkflowEngine:
         if workflow_name not in self.workflows:
             return {}
 
-        return self.workflows[workflow_name].context.model_dump()
+        profile = self.workflows[workflow_name].context.model_dump()
+        return {k: v for k, v in profile.items()}
+
+    def get_conversation_config(self, workflow_name: str) -> ConversationConfigModel:
+        """Get the conversation persistence config for a workflow.
+
+        Args:
+            workflow_name: Name of the workflow.
+
+        Returns:
+            ConversationConfigModel instance (defaults if workflow not found).
+        """
+        if workflow_name not in self.workflows:
+            return ConversationConfigModel()
+        return self.workflows[workflow_name].conversation
 
 
 @lru_cache(maxsize=None)
