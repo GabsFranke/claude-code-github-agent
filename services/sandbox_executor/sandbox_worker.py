@@ -33,6 +33,8 @@ from shared.worktree_lock import PendingPrompt, WorktreeKey, WorktreeLock  # noq
 from shared.worktree_manager import (  # noqa: E402
     cleanup_worktrees,
     cleanup_worktrees_by_branch,
+    detect_orphan_worktrees,
+    get_project_dir_for_worktree,
     get_worktree_path,
     reuse_or_create_worktree,
 )
@@ -96,8 +98,8 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
         # Session persistence: determine worktree path and session mode
         thread_type = job_data.get("thread_type", "issue")
         thread_id = str(job_data.get("issue_number", "0"))
-        workflow_name = job_data.get("workflow_name", "generic")
-        session_mode = job_data.get("session_mode", "new")
+        workflow_name = str(job_data.get("workflow_name") or "generic")
+        session_mode = str(job_data.get("session_mode") or "new")
         session_id = job_data.get("session_id")
         conversation_config = job_data.get("conversation_config") or {}
 
@@ -365,7 +367,6 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
                 include_test_files = context_profile.get("include_test_files", True)
 
             # Personalize repomap toward relevant files when configured
-            workflow_name = job_data.get("workflow_name")
             if context_profile.get("personalized", False):
                 # Strategy 1: Fetch PR changed files (works for PR-triggered workflows)
                 issue_number = job_data.get("issue_number")
@@ -429,7 +430,7 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
         # Build SDK options using the factory builder
         model = os.getenv("ANTHROPIC_DEFAULT_SONNET_MODEL", "claude-sonnet-4-20250514")
         github_token = job_data["github_token"]
-        workflow_name = job_data.get("workflow_name")
+        workflow_name = str(job_data.get("workflow_name") or "generic")
         system_context = job_data.get("system_context")
         claude_md = job_data.get("claude_md")
         memory_index = job_data.get("memory_index")
@@ -569,6 +570,14 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
         )
         if new_session_id and persist_session:
             try:
+                # Override TTL if the issue is closed
+                issue_state = job_data.get("event_data", {}).get("issue_state", "open")
+                if issue_state == "closed":
+                    ttl_hours = 72
+                    logger.info(
+                        f"Issue is closed, overriding session TTL to {ttl_hours}h"
+                    )
+
                 session_store = SessionStore(job_queue.redis)
                 await session_store.save_session(
                     repo=repo,
@@ -747,6 +756,48 @@ async def _process_cleanup_requests(redis: Any) -> None:
                 except Exception as e:
                     logger.warning(f"Failed to cleanup session metadata: {e}")
 
+            elif action == "expire_thread":
+                thread_type = msg.get("thread_type", "issue")
+                thread_id = msg.get("thread_id", "")
+                logger.info(
+                    f"Setting 72h expiration for worktrees in {repo}/{thread_type}/{thread_id}"
+                )
+                try:
+                    session_store = SessionStore(redis)
+                    sessions = await session_store.list_sessions(repo)
+                    for s in sessions:
+                        if s.thread_type == thread_type and s.thread_id == thread_id:
+                            await session_store.expire_session(
+                                repo,
+                                thread_type,
+                                thread_id,
+                                s.workflow_name,
+                                ttl_hours=72,
+                            )
+                except Exception as e:
+                    logger.warning(f"Failed to expire session metadata: {e}")
+
+            elif action == "revive_thread":
+                thread_type = msg.get("thread_type", "issue")
+                thread_id = msg.get("thread_id", "")
+                logger.info(
+                    f"Setting 30d (720h) expiration for revived worktrees in {repo}/{thread_type}/{thread_id}"
+                )
+                try:
+                    session_store = SessionStore(redis)
+                    sessions = await session_store.list_sessions(repo)
+                    for s in sessions:
+                        if s.thread_type == thread_type and s.thread_id == thread_id:
+                            await session_store.expire_session(
+                                repo,
+                                thread_type,
+                                thread_id,
+                                s.workflow_name,
+                                ttl_hours=720,
+                            )
+                except Exception as e:
+                    logger.warning(f"Failed to revive session metadata: {e}")
+
             elif action == "cleanup_branch":
                 branch = msg.get("branch", "")
                 logger.info(f"Cleaning up worktrees for branch {branch} in {repo}")
@@ -754,6 +805,41 @@ async def _process_cleanup_requests(redis: Any) -> None:
 
         except Exception as e:
             logger.error(f"Failed to process cleanup request: {e}", exc_info=True)
+
+
+async def _orphan_cleanup_loop(redis: Any) -> None:
+    """Periodically scan for and remove orphan worktrees.
+
+    A worktree becomes an orphan when its Redis session TTL expires.
+    """
+    if redis is None:
+        return
+
+    session_store = SessionStore(redis)
+    lock_key = "lock:orphan_cleanup"
+
+    while not shutdown_event.is_set():
+        # Try to acquire lock, expires in 1 hour
+        acquired = await redis.set(lock_key, "locked", nx=True, ex=3600)
+
+        if acquired:
+            try:
+                orphans = await detect_orphan_worktrees(session_store)
+                for orphan in orphans:
+                    logger.info(f"TTL expired, cleaning up orphan worktree: {orphan}")
+                    shutil.rmtree(orphan, ignore_errors=True)
+
+                    project_dir = get_project_dir_for_worktree(orphan)
+                    if project_dir.exists():
+                        shutil.rmtree(project_dir, ignore_errors=True)
+            except Exception as e:
+                logger.error(f"Error in orphan cleanup loop: {e}")
+
+        # Sleep for 1 hour, checking for shutdown occasionally
+        for _ in range(3600):
+            if shutdown_event.is_set():
+                break
+            await asyncio.sleep(1)
 
 
 async def main():
@@ -774,6 +860,9 @@ async def main():
     )
 
     logger.info("Sandbox worker ready, waiting for jobs...")
+
+    # Start background cleanup task
+    cleanup_task = asyncio.create_task(_orphan_cleanup_loop(job_queue.redis))
 
     try:
         while not shutdown_event.is_set():
@@ -802,6 +891,8 @@ async def main():
 
     finally:
         logger.info("Shutting down sandbox worker...")
+        if cleanup_task and not cleanup_task.done():
+            cleanup_task.cancel()
         await job_queue.close()
         logger.info("Sandbox worker shutdown complete")
 

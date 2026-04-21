@@ -119,10 +119,19 @@ async def webhook(request: Request):
                         "message": f"Worktree cleanup queued ({cleanup_msg['action']})",
                     }
 
+        # Extract state if available (for zombie revival prevention)
+        issue_state = (
+            data.get("issue", {}).get("state")
+            or data.get("pull_request", {}).get("state")
+            or data.get("discussion", {}).get("state")
+            or "open"
+        )
+
         # Determine event data and user query
         event_data = {
             "event_type": event_type,
             "action": action,
+            "issue_state": issue_state,
         }
         user_query = ""
         command = None
@@ -290,7 +299,7 @@ def _build_cleanup_message(
         pr_number = data.get("pull_request", {}).get("number")
         if pr_number:
             return {
-                "action": "cleanup_thread",
+                "action": "expire_thread",
                 "repo": repo,
                 "thread_type": "pr",
                 "thread_id": str(pr_number),
@@ -300,10 +309,20 @@ def _build_cleanup_message(
         issue_number = data.get("issue", {}).get("number")
         if issue_number:
             return {
-                "action": "cleanup_thread",
+                "action": "expire_thread",
                 "repo": repo,
                 "thread_type": "issue",
                 "thread_id": str(issue_number),
+            }
+
+    if event_type == "discussion" and action in ("closed", "deleted", "locked"):
+        discussion_number = data.get("discussion", {}).get("number")
+        if discussion_number:
+            return {
+                "action": "expire_thread",
+                "repo": repo,
+                "thread_type": "discussion",
+                "thread_id": str(discussion_number),
             }
 
     if event_type == "delete" and data.get("ref_type") == "branch":
@@ -313,6 +332,36 @@ def _build_cleanup_message(
                 "action": "cleanup_branch",
                 "repo": repo,
                 "branch": branch,
+            }
+
+    if event_type == "pull_request" and action == "reopened":
+        pr_number = data.get("pull_request", {}).get("number")
+        if pr_number:
+            return {
+                "action": "revive_thread",
+                "repo": repo,
+                "thread_type": "pr",
+                "thread_id": str(pr_number),
+            }
+
+    if event_type == "issues" and action == "reopened":
+        issue_number = data.get("issue", {}).get("number")
+        if issue_number:
+            return {
+                "action": "revive_thread",
+                "repo": repo,
+                "thread_type": "issue",
+                "thread_id": str(issue_number),
+            }
+
+    if event_type == "discussion" and action in ("reopened", "unlocked"):
+        discussion_number = data.get("discussion", {}).get("number")
+        if discussion_number:
+            return {
+                "action": "revive_thread",
+                "repo": repo,
+                "thread_type": "discussion",
+                "thread_id": str(discussion_number),
             }
 
     return None

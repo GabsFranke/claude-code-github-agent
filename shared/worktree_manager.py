@@ -146,6 +146,12 @@ async def _detect_default_branch(bare_repo: str) -> str:
     return "refs/remotes/origin/main"
 
 
+def get_project_dir_for_worktree(worktree_path: Path) -> Path:
+    """Return the SDK project directory for a given worktree path."""
+    safe_cwd = str(worktree_path).replace("/", "-").replace("\\", "-")
+    return Path.home() / ".claude" / "projects" / safe_cwd
+
+
 async def cleanup_worktrees(
     repo: str,
     thread_type: str,
@@ -162,7 +168,10 @@ async def cleanup_worktrees(
         if workflow_dir.is_dir():
             try:
                 shutil.rmtree(workflow_dir, ignore_errors=True)
-                logger.info(f"Cleaned up worktree: {workflow_dir}")
+                project_dir = get_project_dir_for_worktree(workflow_dir)
+                if project_dir.exists():
+                    shutil.rmtree(project_dir, ignore_errors=True)
+                logger.info(f"Cleaned up worktree and project dir: {workflow_dir}")
             except Exception as e:
                 logger.warning(f"Failed to clean up {workflow_dir}: {e}")
 
@@ -192,8 +201,11 @@ async def cleanup_worktrees_by_branch(repo: str, branch: str) -> None:
                 )
                 if code == 0 and branch in (out or ""):
                     shutil.rmtree(workflow_dir, ignore_errors=True)
+                    project_dir = get_project_dir_for_worktree(workflow_dir)
+                    if project_dir.exists():
+                        shutil.rmtree(project_dir, ignore_errors=True)
                     logger.info(
-                        f"Cleaned up worktree for deleted branch: {workflow_dir}"
+                        f"Cleaned up worktree and project dir for deleted branch: {workflow_dir}"
                     )
             except Exception:
                 pass

@@ -28,7 +28,7 @@ workflows:
       include_test_files: true
     conversation:
       persist: true
-      ttl_hours: 48
+      ttl_hours: 720
     # skip_self defaults to true (can be omitted)
 
   triage-issue:
@@ -50,7 +50,7 @@ workflows:
       personalized: false
     conversation:
       persist: true
-      ttl_hours: 48
+      ttl_hours: 720
       auto_continue: true
     # skip_self defaults to true (can be omitted)
 
@@ -74,7 +74,7 @@ workflows:
       priority_focus: ["build_system", "test_structure"]
     conversation:
       persist: true
-      ttl_hours: 48
+      ttl_hours: 720
     skip_self: true # Explicitly set - don't auto-fix CI failures on bot's own PRs
 
   test-toolkit:
@@ -90,7 +90,7 @@ workflows:
       personalized: false
     conversation:
       persist: true
-      ttl_hours: 24
+      ttl_hours: 720
     skip_self: false
 
   generic:
@@ -106,7 +106,7 @@ workflows:
       personalized: false
     conversation:
       persist: true
-      ttl_hours: 168
+      ttl_hours: 720
       auto_continue: false
     skip_self: false # Allow bot to respond to its own /agent commands if needed
 
@@ -127,6 +127,6 @@ workflows:
       include_test_files: true
     conversation:
       persist: true
-      ttl_hours: 48
+      ttl_hours: 720
       auto_continue: true
     skip_self: false # Allow bot's own label trigger from review-pr (loop prevented by reviewer's skip_self)

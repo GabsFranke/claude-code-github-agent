@@ -199,6 +199,22 @@ class SessionStore:
                 break
         return sessions
 
+    async def expire_session(
+        self,
+        repo: str,
+        thread_type: str,
+        thread_id: str,
+        workflow: str,
+        ttl_hours: int = 72,
+    ) -> None:
+        """Set a new TTL for an existing session (e.g., when an issue is closed)."""
+        key = _session_key(repo, thread_type, thread_id, workflow)
+        if await self.redis.exists(key):
+            await self.redis.expire(key, ttl_hours * 3600)
+            logger.info(
+                f"Set TTL to {ttl_hours}h for session {repo}/{thread_type}/{thread_id}/{workflow}"
+            )
+
     async def update_summary(
         self,
         repo: str,
