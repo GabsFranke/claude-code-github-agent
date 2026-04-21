@@ -1,11 +1,43 @@
 import argparse
 import datetime
+import json
 import os
 import re
 import subprocess
 import sys
 from pathlib import Path
 from typing import Optional, TypedDict
+
+
+def _load_dotenv(dotenv_path: Path) -> dict[str, str]:
+    """Parse a .env file and return a dict of key=value pairs."""
+    if not dotenv_path.exists():
+        return {}
+
+    try:
+        from dotenv import dotenv_values
+
+        # Use python-dotenv for reliable parsing (handles multiline, expansion, etc.)
+        return {k: v for k, v in dotenv_values(dotenv_path).items() if v is not None}
+    except ImportError:
+        # Fallback manual parser for standalone execution without dependencies
+        env: dict[str, str] = {}
+        for line in dotenv_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            key = key.strip()
+            # Strip surrounding quotes
+            val = val.strip()
+            if (val.startswith('"') and val.endswith('"')) or (
+                val.startswith("'") and val.endswith("'")
+            ):
+                val = val[1:-1]
+            env[key] = val
+        return env
 
 
 class Session(TypedDict):
@@ -398,9 +430,54 @@ def main() -> None:
         cmd_str = f"claude --resume {session['session_id']}"
         print(f"\033[92mLaunching in new terminal: {cmd_str}\033[0m")
 
+        # Load env vars from .env so MCP servers get GITHUB_TOKEN etc.
+        script_dir = Path(__file__).parent
+        dotenv = _load_dotenv(script_dir / ".env")
+
+        # Patch the .mcp.json in the worktree for host access:
+        # replace mcp_proxy:18000 with localhost:18000 so the local Claude
+        # CLI can reach the proxy (port is exposed on 127.0.0.1:18000).
+        if worktree_path and worktree_path.exists():
+            mcp_json_path = worktree_path / ".mcp.json"
+            if mcp_json_path.exists():
+                try:
+                    mcp_content = mcp_json_path.read_text(encoding="utf-8")
+                    patched = mcp_content.replace(
+                        "http://mcp_proxy:18000", "http://localhost:18000"
+                    )
+                    if patched != mcp_content:
+                        mcp_json_path.write_text(patched, encoding="utf-8")
+                        print("\033[90mPatched .mcp.json: mcp_proxy → localhost\033[0m")
+                except Exception as e:
+                    print(f"\033[93mWarning: could not patch .mcp.json: {e}\033[0m")
+
         if os.name == "nt":
-            # Launch in new PowerShell window
-            os.system(f'start powershell -NoExit -Command "{cmd_str}"')
+            # Build env var assignments for PowerShell
+            assignments = []
+            for k, v in dotenv.items():
+                if not k or k.startswith("#") or not v:
+                    continue
+                # Only export vars that look like secrets/tokens/keys/URLs
+                if not any(
+                    kw in k.upper()
+                    for kw in ("TOKEN", "KEY", "SECRET", "PASSWORD", "URL", "ID")
+                ):
+                    continue
+
+                # Use single quotes for values and escape internal single quotes by doubling them
+                # This is the most robust way to handle special characters (like PEM keys) in PS
+                escaped_v = v.replace("'", "''")
+                assignments.append(f"$env:{k}='{escaped_v}'")
+
+            env_assignments = "; ".join(assignments)
+            ps_cmd = f"{env_assignments}; {cmd_str}" if env_assignments else cmd_str
+
+            # Use subprocess.Popen to avoid nested quoting issues with os.system/cmd.exe
+            # CREATE_NEW_CONSOLE (0x00000010) ensures it opens in a new window
+            subprocess.Popen(
+                ["powershell", "-NoExit", "-Command", ps_cmd],
+                creationflags=0x00000010,
+            )
         elif sys.platform == "darwin":
             # Launch in new macOS Terminal window
             pwd = str(worktree_path) if worktree_path else os.getcwd()

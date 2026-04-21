@@ -8,7 +8,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-import yaml  # type: ignore[import-untyped]
+import yaml  # type: ignore[import]
 from pydantic import BaseModel, Field, ValidationError
 
 logger = logging.getLogger(__name__)

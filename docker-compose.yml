@@ -71,7 +71,7 @@ services:
       context: .
       dockerfile: services/sandbox_executor/Dockerfile
     entrypoint: ["/app/entrypoint.sh"]
-    command: sh -c 'python -m services.sandbox_executor.sandbox_worker 2>&1 | tee /var/log/bot/sandbox_worker.log'
+    command: sh -c '(socat TCP-LISTEN:18000,fork TCP:mcp_proxy:18000 >/dev/null 2>&1 &) && python -m services.sandbox_executor.sandbox_worker 2>&1 | tee /var/log/bot/sandbox_worker.log'
     env_file: .env
 
     volumes:
@@ -103,6 +103,7 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - GITHUB_TOKEN=${GITHUB_TOKEN}
       - SDK_DEBUG=${SDK_DEBUG:-false}
+      - ALLOW_HOST_MCP=${ALLOW_HOST_MCP:-true}
       - MEMORY_WORKER_ENABLED=${MEMORY_WORKER_ENABLED:-true}
       - RETROSPECTOR_ENABLED=${RETROSPECTOR_ENABLED:-true}
       - INDEXING_ENABLED=${INDEXING_ENABLED:-false}
@@ -114,11 +115,33 @@ services:
       langfuse:
         condition: service_started
 
+  mcp_proxy:
+    build:
+      context: .
+      dockerfile: services/mcp_proxy/Dockerfile
+    command: sh -c '(socat TCP-LISTEN:11434,fork TCP:host.docker.internal:11434 >/dev/null 2>&1 &) && (socat TCP-LISTEN:6333,fork TCP:qdrant:6333 >/dev/null 2>&1 &) && uvicorn services.mcp_proxy.main:app --host 0.0.0.0 --port 18000 2>&1 | tee /var/log/bot/mcp_proxy.log'
+    env_file: .env
+    ports:
+      - "127.0.0.1:18000:18000"
+    volumes:
+      - repo-cache:/var/cache/repos:rw
+      - ~/.claude:/home/bot/.claude:rw
+      - ./logs:/var/log/bot
+    environment:
+      - PYTHONPATH=/app
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - QDRANT_URL=http://qdrant:6333
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - INDEXING_ENABLED=${INDEXING_ENABLED:-false}
+    depends_on:
+      redis:
+        condition: service_healthy
+
   memory_worker:
     build:
       context: .
       dockerfile: services/memory_worker/Dockerfile
-    command: sh -c '(socat TCP-LISTEN:11434,fork TCP:host.docker.internal:11434 >/dev/null 2>&1 &) && python -m services.memory_worker.memory_worker 2>&1 | tee /var/log/bot/memory_worker.log'
+    command: sh -c '(socat TCP-LISTEN:11434,fork TCP:host.docker.internal:11434 >/dev/null 2>&1 &) && (socat TCP-LISTEN:18000,fork TCP:mcp_proxy:18000 >/dev/null 2>&1 &) && python -m services.memory_worker.memory_worker 2>&1 | tee /var/log/bot/memory_worker.log'
     env_file: .env
     volumes:
       # Claude home — reads transcripts, writes memory files
@@ -309,7 +332,7 @@ services:
     build:
       context: .
       dockerfile: services/retrospector_worker/Dockerfile
-    command: sh -c '(socat TCP-LISTEN:11434,fork TCP:host.docker.internal:11434 >/dev/null 2>&1 &) && python -m services.retrospector_worker.retrospector_worker 2>&1 | tee /var/log/bot/retrospector_worker.log'
+    command: sh -c '(socat TCP-LISTEN:11434,fork TCP:host.docker.internal:11434 >/dev/null 2>&1 &) && (socat TCP-LISTEN:18000,fork TCP:mcp_proxy:18000 >/dev/null 2>&1 &) && python -m services.retrospector_worker.retrospector_worker 2>&1 | tee /var/log/bot/retrospector_worker.log'
     env_file: .env
     volumes:
       # Claude home — reads transcripts

@@ -4,6 +4,7 @@ This module provides a builder pattern for constructing ClaudeAgentOptions
 with sensible defaults and flexible customization for different worker types.
 """
 
+import json
 import logging
 import os
 from pathlib import Path
@@ -17,6 +18,29 @@ logger = logging.getLogger(__name__)
 
 # Total system prompt budget in tokens
 SYSTEM_PROMPT_BUDGET = 12_000
+
+
+def _discover_host_mcp_names(cwd: str | None = None) -> list[str]:
+    """Read MCP server names from ~/.claude.json for allowed_tools."""
+    claude_json = Path.home() / ".claude.json"
+    if not claude_json.exists():
+        return []
+    try:
+        data = json.load(open(claude_json, encoding="utf-8"))
+    except Exception:
+        return []
+
+    names: set[str] = set(data.get("mcpServers", {}).keys())
+
+    if cwd:
+        projects = data.get("projects", {})
+        entry = projects.get(cwd) or projects.get(
+            next((k for k in projects if k.lower() == (cwd or "").lower()), ""), {}
+        )
+        if isinstance(entry, dict):
+            names.update(entry.get("mcpServers", {}).keys())
+
+    return sorted(names)
 
 
 class SDKOptionsBuilder:
@@ -132,57 +156,6 @@ class SDKOptionsBuilder:
         }
         return self
 
-    def with_github_actions_mcp(self, token: str) -> "SDKOptionsBuilder":
-        """Add GitHub Actions MCP server for CI/CD operations.
-
-        Args:
-            token: GitHub authentication token
-
-        Returns:
-            Self for method chaining
-        """
-        # Determine plugin path (priority order):
-        # 1. Docker container: /app/plugins/ci-failure-toolkit
-        # 2. Project directory: <project_root>/plugins/ci-failure-toolkit
-        # 3. User home: ~/.claude/plugins/ci-failure-toolkit
-
-        plugin_path = None
-        server_script = None
-
-        # Check Docker container path
-        if os.path.exists("/app/plugins/ci-failure-toolkit"):
-            plugin_path = "/app/plugins/ci-failure-toolkit"
-            server_script = (
-                "/app/plugins/ci-failure-toolkit/servers/github_actions_server.py"
-            )
-        else:
-            # Check project directory (relative to this file)
-            project_plugin_path = os.path.join(
-                Path(__file__).parent.parent, "plugins/ci-failure-toolkit"
-            )
-            if os.path.exists(project_plugin_path):
-                plugin_path = str(project_plugin_path)
-                server_script = os.path.join(
-                    plugin_path, "servers/github_actions_server.py"
-                )
-            else:
-                # Fall back to user home directory
-                plugin_path = os.path.expanduser("~/.claude/plugins/ci-failure-toolkit")
-                server_script = os.path.join(
-                    plugin_path, "servers/github_actions_server.py"
-                )
-
-        self._mcp_servers["github-actions"] = {
-            "type": "stdio",
-            "command": "python",
-            "args": [server_script],
-            "env": {
-                "PYTHONPATH": plugin_path,
-                "GITHUB_TOKEN": token,
-            },
-        }
-        return self
-
     def with_memory_mcp(self, repo: str) -> "SDKOptionsBuilder":
         """Add memory MCP server for repository memory operations.
 
@@ -201,67 +174,6 @@ class SDKOptionsBuilder:
                 "PYTHONPATH": "/app",
             },
         }
-        return self
-
-    def with_codebase_tools(self, worktree_path: str) -> "SDKOptionsBuilder":
-        """Add codebase tools MCP server for structured code search.
-
-        Provides find_definitions, find_references, search_codebase, and
-        read_file_summary tools that reuse the tree-sitter infrastructure.
-
-        Args:
-            worktree_path: Absolute path to the git worktree.
-
-        Returns:
-            Self for method chaining
-        """
-        self._mcp_servers["codebase-tools"] = {
-            "type": "stdio",
-            "command": "python3",
-            "args": ["/app/mcp_servers/codebase_tools/server.py"],
-            "env": {
-                "REPO_PATH": worktree_path,
-                "PYTHONPATH": "/app",
-            },
-        }
-        return self
-
-    def with_semantic_search(self, repo: str) -> "SDKOptionsBuilder":
-        """Add semantic search MCP server for embedding-based code queries.
-
-        Only registers the server if indexing is enabled and both Qdrant
-        and Gemini API are configured. If unavailable, the tool gracefully
-        returns empty results.
-
-        Args:
-            repo: Repository identifier (e.g., "owner/repo") for collection lookup.
-
-        Returns:
-            Self for method chaining
-        """
-        indexing_enabled, qdrant_url, gemini_key = self._resolve_indexing_config()
-
-        if indexing_enabled and qdrant_url and gemini_key:
-            self._mcp_servers["semantic-search"] = {
-                "type": "stdio",
-                "command": "python3",
-                "args": ["/app/mcp_servers/semantic_search/server.py"],
-                "env": {
-                    "REPO_PATH": self.cwd,
-                    "GITHUB_REPOSITORY": repo,
-                    "QDRANT_URL": qdrant_url,
-                    "GEMINI_API_KEY": gemini_key,
-                    "EMBEDDING_DIMENSION": os.getenv("EMBEDDING_DIMENSION", "1024"),
-                    "PYTHONPATH": "/app",
-                },
-            }
-            logger.info(f"Semantic search MCP registered for {repo}")
-        else:
-            logger.debug(
-                "Semantic search skipped: INDEXING_ENABLED not set or "
-                "Qdrant/Gemini not configured"
-            )
-
         return self
 
     # Plugin methods (à la carte)
@@ -317,7 +229,7 @@ class SDKOptionsBuilder:
         Returns:
             Self for method chaining
         """
-        return self.with_tools(
+        tools = [
             "Task",
             "Skill",
             "Agent",
@@ -330,14 +242,17 @@ class SDKOptionsBuilder:
             "Grep",
             "Glob",
             "mcp__github__*",
-            "mcp__github-actions__*",
+            "mcp__github_actions__*",
             "mcp__memory__memory_read",
-            "mcp__codebase-tools__find_definitions",
-            "mcp__codebase-tools__find_references",
-            "mcp__codebase-tools__search_codebase",
-            "mcp__codebase-tools__read_file_summary",
-            "mcp__semantic-search__semantic_search",
-        )
+            "mcp__codebase_tools__*",
+            "mcp__semantic_search__*",
+        ]
+
+        if os.getenv("ALLOW_HOST_MCP", "false").lower() == "true":
+            for name in _discover_host_mcp_names(self.cwd):
+                tools.append(f"mcp__{name}__*")
+
+        return self.with_tools(*tools)
 
     def with_retrospector_toolset(self) -> "SDKOptionsBuilder":
         """Add toolset for retrospector worker (instruction analysis).
@@ -775,8 +690,8 @@ class SDKOptionsBuilder:
             stderr=lambda msg: logger.warning(f"SDK stderr: {msg}"),
             system_prompt=self._system_prompt,
             resume=self._resume,
-            continue_conversation=self._continue_conversation or None,
-            fork_session=self._fork_session or None,
+            continue_conversation=self._continue_conversation,
+            fork_session=self._fork_session,
         )
 
     def _assemble_system_prompt(self) -> str | None:

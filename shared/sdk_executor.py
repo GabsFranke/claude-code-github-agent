@@ -119,7 +119,9 @@ async def _execute_sdk_once(
     sdk_timeout = timeout or int(os.getenv("SDK_EXECUTION_TIMEOUT", "1800"))
     response_parts = []
     all_messages = []
-    result_info = {
+    from typing import Any
+
+    result_info: dict[str, Any] = {
         "num_turns": 0,
         "duration_ms": 0,
         "is_error": False,

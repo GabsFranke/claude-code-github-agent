@@ -449,10 +449,10 @@ git --git-dir={repo_dir} worktree remove --force {workspace}
 - `Read`, `Write`, `Edit` — File operations in worktree
 - `List`, `Search`, `Grep`, `Glob` — Code exploration in worktree
 - `mcp__github__*` — All GitHub MCP tools
-- `mcp__github-actions__*` — CI/CD workflow tools
+- `mcp__github_actions__*` — CI/CD workflow tools
 - `mcp__memory__*` — Repository memory tools
-- `mcp__codebase-tools__*` — AST-based code analysis
-- `mcp__semantic-search__*` — Embedding-based code search
+- `mcp__codebase_tools__*` — AST-based code analysis
+- `mcp__semantic_search__*` — Embedding-based code search
 
 **Local vs Remote Operations**:
 
@@ -870,7 +870,7 @@ Plugins are auto-discovered from `~/.claude/plugins/` at SDK build time via `SDK
 
 - permission_mode: `acceptEdits` (auto-approve edits)
 - Full toolset: Task, Skill, Bash, Read, Write, Edit, List, Search, Grep, Glob
-- All MCP tool wildcards: `mcp__github__*`, `mcp__github-actions__*`, `mcp__memory__*`, etc.
+- All MCP tool wildcards: `mcp__github__*`, `mcp__github_actions__*`, `mcp__memory__*`, etc.
 
 **Worker-Specific Toolsets**:
 
