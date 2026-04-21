@@ -8,6 +8,7 @@ WORKDIR /app
 # Minimal OS deps (no git/build tools needed — just Python and file I/O)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
+    socat \
     && rm -rf /var/lib/apt/lists/*
 
 # Shared utilities and subagent definitions

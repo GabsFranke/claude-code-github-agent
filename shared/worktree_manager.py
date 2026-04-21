@@ -14,7 +14,7 @@ from shared import execute_git_command
 
 logger = logging.getLogger(__name__)
 
-WORKTREE_BASE = Path("/home/bot/.claude/worktrees")  # nosec B108
+WORKTREE_BASE = Path.home() / ".claude" / "worktrees"
 
 
 def get_worktree_path(
@@ -72,6 +72,12 @@ async def reuse_or_create_worktree(
             )
         except Exception:
             pass
+
+    # Prune any stale worktree registrations (directory missing but registered)
+    try:
+        await execute_git_command(f"git --git-dir={bare_repo} worktree prune")
+    except Exception:
+        pass
 
     # Ensure parent directory exists
     worktree_path.parent.mkdir(parents=True, exist_ok=True)

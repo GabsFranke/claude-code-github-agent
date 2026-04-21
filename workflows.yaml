@@ -48,6 +48,10 @@ workflows:
     context:
       repomap_budget: 1024
       personalized: false
+    conversation:
+      persist: true
+      ttl_hours: 48
+      auto_continue: true
     # skip_self defaults to true (can be omitted)
 
   fix-ci:
@@ -84,6 +88,9 @@ workflows:
     context:
       repomap_budget: 4096
       personalized: false
+    conversation:
+      persist: true
+      ttl_hours: 24
     skip_self: false
 
   generic:
@@ -118,4 +125,8 @@ workflows:
       repomap_budget: 4096
       personalized: true
       include_test_files: true
+    conversation:
+      persist: true
+      ttl_hours: 48
+      auto_continue: true
     skip_self: false # Allow bot's own label trigger from review-pr (loop prevented by reviewer's skip_self)

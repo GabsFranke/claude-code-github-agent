@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 def _get_memory_dir(repo: str) -> Path:
     """Get the memory directory for a repository."""
-    return Path(f"/home/bot/.claude/memory/{repo}/memory")
+    return Path.home() / ".claude" / "memory" / repo / "memory"
 
 
 def _validate_path(full_path: Path, base_dir: Path) -> None:

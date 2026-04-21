@@ -17,7 +17,7 @@ from .repomap import RepoMap
 logger = logging.getLogger(__name__)
 
 # Default cache directory within agent-memory volume
-DEFAULT_CACHE_DIR = Path("/home/bot/.claude")
+DEFAULT_CACHE_DIR = Path.home() / ".claude"
 
 # ---------------------------------------------------------------------------
 # Priority focus area patterns

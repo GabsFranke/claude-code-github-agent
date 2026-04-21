@@ -1,6 +1,6 @@
 .PHONY: help build up down restart logs logs-all logs-webhook logs-sdk ps \
        up-minimal down-minimal lint lint-fix lint-fast test test-unit \
-       test-integration clean clean-logs prune ngrok start
+       test-integration clean clean-logs prune ngrok start claude
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-15s\033[0m %s\n", $$1, $$2}'
@@ -73,6 +73,9 @@ ngrok: ## Start ngrok tunnel to webhook on port 10000
 # --- Dev workflows ---
 
 start: build up ngrok ## Build, start services, and open ngrok tunnel
+
+claude: ## Interactive prompt to resume Claude docker sessions in a new terminal
+	python claude.py
 
 # --- Cleanup ---
 

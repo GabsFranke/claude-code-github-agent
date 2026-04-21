@@ -710,7 +710,9 @@ class SDKOptionsBuilder:
         # Fetch memory from local volume
         if fetch_memory:
             try:
-                memory_path = f"/home/bot/.claude/memory/{repo}/memory/index.md"
+                memory_path = str(
+                    Path.home() / ".claude" / "memory" / repo / "memory" / "index.md"
+                )
                 if os.path.exists(memory_path):
                     with open(memory_path, encoding="utf-8") as f:
                         memory_index = f.read()

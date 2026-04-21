@@ -30,14 +30,13 @@ from shared.sdk_executor import execute_sdk  # noqa: E402
 from shared.sdk_factory import SDKOptionsBuilder  # noqa: E402
 from shared.session_store import SessionStore  # noqa: E402
 from shared.worktree_lock import PendingPrompt, WorktreeKey, WorktreeLock  # noqa: E402
-from subagents import AGENTS  # noqa: E402
-
-from .worktree_manager import (  # noqa: E402
+from shared.worktree_manager import (  # noqa: E402
     cleanup_worktrees,
     cleanup_worktrees_by_branch,
     get_worktree_path,
     reuse_or_create_worktree,
 )
+from subagents import AGENTS  # noqa: E402
 
 # Configure logging
 setup_logging(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -104,6 +103,11 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
 
         persist_session = conversation_config.get("persist", False)
         ttl_hours = conversation_config.get("ttl_hours", 168)
+        logger.info(
+            f"Session config: persist={persist_session}, ttl={ttl_hours}h, "
+            f"mode={session_mode}, workflow={workflow_name}, "
+            f"conversation_config={conversation_config}"
+        )
 
         # Build worktree key for locking (only needed for persistent sessions)
         worktree_key = None
@@ -212,9 +216,11 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
             )
         else:
             # Legacy path: ephemeral worktree
+            ephemeral_base = Path.home() / ".claude" / "worktrees" / "ephemeral"
+            ephemeral_base.mkdir(parents=True, exist_ok=True)
             workspace_base = tempfile.mkdtemp(
                 prefix=f"job_{job_id[:8]}_",
-                dir="/tmp",  # nosec B108
+                dir=str(ephemeral_base),
             )
             os.rmdir(workspace_base)  # git worktree add needs it to not exist
             workspace = workspace_base
@@ -407,7 +413,7 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
                 mentioned_files=mentioned_files,
                 token_budget=context_budget,
                 include_test_files=include_test_files,
-                cache_dir=Path("/home/bot/.claude"),
+                cache_dir=Path.home() / ".claude",
             )
             logger.info(
                 f"Generated structural context: "
@@ -458,7 +464,9 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
             .with_agents(AGENTS)
             .with_langfuse_hooks(parent_span_id=parent_span_id)
             .with_transcript_staging(repo, workflow_name, ref=ref)
-            .with_writable_dir(f"/home/bot/.claude/memory/{repo}/memory")
+            .with_writable_dir(
+                str(Path.home() / ".claude" / "memory" / repo / "memory")
+            )
             .with_system_prompt(system_context)  # Workflow-specific system context
             .with_repository_context(
                 claude_md=claude_md, memory_index=memory_index
@@ -558,6 +566,10 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
 
         # Save session metadata for persistent conversations
         new_session_id = result.get("session_id")
+        logger.info(
+            f"Session result: id={new_session_id}, persist={persist_session}, "
+            f"cwd={workspace}"
+        )
         if new_session_id and persist_session:
             try:
                 session_store = SessionStore(job_queue.redis)

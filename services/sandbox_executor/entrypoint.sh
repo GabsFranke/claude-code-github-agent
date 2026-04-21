@@ -17,4 +17,7 @@ if [ -d "$SKILLS_SRC" ]; then
     cp -rn "$SKILLS_SRC"/* "$CLAUDE_DIR/skills/" 2>/dev/null || true
 fi
 
+# Forward localhost:11434 to host.docker.internal:11434 so local Ollama configuration works inside Docker
+socat TCP-LISTEN:11434,fork TCP:host.docker.internal:11434 >/dev/null 2>&1 &
+
 exec "$@"

@@ -99,8 +99,11 @@ class RepositoryContextLoader:
             Content of index.md if found, empty string if file doesn't exist.
         """
         import os
+        from pathlib import Path
 
-        memory_path = f"/home/bot/.claude/memory/{repo}/memory/index.md"
+        memory_path = str(
+            Path.home() / ".claude" / "memory" / repo / "memory" / "index.md"
+        )
         if not os.path.exists(memory_path):
             return ""
 
