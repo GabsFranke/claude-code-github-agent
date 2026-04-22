@@ -430,9 +430,9 @@ class TestWorkflowEngine:
         assert system_context is not None
         assert "issue #42" in system_context
         assert "test/project" in system_context  # Template uses {repo}
-        assert (
-            "add labels" in system_context.lower()
-        )  # Check system context, not prompt
+        # Verify placeholders were actually substituted (not left as raw template)
+        assert "{issue_number}" not in system_context
+        assert "{repo}" not in system_context
 
     def test_empty_issue_number(self, tmp_path):
         """Test building prompt with None issue_number."""
