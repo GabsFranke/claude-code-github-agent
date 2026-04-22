@@ -293,35 +293,57 @@ Volumes: Minimal + langfuse-db-data, langfuse-clickhouse-data, langfuse-clickhou
 
 ### Docker Images
 
-| Service | Base Image | Notable |
-|---------|-----------|---------|
-| webhook | python:3.12-slim | FastAPI |
-| worker | python:3.12-slim | Healthcheck |
-| sandbox_worker | python:3.12-slim | Non-root `bot` user, OS tools (git, jq, ripgrep), plugins + skills |
-| repo_sync | python:3.12-slim | Non-root `bot` user, git |
-| memory_worker | python:3.12-slim | Non-root `bot` user |
-| retrospector_worker | python:3.12-slim | Non-root `bot` user, git |
-| indexing_worker | python:3.12-slim | Non-root `bot` user, git |
+| Service             | Base Image       | Notable                                                            |
+| ------------------- | ---------------- | ------------------------------------------------------------------ |
+| webhook             | python:3.12-slim | FastAPI                                                            |
+| worker              | python:3.12-slim | Healthcheck                                                        |
+| sandbox_worker      | python:3.12-slim | Non-root `bot` user, OS tools (git, jq, ripgrep), plugins + skills |
+| repo_sync           | python:3.12-slim | Non-root `bot` user, git                                           |
+| memory_worker       | python:3.12-slim | Non-root `bot` user                                                |
+| retrospector_worker | python:3.12-slim | Non-root `bot` user, git                                           |
+| indexing_worker     | python:3.12-slim | Non-root `bot` user, git                                           |
 
 ### Scaling Strategy
 
 Each sandbox worker processes one job at a time. Scale based on your expected activity:
 
 ```bash
-# Low activity (1-5 events/hour)
-docker-compose up -d  # Default: 1 sandbox_worker
+# Using Make (recommended)
+make up SANDBOX=10                     # Scale sandbox workers
+make up SANDBOX=10 MEMORY=2            # Scale multiple worker types
+make start SANDBOX=10                  # Build, scale, and start ngrok
 
-# Medium activity (5-20 events/hour)
-docker-compose up --scale sandbox_worker=5 -d
-
-# High activity (20+ events/hour)
+# Using docker-compose directly
 docker-compose up --scale sandbox_worker=10 -d
-
-# Very high activity (50+ events/hour)
-docker-compose up --scale sandbox_worker=20 -d
+docker-compose up --scale sandbox_worker=10 --scale memory_worker=2 -d
 ```
 
-Jobs typically take 2-10 minutes. Scale based on your peak activity, not average. Other workers (memory, retrospector, indexing) stay at 1 each.
+**Activity-based scaling recommendations**:
+
+```bash
+# Low activity (1-5 events/hour)
+make up                                # Default: 1 of each worker
+
+# Medium activity (5-20 events/hour)
+make up SANDBOX=5
+
+# High activity (20+ events/hour)
+make up SANDBOX=10
+
+# Very high activity (50+ events/hour)
+make up SANDBOX=20
+```
+
+**Scale multiple worker types**:
+
+```bash
+# Scale all worker types
+make up SANDBOX=10 MEMORY=2 RETRO=2 INDEXING=2
+
+# If no scaling parameters provided, uses docker-compose defaults (1 of each)
+```
+
+Jobs typically take 2-10 minutes. Scale based on your peak activity, not average. The sandbox worker is the primary bottleneck — other workers (memory, retrospector, indexing) typically stay at 1 each unless you have very high activity.
 
 ### Manual Installation (without Docker)
 
@@ -348,17 +370,17 @@ cd services/agent_worker && python worker.py
 
 ### Performance Characteristics
 
-| Component | Typical Time |
-|-----------|-------------|
-| Webhook | < 100ms |
-| Worker (job creation) | < 1s |
-| Repo Sync (initial clone) | 2-30s |
-| Repo Sync (update) | ~1s |
-| Worktree creation | ~1s from cached bare repo |
-| Sandbox execution | 1-30 min |
-| Memory extraction | 30-60s (Haiku) |
-| Retrospector | 2-5 min (Sonnet) |
-| Indexing | 1-5 min (depends on repo size) |
+| Component                 | Typical Time                   |
+| ------------------------- | ------------------------------ |
+| Webhook                   | < 100ms                        |
+| Worker (job creation)     | < 1s                           |
+| Repo Sync (initial clone) | 2-30s                          |
+| Repo Sync (update)        | ~1s                            |
+| Worktree creation         | ~1s from cached bare repo      |
+| Sandbox execution         | 1-30 min                       |
+| Memory extraction         | 30-60s (Haiku)                 |
+| Retrospector              | 2-5 min (Sonnet)               |
+| Indexing                  | 1-5 min (depends on repo size) |
 
 First job for a repo takes ~30s (clone). Subsequent jobs take ~1s (worktree from cached bare repo). Repomap is cached by commit hash + personalization.
 
@@ -455,9 +477,9 @@ ANTHROPIC_RATE_LIMIT=100 # Requests per minute
 
 **Anthropic API tiers**:
 
-| Tier | Limit |
-|------|-------|
-| Tier 1 | 50 req/min |
+| Tier   | Limit       |
+| ------ | ----------- |
+| Tier 1 | 50 req/min  |
 | Tier 2 | 100 req/min |
 | Tier 3 | 200 req/min |
 | Tier 4 | 400 req/min |
@@ -488,11 +510,11 @@ workflows:
         - /my-command
     prompt:
       template: "Do something with {repo} #{issue_number}"
-      system_context: "my-context.md"  # Optional, loaded from prompts/
+      system_context: "my-context.md" # Optional, loaded from prompts/
     context:
       repomap_budget: 2048
       personalized: false
-    skip_self: true  # Default: true
+    skip_self: true # Default: true
 ```
 
 The `WorkflowEngine` auto-loads the config. Place system context files in `prompts/`.
@@ -503,8 +525,8 @@ Filters use dot-path resolution against the webhook payload:
 
 ```yaml
 filters:
-  workflow_job.conclusion: "failure"  # Exact match
-  label.name: "triage"                # Exact match
+  workflow_job.conclusion: "failure" # Exact match
+  label.name: "triage" # Exact match
 ```
 
 ### Add New Subagent

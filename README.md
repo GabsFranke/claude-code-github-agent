@@ -41,7 +41,7 @@ Runs on your infrastructure. Scales horizontally. Full observability via Langfus
 - **40+ GitHub events** — PRs, issues, comments, pushes, CI/CD, discussions, labels, releases, and more
 - **YAML-driven workflows** — Define triggers, commands, filters, and prompts in `workflows.yaml`, no code changes needed
 - **Slash commands** — `/review`, `/fix-ci`, `/triage`, `/agent <request>` in any issue or PR comment
-- **Horizontal scaling** — Scale sandbox workers independently: `docker-compose up --scale sandbox_worker=10`
+- **Horizontal scaling** — Scale sandbox workers independently: `make up SANDBOX=10`
 
 ### Claude Code Integration
 
