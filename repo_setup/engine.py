@@ -1,6 +1,7 @@
 """YAML-driven repository setup engine."""
 
 import asyncio
+import hashlib
 import logging
 import os
 import sys
@@ -61,7 +62,32 @@ class RepoSetupConfig(BaseModel):
 
 
 class RepoSetupEngine:
-    """Loads repository setup configuration from YAML and executes setup commands."""
+    """Loads repository setup configuration from YAML and executes setup commands.
+
+    In addition to the commands defined in repo-setup.yaml, the engine
+    automatically injects a ``$FAST_CACHE`` environment variable into every
+    setup command.  It points to a deterministic, per-worktree directory on
+    the native Docker volume (``/var/cache/repos/fast_cache/<hash>/``).
+
+    Why this matters on Docker Desktop (Windows / macOS):
+        Docker Desktop bridges the host filesystem into its Linux VM via the
+        9P/virtiofs protocol.  Writing thousands of small files across that
+        bridge — e.g. ``pip install``, ``npm ci``, ``cargo build`` — is orders
+        of magnitude slower than writing to a native ext4 volume and can
+        easily cause setup timeouts.
+
+    Usage pattern in repo-setup.yaml::
+
+        setup_commands:
+          # 1. Create the dir INSIDE $FAST_CACHE (real dir — no pre-existing symlink)
+          - "python -m venv $FAST_CACHE/.venv && ln -sfn $FAST_CACHE/.venv .venv"
+          # 2. The symlink exists now — tooling works normally from here
+          - ".venv/bin/pip install -r requirements.txt"
+
+    The variable is only set when ``/var/cache/repos`` exists (i.e. inside the
+    Docker container).  Outside Docker it is silently omitted, so setup
+    commands that don't reference it continue to work unchanged.
+    """
 
     def __init__(self, config_path: str | Path | None = None):
         """Initialize repo setup engine from YAML config.
@@ -292,6 +318,18 @@ class RepoSetupEngine:
                 else:
                     env[key] = value
             logger.debug(f"Added custom env vars: {list(config.env.keys())}")
+
+        # Inject $FAST_CACHE — a deterministic path on the fast native Docker
+        # volume (/var/cache/repos).  Setup commands can use this to place heavy
+        # I/O directories (venvs, node_modules, target/) on native ext4 instead
+        # of the slow Docker Desktop 9P/virtiofs bind-mount.
+        fast_cache_base = Path("/var/cache/repos/fast_cache")
+        if fast_cache_base.parent.exists():
+            ws_hash = hashlib.md5(workspace.encode()).hexdigest()[:12]
+            fast_cache_dir = fast_cache_base / ws_hash
+            fast_cache_dir.mkdir(parents=True, exist_ok=True)
+            env["FAST_CACHE"] = str(fast_cache_dir)
+            logger.debug(f"$FAST_CACHE={fast_cache_dir}")
 
         start_time = asyncio.get_event_loop().time()
         results: list[dict[str, Any]] = []
