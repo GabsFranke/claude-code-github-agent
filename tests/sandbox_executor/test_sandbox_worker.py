@@ -1,9 +1,17 @@
 """Unit tests for sandbox worker module."""
 
 import asyncio
+import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+# Default BOT_USER_EMAIL contains [bot] which fails the safe-character regex
+# in process_job. Provide clean env vars so the validation passes.
+_SAFE_ENV_OVERRIDES = {
+    "BOT_USERNAME": "Claude Code Agent",
+    "BOT_USER_EMAIL": "claude-code-agent@users.noreply.github.com",
+}
 
 
 @pytest.fixture(autouse=True)
@@ -53,6 +61,7 @@ class TestProcessJob:
         }
 
         with (
+            patch.dict(os.environ, _SAFE_ENV_OVERRIDES),
             patch(
                 "services.sandbox_executor.sandbox_worker.wait_for_repo_sync",
                 new_callable=AsyncMock,
@@ -84,6 +93,10 @@ class TestProcessJob:
                 return_value="/original",
             ),
             patch("services.sandbox_executor.sandbox_worker.os.makedirs"),
+            patch("services.sandbox_executor.sandbox_worker.os.open"),
+            patch("services.sandbox_executor.sandbox_worker.os.write"),
+            patch("services.sandbox_executor.sandbox_worker.os.close"),
+            patch("services.sandbox_executor.sandbox_worker.os.remove"),
             patch(
                 "services.sandbox_executor.sandbox_worker.os.path.exists",
                 return_value=False,
@@ -135,6 +148,7 @@ class TestProcessJob:
         }
 
         with (
+            patch.dict(os.environ, _SAFE_ENV_OVERRIDES),
             patch(
                 "services.sandbox_executor.sandbox_worker.wait_for_repo_sync",
                 new_callable=AsyncMock,
@@ -160,6 +174,10 @@ class TestProcessJob:
                 return_value="/original",
             ),
             patch("services.sandbox_executor.sandbox_worker.os.makedirs"),
+            patch("services.sandbox_executor.sandbox_worker.os.open"),
+            patch("services.sandbox_executor.sandbox_worker.os.write"),
+            patch("services.sandbox_executor.sandbox_worker.os.close"),
+            patch("services.sandbox_executor.sandbox_worker.os.remove"),
             patch(
                 "services.sandbox_executor.sandbox_worker.os.path.exists",
                 return_value=False,
