@@ -7,6 +7,7 @@ so they can be accessed over HTTP by the host machine and other network clients.
 import asyncio
 import logging
 import os
+import re
 import uuid
 
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -24,22 +25,98 @@ sessions: dict[str, asyncio.subprocess.Process] = {}
 
 MCP_SERVERS_DIR = os.getenv("MCP_SERVERS_DIR", "/app/mcp_servers")
 
+# Security: allowed prefixes for query parameters injected as env vars.
+# Prevents overwriting sensitive env vars like PATH, HOME, LD_LIBRARY_PATH, etc.
+DEFAULT_ALLOWED_ENV_PREFIXES = ("REPO_", "GITHUB_", "MCP_", "QDRANT_", "PYTHONPATH")
+_ALLOWED_ENV_PREFIXES: tuple[str, ...] | None = None
+
+
+def _get_allowed_env_prefixes() -> tuple[str, ...]:
+    """Return the cached allowed env var prefixes, computing once on first use."""
+    global _ALLOWED_ENV_PREFIXES
+    if _ALLOWED_ENV_PREFIXES is None:
+        custom = os.getenv("MCP_ALLOWED_ENV_PREFIXES")
+        if custom:
+            _ALLOWED_ENV_PREFIXES = tuple(
+                p.strip() for p in custom.split(",") if p.strip()
+            )
+        else:
+            _ALLOWED_ENV_PREFIXES = DEFAULT_ALLOWED_ENV_PREFIXES
+    return _ALLOWED_ENV_PREFIXES
+
+
+def _is_safe_server_name(name: str) -> bool:
+    """Validate that a server_name is safe for filesystem path construction.
+
+    Rejects names containing path traversal sequences, directory separators,
+    null bytes, or any character outside the allowed set (alphanumeric,
+    hyphens, underscores).
+    """
+    if not name:
+        return False
+    # Reject null bytes, path separators, and traversal sequences
+    if "\x00" in name or "/" in name or "\\" in name or ".." in name:
+        return False
+    # Only allow alphanumeric, hyphens, and underscores
+    return bool(re.fullmatch(r"[A-Za-z0-9_-]+", name))
+
+
+def _resolve_and_validate_server_script(server_name: str) -> str:
+    """Resolve the server script path and verify it stays within MCP_SERVERS_DIR.
+
+    Returns the resolved script path if safe, raises HTTPException otherwise.
+    """
+    server_script = os.path.join(MCP_SERVERS_DIR, server_name, "server.py")
+    resolved_script = os.path.realpath(server_script)
+    resolved_base = os.path.realpath(MCP_SERVERS_DIR)
+
+    # Verify the resolved path is still within the base directory
+    if not resolved_script.startswith(resolved_base + os.sep):
+        raise HTTPException(
+            status_code=400, detail="Invalid server name: path escape detected"
+        )
+
+    # Verify the resolved path ends with the expected filename
+    if not resolved_script.endswith(os.path.join(server_name, "server.py")):
+        raise HTTPException(
+            status_code=400, detail="Invalid server name: unexpected path structure"
+        )
+
+    if not os.path.isfile(resolved_script):
+        raise HTTPException(status_code=404, detail="Server not found")
+
+    return resolved_script
+
 
 @app.get("/mcp/{server_name}/sse")
 async def mcp_sse(server_name: str, request: Request):
     """Establish an SSE connection to an MCP server.
 
     Spawns the underlying stdio Python process and routes stdin/stdout.
-    Query parameters are passed to the subprocess as environment variables.
+    Query parameters are passed to the subprocess as environment variables
+    (only those matching the allowed prefix whitelist).
     """
-    server_script = os.path.join(MCP_SERVERS_DIR, server_name, "server.py")
-    if not os.path.isfile(server_script):
-        raise HTTPException(status_code=404, detail="Server not found")
+    if not _is_safe_server_name(server_name):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid server name: must be alphanumeric with hyphens/underscores only",
+        )
 
-    # Read query parameters to pass as environment variables
+    server_script = _resolve_and_validate_server_script(server_name)
+
+    # Read query parameters to pass as environment variables.
+    # Security: only inject params whose uppercased key matches an allowed prefix.
     env = os.environ.copy()
+    allowed_prefixes = _get_allowed_env_prefixes()
     for k, v in request.query_params.items():
-        env[k.upper()] = v
+        key_upper = k.upper()
+        if any(key_upper.startswith(prefix) for prefix in allowed_prefixes):
+            env[key_upper] = v
+        else:
+            logger.warning(
+                f"Rejected query parameter '{k}': prefix not in allowed list "
+                f"{allowed_prefixes}"
+            )
 
     session_id = str(uuid.uuid4())
 
