@@ -23,6 +23,13 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+try:
+    import redis.asyncio as aioredis
+
+    RedisClient = aioredis.Redis
+except ImportError:
+    RedisClient = Any  # type: ignore[assignment, misc]
+
 logger = logging.getLogger(__name__)
 
 LOCK_PREFIX = "lock:worktree:"
@@ -105,7 +112,7 @@ class WorktreeLock:
                     ...
     """
 
-    def __init__(self, redis: Any, key: WorktreeKey):
+    def __init__(self, redis: RedisClient, key: WorktreeKey):
         self.redis = redis
         self.key = key
         self._lock_acquired = False
@@ -166,45 +173,61 @@ class WorktreeLock:
             logger.info(f"Released lock for {self.key}")
 
     async def set_session_id(self, session_id: str) -> None:
-        """Update the lock with the current session ID.
+        """Update the lock with the current session ID (atomic via Lua).
 
         Called after SDK starts and session ID is known.
         """
         if not self._lock_acquired:
             return
 
-        lock_value = await self.redis.get(self.key.lock_key)
-        if not lock_value:
-            return
-
+        lua_script = """
+        local val = redis.call('GET', KEYS[1])
+        if not val then return 0 end
+        local data = cjson.decode(val)
+        data['session_id'] = ARGV[1]
+        local ttl = redis.call('TTL', KEYS[1])
+        local new_val = cjson.encode(data)
+        if ttl > 0 then
+            redis.call('SETEX', KEYS[1], ttl, new_val)
+        else
+            redis.call('SET', KEYS[1], new_val)
+        end
+        return 1
+        """
         try:
-            data = json.loads(lock_value)
-            data["session_id"] = session_id
-            ttl = await self.redis.ttl(self.key.lock_key)
-            if ttl and ttl > 0:
-                await self.redis.setex(self.key.lock_key, ttl, json.dumps(data))
-            else:
-                await self.redis.set(self.key.lock_key, json.dumps(data))
+            result = await self.redis.eval(lua_script, 1, self.key.lock_key, session_id)
+            if not result:
+                logger.warning(
+                    f"Lock key not found when setting session_id for {self.key}"
+                )
         except Exception as e:
             logger.warning(f"Failed to update session_id in lock: {e}")
 
     async def set_interrupted(self) -> None:
-        """Mark the lock as interrupted (job will be superseded)."""
+        """Mark the lock as interrupted (atomic via Lua)."""
         if not self._lock_acquired:
             return
 
-        lock_value = await self.redis.get(self.key.lock_key)
-        if not lock_value:
-            return
-
+        lua_script = """
+        local val = redis.call('GET', KEYS[1])
+        if not val then return 0 end
+        local data = cjson.decode(val)
+        data['status'] = 'interrupted'
+        local ttl = redis.call('TTL', KEYS[1])
+        local new_val = cjson.encode(data)
+        if ttl > 0 then
+            redis.call('SETEX', KEYS[1], ttl, new_val)
+        else
+            redis.call('SET', KEYS[1], new_val)
+        end
+        return 1
+        """
         try:
-            data = json.loads(lock_value)
-            data["status"] = "interrupted"
-            ttl = await self.redis.ttl(self.key.lock_key)
-            if ttl and ttl > 0:
-                await self.redis.setex(self.key.lock_key, ttl, json.dumps(data))
-            else:
-                await self.redis.set(self.key.lock_key, json.dumps(data))
+            result = await self.redis.eval(lua_script, 1, self.key.lock_key)
+            if not result:
+                logger.warning(
+                    f"Lock key not found when setting interrupted for {self.key}"
+                )
         except Exception as e:
             logger.warning(f"Failed to set interrupted status: {e}")
 
@@ -217,7 +240,8 @@ class WorktreeLock:
         try:
             data = json.loads(lock_value)
             return LockInfo(**data)
-        except Exception:
+        except Exception as e:
+            logger.error(f"Corrupt lock data at {self.key.lock_key}: {e}")
             return None
 
     async def set_pending_prompt(self, job_id: str, prompt: str) -> None:
@@ -246,7 +270,10 @@ class WorktreeLock:
             # Clear it
             await self.redis.delete(self.key.pending_key)
             return PendingPrompt(**data)
-        except Exception:
+        except Exception as e:
+            logger.error(f"Corrupt pending prompt at {self.key.pending_key}: {e}")
+            # Still clean up the corrupt data
+            await self.redis.delete(self.key.pending_key)
             return None
 
     async def send_cancel_signal(self) -> None:
