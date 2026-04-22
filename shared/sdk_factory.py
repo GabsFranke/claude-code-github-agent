@@ -27,7 +27,8 @@ def _discover_host_mcp_names(cwd: str | None = None) -> list[str]:
         return []
     try:
         data = json.load(open(claude_json, encoding="utf-8"))
-    except Exception:
+    except Exception as e:
+        logger.warning(f"Failed to read ~/.claude.json for MCP discovery: {e}")
         return []
 
     names: set[str] = set(data.get("mcpServers", {}).keys())

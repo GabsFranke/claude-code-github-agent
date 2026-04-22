@@ -17,6 +17,7 @@ from claude_agent_sdk import (
 )
 
 from shared import SDKError, SDKTimeoutError
+from shared.dlq import is_transient_error
 
 logger = logging.getLogger(__name__)
 
@@ -83,12 +84,22 @@ async def execute_sdk(
             raise
         except Exception as e:
             last_error = e
+            if not is_transient_error(e):
+                # Permanent errors (config issues, validation, etc.) are not
+                # worth retrying — they will fail the same way every time.
+                logger.error(
+                    f"SDK execution failed with permanent error "
+                    f"(attempt {attempt + 1}/{max_retries}): "
+                    f"{type(e).__name__}: {e}. Not retrying."
+                )
+                raise
             if attempt < max_retries - 1:
-                # Log as warning before retry
-                # Exponential backoff: 5s, 15s, 45s (with base_delay=5.0)
+                # Transient error — retry with exponential backoff
+                # Delays: 5s, 15s, 45s (with base_delay=5.0)
                 delay = retry_base_delay * (3**attempt)
                 logger.warning(
-                    f"SDK execution attempt {attempt + 1}/{max_retries} failed: {type(e).__name__}: {e}. "
+                    f"SDK execution attempt {attempt + 1}/{max_retries} failed "
+                    f"(transient): {type(e).__name__}: {e}. "
                     f"Retrying in {delay}s..."
                 )
                 await asyncio.sleep(delay)

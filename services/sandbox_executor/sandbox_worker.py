@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -241,9 +242,15 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
                 )
                 bare_ref = f"refs/remotes/origin/{base_ref}"
 
-            wt_cmd = (
-                f"git --git-dir={repo_dir} worktree add --detach {workspace} {bare_ref}"
-            )
+            wt_cmd = [
+                "git",
+                f"--git-dir={repo_dir}",
+                "worktree",
+                "add",
+                "--detach",
+                workspace,
+                bare_ref,
+            ]
             code, _out, err = await execute_git_command(wt_cmd)
 
             if code != 0:
@@ -251,7 +258,7 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
                     f"Worktree ref {bare_ref} failed: {err}. "
                     "Trying to detect default branch..."
                 )
-                list_cmd = f"git --git-dir={repo_dir} branch --list -r"
+                list_cmd = ["git", f"--git-dir={repo_dir}", "branch", "--list", "-r"]
                 list_code, list_out, list_err = await execute_git_command(list_cmd)
                 default_branch = "refs/remotes/origin/main"
                 if list_code == 0 and list_out:
@@ -269,28 +276,32 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
                         f"Could not list branches: {list_err}. "
                         f"Using fallback: {default_branch}"
                     )
-                wt_cmd_fb = (
-                    f"git --git-dir={repo_dir} worktree add --detach "
-                    f"{workspace} {default_branch}"
-                )
+                wt_cmd_fb = [
+                    "git",
+                    f"--git-dir={repo_dir}",
+                    "worktree",
+                    "add",
+                    "--detach",
+                    workspace,
+                    default_branch,
+                ]
                 code, _out, err = await execute_git_command(wt_cmd_fb)
                 if code != 0:
                     raise WorktreeCreationError(f"Failed to create worktree: {err}")
 
         # Inject git credentials into the workspace
-        # Configure git to use credential helper
+        # Configure git to use per-job credential file (avoid shared file race conditions)
+        credentials_file = os.path.join(workspace, ".git-credentials")
         config_code, _, config_err = await execute_git_command(
-            "git config credential.helper store", cwd=workspace
+            ["git", "config", "credential.helper", f"store --file={credentials_file}"],
+            cwd=workspace,
         )
         if config_code != 0:
             raise WorktreeCreationError(
                 f"Failed to configure git credentials: {config_err}"
             )
 
-        # Write credentials to home directory where git expects them
-        home_dir = os.path.expanduser("~")
-        os.makedirs(home_dir, exist_ok=True)
-        credentials_file = os.path.join(home_dir, ".git-credentials")
+        # Write credentials to per-job file (avoids shared-file race conditions)
         fd = os.open(credentials_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
             os.write(
@@ -305,10 +316,23 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
         bot_email = os.getenv(
             "BOT_USER_EMAIL", "claude-code-agent[bot]@users.noreply.github.com"
         )
+        # Validate that bot_username and bot_email contain only safe characters
+        # to prevent shell injection even though we use list format
+        _safe_pattern = re.compile(r"^[a-zA-Z0-9\s.\-@]+$")
+        if not _safe_pattern.match(bot_username):
+            raise ValueError(
+                f"BOT_USERNAME contains invalid characters: {bot_username!r}"
+            )
+        if not _safe_pattern.match(bot_email):
+            raise ValueError(
+                f"BOT_USER_EMAIL contains invalid characters: {bot_email!r}"
+            )
         await execute_git_command(
-            f'git config user.name "{bot_username}"', cwd=workspace
+            ["git", "config", "user.name", bot_username], cwd=workspace
         )
-        await execute_git_command(f'git config user.email "{bot_email}"', cwd=workspace)
+        await execute_git_command(
+            ["git", "config", "user.email", bot_email], cwd=workspace
+        )
 
         # Run repository setup commands if configured
         try:
@@ -435,7 +459,11 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
         claude_md = job_data.get("claude_md")
         memory_index = job_data.get("memory_index")
 
-        # Inject GitHub token for tools/plugins to use
+        # Inject GitHub token for tools/plugins to use.
+        # SECURITY: This sets the token in the process-wide environment, which
+        # is a risk if concurrent jobs are running. It is cleaned up in the
+        # finally block (below). Consider migrating tools to accept tokens
+        # explicitly instead of relying on env vars.
         os.environ["GITHUB_TOKEN"] = github_token
 
         # Log token availability for debugging (length only, no partial tokens)
@@ -669,12 +697,13 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
             del os.environ["GITHUB_TOKEN"]
             logger.debug("Cleaned up GITHUB_TOKEN from environment")
 
-        # Cleanup credentials
+        # Cleanup per-job credentials file
         try:
-            credentials_file = os.path.join(os.path.expanduser("~"), ".git-credentials")
-            if os.path.exists(credentials_file):
-                os.remove(credentials_file)
-                logger.debug("Cleaned up git credentials")
+            if workspace:
+                per_job_creds = os.path.join(workspace, ".git-credentials")
+                if os.path.exists(per_job_creds):
+                    os.remove(per_job_creds)
+                    logger.debug("Cleaned up per-job git credentials")
         except Exception as e:
             logger.warning(f"Failed to cleanup credentials: {e}")
 
@@ -686,7 +715,14 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
                     if repo_dir and os.path.exists(workspace):
                         # Remove worktree from bare repo tracking
                         await execute_git_command(
-                            f"git --git-dir={repo_dir} worktree remove --force {workspace}"
+                            [
+                                "git",
+                                f"--git-dir={repo_dir}",
+                                "worktree",
+                                "remove",
+                                "--force",
+                                workspace,
+                            ]
                         )
                     elif os.path.exists(workspace):
                         shutil.rmtree(workspace)
@@ -834,6 +870,12 @@ async def _orphan_cleanup_loop(redis: Any) -> None:
                         shutil.rmtree(project_dir, ignore_errors=True)
             except Exception as e:
                 logger.error(f"Error in orphan cleanup loop: {e}")
+            finally:
+                # Release lock so other workers can acquire it promptly
+                try:
+                    await redis.delete(lock_key)
+                except Exception:
+                    pass
 
         # Sleep for 1 hour, checking for shutdown occasionally
         for _ in range(3600):
