@@ -91,6 +91,12 @@ class TestProcessJob:
             patch(
                 "services.sandbox_executor.sandbox_worker.RepoSetupEngine"
             ) as mock_engine_class,
+            patch("shared.mcp_json_writer.write_mcp_json"),
+            patch(
+                "services.sandbox_executor.sandbox_worker.generate_structural_context",
+                new_callable=AsyncMock,
+                return_value=("", ""),
+            ),
         ):
             # Mock workspace path
             mock_mkdtemp.return_value = "/tmp/test_workspace"
@@ -161,6 +167,12 @@ class TestProcessJob:
             patch(
                 "services.sandbox_executor.sandbox_worker.RepoSetupEngine"
             ) as mock_engine_class,
+            patch("shared.mcp_json_writer.write_mcp_json"),
+            patch(
+                "services.sandbox_executor.sandbox_worker.generate_structural_context",
+                new_callable=AsyncMock,
+                return_value=("", ""),
+            ),
         ):
             # Mock workspace path
             mock_mkdtemp.return_value = "/tmp/test_workspace"
@@ -215,18 +227,29 @@ class TestMainLoop:
         mock_queue.get_next_job = get_next_job_side_effect
         mock_queue.close = AsyncMock()
 
-        with patch(
-            "services.sandbox_executor.sandbox_worker.JobQueue", return_value=mock_queue
-        ):
-            with patch(
+        with (
+            patch(
+                "services.sandbox_executor.sandbox_worker.JobQueue",
+                return_value=mock_queue,
+            ),
+            patch(
+                "services.sandbox_executor.sandbox_worker._orphan_cleanup_loop",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "services.sandbox_executor.sandbox_worker._process_cleanup_requests",
+                new_callable=AsyncMock,
+            ),
+            patch(
                 "services.sandbox_executor.sandbox_worker.process_job",
                 new_callable=AsyncMock,
-            ) as mock_process:
-                await main()
+            ) as mock_process,
+        ):
+            await main()
 
-                # Verify job was processed
-                mock_process.assert_called_once()
-                mock_queue.close.assert_called_once()
+            # Verify job was processed
+            mock_process.assert_called_once()
+            mock_queue.close.assert_called_once()
 
         # Reset shutdown event
         shutdown_event.clear()
@@ -247,15 +270,29 @@ class TestMainLoop:
             if call_count == 1:
                 raise RuntimeError("Queue error")
             else:
-                await asyncio.sleep(0.1)
                 shutdown_event.set()
                 return None
 
         mock_queue.get_next_job = get_next_job_side_effect
         mock_queue.close = AsyncMock()
 
-        with patch(
-            "services.sandbox_executor.sandbox_worker.JobQueue", return_value=mock_queue
+        with (
+            patch(
+                "services.sandbox_executor.sandbox_worker.JobQueue",
+                return_value=mock_queue,
+            ),
+            patch(
+                "services.sandbox_executor.sandbox_worker._orphan_cleanup_loop",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "services.sandbox_executor.sandbox_worker._process_cleanup_requests",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "services.sandbox_executor.sandbox_worker.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
         ):
             await main()
 
@@ -277,8 +314,19 @@ class TestMainLoop:
         # Set shutdown immediately
         shutdown_event.set()
 
-        with patch(
-            "services.sandbox_executor.sandbox_worker.JobQueue", return_value=mock_queue
+        with (
+            patch(
+                "services.sandbox_executor.sandbox_worker.JobQueue",
+                return_value=mock_queue,
+            ),
+            patch(
+                "services.sandbox_executor.sandbox_worker._orphan_cleanup_loop",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "services.sandbox_executor.sandbox_worker._process_cleanup_requests",
+                new_callable=AsyncMock,
+            ),
         ):
             await main()
 
