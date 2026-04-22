@@ -236,6 +236,26 @@ class TestExecuteSDKRetry:
             mock_execute.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_timeout_never_retried(self, mock_options):
+        """Test that SDKTimeoutError is not retried even with max_retries > 1.
+
+        Retrying a timeout would just re-run the full session up to the same
+        wall — wasting up to (max_retries × timeout_seconds) before failing.
+        """
+        with patch("shared.sdk_executor._execute_sdk_once") as mock_execute:
+            mock_execute.side_effect = SDKTimeoutError("timed out after 1800s")
+
+            with pytest.raises(SDKTimeoutError):
+                await execute_sdk(
+                    prompt="test",
+                    options=mock_options,
+                    max_retries=3,  # Would normally allow 3 attempts
+                )
+
+            # Must only be called once — timeout is not retryable
+            mock_execute.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_exponential_backoff_calculation(self, mock_options):
         """Test that exponential backoff uses correct formula (base * 3^attempt)."""
         with patch("shared.sdk_executor._execute_sdk_once") as mock_execute:

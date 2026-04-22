@@ -73,6 +73,14 @@ async def execute_sdk(
                 timeout=timeout,
                 collect_text=collect_text,
             )
+        except SDKTimeoutError:
+            # Timeouts are not transient — retrying would just run the full
+            # session again and hit the same wall. Raise immediately.
+            logger.error(
+                f"SDK execution timed out (attempt {attempt + 1}/{max_retries}). "
+                "Not retrying — timeout is not a transient error."
+            )
+            raise
         except Exception as e:
             last_error = e
             if attempt < max_retries - 1:
