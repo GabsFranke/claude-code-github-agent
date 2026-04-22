@@ -195,7 +195,7 @@ class WorktreeLock:
         return 1
         """
         try:
-            result = await self.redis.eval(lua_script, 1, self.key.lock_key, session_id)
+            result = await self.redis.eval(lua_script, 1, self.key.lock_key, session_id)  # type: ignore[misc]
             if not result:
                 logger.warning(
                     f"Lock key not found when setting session_id for {self.key}"
@@ -223,7 +223,7 @@ class WorktreeLock:
         return 1
         """
         try:
-            result = await self.redis.eval(lua_script, 1, self.key.lock_key)
+            result = await self.redis.eval(lua_script, 1, self.key.lock_key)  # type: ignore[misc]
             if not result:
                 logger.warning(
                     f"Lock key not found when setting interrupted for {self.key}"

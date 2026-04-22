@@ -248,7 +248,7 @@ class SessionStore:
         return 1
         """
         try:
-            await self.redis.eval(lua_update_summary, 1, key, summary)
+            await self.redis.eval(lua_update_summary, 1, key, summary)  # type: ignore[misc]
         except Exception as e:
             logger.warning(f"Failed to update summary for {key}: {e}")
 
@@ -281,7 +281,7 @@ class SessionStore:
         """
         try:
             await self.redis.eval(
-                lua_increment_turns, 1, key, str(additional_turns), last_run
+                lua_increment_turns, 1, key, str(additional_turns), last_run  # type: ignore[misc]
             )
         except Exception as e:
             logger.warning(f"Failed to increment turn count for {key}: {e}")
