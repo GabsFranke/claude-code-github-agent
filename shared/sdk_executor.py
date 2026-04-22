@@ -17,6 +17,7 @@ from claude_agent_sdk import (
 )
 
 from shared import SDKError, SDKTimeoutError
+from shared.dlq import is_transient_error
 
 logger = logging.getLogger(__name__)
 
@@ -73,14 +74,32 @@ async def execute_sdk(
                 timeout=timeout,
                 collect_text=collect_text,
             )
+        except SDKTimeoutError:
+            # Timeouts are not transient — retrying would just run the full
+            # session again and hit the same wall. Raise immediately.
+            logger.error(
+                f"SDK execution timed out (attempt {attempt + 1}/{max_retries}). "
+                "Not retrying — timeout is not a transient error."
+            )
+            raise
         except Exception as e:
             last_error = e
+            if not is_transient_error(e):
+                # Permanent errors (config issues, validation, etc.) are not
+                # worth retrying — they will fail the same way every time.
+                logger.error(
+                    f"SDK execution failed with permanent error "
+                    f"(attempt {attempt + 1}/{max_retries}): "
+                    f"{type(e).__name__}: {e}. Not retrying."
+                )
+                raise
             if attempt < max_retries - 1:
-                # Log as warning before retry
-                # Exponential backoff: 5s, 15s, 45s (with base_delay=5.0)
+                # Transient error — retry with exponential backoff
+                # Delays: 5s, 15s, 45s (with base_delay=5.0)
                 delay = retry_base_delay * (3**attempt)
                 logger.warning(
-                    f"SDK execution attempt {attempt + 1}/{max_retries} failed: {type(e).__name__}: {e}. "
+                    f"SDK execution attempt {attempt + 1}/{max_retries} failed "
+                    f"(transient): {type(e).__name__}: {e}. "
                     f"Retrying in {delay}s..."
                 )
                 await asyncio.sleep(delay)
@@ -119,7 +138,9 @@ async def _execute_sdk_once(
     sdk_timeout = timeout or int(os.getenv("SDK_EXECUTION_TIMEOUT", "1800"))
     response_parts = []
     all_messages = []
-    result_info = {
+    from typing import Any
+
+    result_info: dict[str, Any] = {
         "num_turns": 0,
         "duration_ms": 0,
         "is_error": False,
@@ -174,6 +195,7 @@ async def _execute_sdk_once(
                             "num_turns": message.num_turns,
                             "duration_ms": message.duration_ms,
                             "is_error": message.is_error,
+                            "session_id": getattr(message, "session_id", None),
                         }
                         logger.info(
                             f"SDK completed - {message.num_turns} turns, "
@@ -211,5 +233,6 @@ async def _execute_sdk_once(
     return {
         "response": response,
         "messages": all_messages,
-        **result_info,
+        "session_id": result_info.get("session_id"),
+        **{k: v for k, v in result_info.items() if k != "session_id"},
     }

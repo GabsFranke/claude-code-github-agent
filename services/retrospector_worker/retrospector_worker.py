@@ -47,6 +47,10 @@ SDK_RETRY_BASE_DELAY = 5.0  # seconds (exponential: 5s, 15s, 45s)
 _DLQ_KEY = "agent:retrospector:dead_letter"
 _QUEUE_KEY = "agent:retrospector:requests"
 
+# Persistent worktree path for resumable sessions
+PERSIST_SESSIONS = os.getenv("WORKER_SESSION_PERSIST", "true").lower() == "true"
+WORKER_DIR = Path.home() / ".claude" / "workers" / "retrospector"
+
 
 def _validate_git_config_value(value: str, name: str) -> str:
     """Validate a value to be used in git config.
@@ -111,34 +115,32 @@ async def process_retrospector_job(message: dict, redis_client) -> None:
     try:
         repo_dir = await wait_for_repo_sync(bot_repo, "main", redis_client)
 
-        # Create isolated worktree for the bot repo
-        workspace = tempfile.mkdtemp(prefix="retro_", dir="/tmp")  # nosec B108
-        os.rmdir(workspace)  # git worktree add requires the path to not exist
+        if PERSIST_SESSIONS:
+            # Use persistent worktree path for resumable sessions
+            workspace = str(WORKER_DIR)
+            from shared.worktree_manager import reuse_or_create_worktree
 
-        wt_cmd = [
-            "git",
-            f"--git-dir={repo_dir}",
-            "worktree",
-            "add",
-            "--detach",
-            workspace,
-            "refs/remotes/origin/main",
-        ]
-        code, _out, err = await execute_git_command(wt_cmd)
-        if code != 0:
-            # Fallback: try develop
-            wt_cmd = [
-                "git",
-                f"--git-dir={repo_dir}",
-                "worktree",
-                "add",
-                "--detach",
-                workspace,
-                "refs/remotes/origin/develop",
-            ]
-            code, _out, err = await execute_git_command(wt_cmd)
-            if code != 0:
-                raise RuntimeError(f"Failed to create bot repo worktree: {err}")
+            await reuse_or_create_worktree(
+                bare_repo=repo_dir,
+                ref="refs/remotes/origin/main",
+                worktree_path=WORKER_DIR,
+                session_mode="continue" if WORKER_DIR.exists() else "new",
+            )
+        else:
+            # Ephemeral worktree
+            ephemeral_base = Path.home() / ".claude" / "worktrees" / "ephemeral"
+            ephemeral_base.mkdir(parents=True, exist_ok=True)
+            workspace = tempfile.mkdtemp(prefix="retro_", dir=str(ephemeral_base))
+            os.rmdir(workspace)  # git worktree add requires the path to not exist
+
+            from shared.worktree_manager import reuse_or_create_worktree
+
+            await reuse_or_create_worktree(
+                bare_repo=repo_dir,
+                ref="refs/remotes/origin/main",
+                worktree_path=Path(workspace),
+                session_mode="new",
+            )
 
         # Configure git identity and credentials in the worktree
         auth_service = await get_github_auth_service()
@@ -223,7 +225,9 @@ async def process_retrospector_job(message: dict, redis_client) -> None:
 
         # Build final options with retrospector-specific features
         builder = (
-            builder.with_plugin("/app/plugins/retrospector")
+            builder.with_plugin(
+                str(Path.home() / ".claude" / "plugins" / "retrospector")
+            )
             .with_retrospector_toolset()
             .with_memory_mcp(bot_repo)
             .with_memory_toolset()
@@ -249,6 +253,7 @@ async def process_retrospector_job(message: dict, redis_client) -> None:
 
             logger.info(
                 f"Retrospection done [{workflow_name}] — "
+                f"session_id={result.get('session_id', 'N/A')[:8] if result.get('session_id') else 'N/A'}, "
                 f"{result['num_turns']} turns, {result['duration_ms']}ms, "
                 f"is_error={result['is_error']}"
             )
@@ -260,8 +265,8 @@ async def process_retrospector_job(message: dict, redis_client) -> None:
             )
 
     finally:
-        # Clean up worktree
-        if workspace and os.path.exists(workspace):
+        # Clean up worktree (only for ephemeral sessions)
+        if not PERSIST_SESSIONS and workspace and os.path.exists(workspace):
             if repo_dir:
                 try:
                     await execute_git_command(

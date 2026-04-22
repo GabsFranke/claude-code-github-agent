@@ -213,8 +213,11 @@ class JobQueue:
                         }
                     ),
                 )
-            except Exception:
-                pass  # Don't fail if dead letter queue fails
+            except Exception as dlq_err:
+                logger.error(
+                    f"CRITICAL: Failed to write to dead letter queue for job {job_id}: {dlq_err}",
+                    exc_info=True,
+                )
             return None
         except OSError as e:
             logger.error(f"Redis error getting next job: {e}", exc_info=True)

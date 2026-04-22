@@ -1,4 +1,9 @@
-"""Tests for SDKOptionsBuilder buffer-and-flush post-processing logic."""
+"""Tests for SDKOptionsBuilder buffer-and-flush post-processing logic.
+
+Tests verify that the capture_and_buffer hook captures native transcript
+paths and that flush_pending_post_jobs deduplicates by (transcript_path,
+event, type) before enqueuing to Redis.
+"""
 
 from unittest.mock import AsyncMock, patch
 
@@ -22,7 +27,7 @@ class TestFlushPendingPostJobs:
         """Multiple buffered jobs for the same (path, event, type) are deduped,
         keeping only the last entry."""
         builder = SDKOptionsBuilder(cwd="/tmp")
-        staged_path = "/home/bot/transcripts/test/repo/session1.jsonl"
+        staged_path = "/home/bot/.claude/projects/-home-bot-.claude-worktrees-test--repo-issue-1-review-pr/session1.jsonl"
 
         # Simulate SDK firing Stop 5 times for the same transcript
         for i in range(5):
@@ -30,7 +35,7 @@ class TestFlushPendingPostJobs:
                 {
                     "type": "retrospector",
                     "repo": "test/repo",
-                    "staged_path": staged_path,
+                    "transcript_path": staged_path,
                     "event": "Stop",
                     "workflow_name": "review-pr",
                     "session_meta": {
@@ -56,13 +61,13 @@ class TestFlushPendingPostJobs:
     async def test_different_events_not_deduped(self):
         """Stop and SubagentStop for the same transcript are NOT deduped."""
         builder = SDKOptionsBuilder(cwd="/tmp")
-        staged_path = "/home/bot/transcripts/test/repo/session1.jsonl"
+        staged_path = "/home/bot/.claude/projects/-home-bot-.claude-worktrees-test--repo-issue-1-review-pr/session1.jsonl"
 
         builder._pending_post_jobs.append(
             {
                 "type": "retrospector",
                 "repo": "test/repo",
-                "staged_path": staged_path,
+                "transcript_path": staged_path,
                 "event": "Stop",
                 "workflow_name": "review-pr",
                 "session_meta": {"num_turns": 10},
@@ -72,7 +77,7 @@ class TestFlushPendingPostJobs:
             {
                 "type": "retrospector",
                 "repo": "test/repo",
-                "staged_path": staged_path,
+                "transcript_path": staged_path,
                 "event": "SubagentStop",
                 "workflow_name": "review-pr",
                 "session_meta": {"num_turns": 3, "agent_id": "comment-analyzer"},
@@ -89,13 +94,13 @@ class TestFlushPendingPostJobs:
     async def test_different_types_not_deduped(self):
         """Retrospector and memory jobs for the same (path, event) are NOT deduped."""
         builder = SDKOptionsBuilder(cwd="/tmp")
-        staged_path = "/home/bot/transcripts/test/repo/session1.jsonl"
+        staged_path = "/home/bot/.claude/projects/-home-bot-.claude-worktrees-test--repo-issue-1-review-pr/session1.jsonl"
 
         builder._pending_post_jobs.append(
             {
                 "type": "retrospector",
                 "repo": "test/repo",
-                "staged_path": staged_path,
+                "transcript_path": staged_path,
                 "event": "Stop",
                 "workflow_name": "review-pr",
                 "session_meta": {"num_turns": 10},
@@ -105,7 +110,7 @@ class TestFlushPendingPostJobs:
             {
                 "type": "memory",
                 "repo": "test/repo",
-                "staged_path": staged_path,
+                "transcript_path": staged_path,
                 "event": "Stop",
                 "claude_md": "# Test",
                 "memory_index": None,
@@ -132,7 +137,7 @@ class TestFlushPendingPostJobs:
             {
                 "type": "retrospector",
                 "repo": "test/repo",
-                "staged_path": "/path/transcript.jsonl",
+                "transcript_path": "/path/transcript.jsonl",
                 "event": "Stop",
                 "workflow_name": "test",
                 "session_meta": {},
@@ -154,14 +159,14 @@ class TestFlushPendingPostJobs:
 
     @pytest.mark.asyncio
     async def test_subagent_transcripts_not_deduped_with_main(self):
-        """Subagent transcripts (different staged_path) are not deduped with main."""
+        """Subagent transcripts (different transcript_path) are not deduped with main."""
         builder = SDKOptionsBuilder(cwd="/tmp")
 
         builder._pending_post_jobs.append(
             {
                 "type": "retrospector",
                 "repo": "test/repo",
-                "staged_path": "/home/bot/transcripts/test/repo/main.jsonl",
+                "transcript_path": "/home/bot/.claude/projects/test--repo/abc123.jsonl",
                 "event": "Stop",
                 "workflow_name": "review-pr",
                 "session_meta": {"num_turns": 10},
@@ -171,7 +176,7 @@ class TestFlushPendingPostJobs:
             {
                 "type": "retrospector",
                 "repo": "test/repo",
-                "staged_path": "/home/bot/transcripts/test/repo/subagent.jsonl",
+                "transcript_path": "/home/bot/.claude/projects/test--repo/def456.jsonl",
                 "event": "SubagentStop",
                 "workflow_name": "review-pr",
                 "session_meta": {"num_turns": 3, "agent_id": "comment-analyzer"},

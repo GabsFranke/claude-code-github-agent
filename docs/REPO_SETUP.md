@@ -37,6 +37,35 @@ default:
 
 Set `default.enabled: false` (recommended) to only run setup for explicitly configured repositories.
 
+## Automatic Environment Variables
+
+The engine injects the following environment variables into every setup command automatically:
+
+| Variable | Value | Description |
+|----------|-------|-------------|
+| `$FAST_CACHE` | `/var/cache/repos/fast_cache/<hash>/` | Per-worktree directory on the native Docker volume. Use this to keep heavy file I/O off the slow Docker Desktop bind mount. |
+
+### $FAST_CACHE — Performance on Docker Desktop (Windows / macOS)
+
+Docker Desktop on Windows and macOS bridges your host filesystem into its Linux VM via the 9P/virtiofs protocol. Writing thousands of small files across that bridge — such as `pip install`, `npm ci`, or `cargo build` — is orders of magnitude slower than a native Linux disk and can easily exhaust your timeout budget.
+
+`$FAST_CACHE` points to a unique directory on the native Docker volume (`/var/cache/repos`), which has full ext4 speed. Use it by:
+
+1. **Creating** your dependency directory inside `$FAST_CACHE` (real directory — no pre-existing symlink)
+2. **Symlinking** it back into the worktree so tooling finds it at the expected path
+
+```yaml
+setup_commands:
+  # 1. Create venv on the fast volume
+  - "python -m venv $FAST_CACHE/.venv && ln -sfn $FAST_CACHE/.venv .venv"
+  # 2. Symlink now exists — pip installs onto native ext4
+  - ".venv/bin/pip install -r requirements.txt"
+```
+
+> **Why not symlink first?** Tools like `python -m venv` crash if they encounter a pre-existing directory symlink. Creating the real directory first, then symlinking it, avoids this.
+
+On a native **Linux host**, Docker bind-mounts are native ext4 speed and the variable isn't needed — but it still works safely. The variable is silently omitted if `/var/cache/repos` doesn't exist (e.g. outside Docker).
+
 ## Using sudo
 
 The container runs as non-root user `bot` with **passwordless sudo access**. This allows installing system packages and language runtimes:
@@ -48,59 +77,6 @@ setup_commands:
   - "npm ci"
 ```
 
-## Examples
-
-```yaml
-# Python with venv (recommended — isolated per job)
-repositories:
-  myorg/python-api:
-    setup_commands:
-      - "python -m venv .venv"
-      - |
-        .venv/bin/pip install -r requirements.txt
-        .venv/bin/pip install -r requirements-dev.txt
-    timeout: 300
-    env:
-      PYTHONPATH: "/workspace/src"
-
-# Node.js
-repositories:
-  myorg/frontend:
-    setup_commands:
-      - |
-        sudo apt-get update
-        sudo apt-get install -y nodejs npm
-      - "npm ci"
-    timeout: 300
-
-# Rust — rustup and cargo share the same shell so `source` takes effect
-repositories:
-  myorg/rust-cli:
-    setup_commands:
-      - |
-        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-        source $HOME/.cargo/env
-        cargo fetch
-        cargo build --release
-    timeout: 900
-```
-
-Use a plain string for single commands. Use `|` (block scalar) for multi-line scripts that need a shared shell environment (`source`, `export`, venv activation, etc.).
-
-For more examples (Go, Ruby, Java, monorepos, fullstack), see `repo-setup.example.yaml`.
-
-## Getting Started
-
-```bash
-# Copy the example config
-cp repo-setup.example.yaml repo-setup.yaml
-
-# Add your repositories
-# Then rebuild (config is baked into the image, not mounted)
-docker-compose build sandbox_worker
-docker-compose up -d sandbox_worker
-```
-
 ## Execution Behavior
 
 - Commands run **sequentially** in the workspace directory
@@ -108,6 +84,20 @@ docker-compose up -d sandbox_worker
 - If setup fails entirely, the job **continues anyway** — the agent can still work with source code
 - Timeout applies to **all commands combined**
 - Installed packages **persist in the container** until restart (first job installs the runtime, subsequent jobs skip it)
+
+## Getting Started
+
+```bash
+# Copy the example config
+cp repo-setup.example.yaml repo-setup.yaml
+
+# Edit for your repositories, then rebuild
+# (config is baked into the image, not mounted)
+docker compose build sandbox_worker
+docker compose up -d sandbox_worker
+```
+
+For ready-to-use examples across Python, Node.js, Ruby, Go, Rust, Java, and fullstack projects — including `$FAST_CACHE` patterns — see [`repo-setup.example.yaml`](../repo-setup.example.yaml).
 
 ## Security
 
@@ -119,8 +109,9 @@ Setup commands have **full sudo access** and run in the repository's worktree. O
 |-------|-------|
 | Setup not running | Verify repo name format (`owner/repo`), check YAML syntax |
 | Commands failing | Use `-y` with `apt-get`, test in a `python:3.12-slim` container |
-| Timeout | Increase `timeout` value, combine `apt-get update` calls |
-| Changes not applying | Rebuild the image: `docker-compose build sandbox_worker` |
+| Timeout on Windows/macOS | Use `$FAST_CACHE` to move heavy I/O off the bind mount |
+| Timeout on Linux | Increase `timeout` value, combine `apt-get update` calls |
+| Changes not applying | Rebuild the image: `docker compose build sandbox_worker` |
 
 ## See Also
 

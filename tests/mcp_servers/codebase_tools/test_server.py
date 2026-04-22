@@ -69,7 +69,7 @@ async def test_initialize_returns_server_info(mock_server):
     response = await mock_server.handle_request(request)
 
     assert response["protocolVersion"] == "2024-11-05"
-    assert response["serverInfo"]["name"] == "codebase-tools"
+    assert response["serverInfo"]["name"] == "codebase_tools"
     assert response["serverInfo"]["version"] == "1.0.0"
     assert "tools" in response["capabilities"]
 

@@ -11,9 +11,17 @@ build: ## Build all Docker images
 	@mkdir -p logs/langfuse
 	docker compose build
 
-up: ## Start all services (detached)
+up: ## Start all services (detached). Optional: make up SANDBOX=10 MEMORY=2 RETRO=2 INDEXING=2
 	@mkdir -p logs/langfuse
-	docker compose up -d
+	@if [ -n "$(SANDBOX)$(MEMORY)$(RETRO)$(INDEXING)" ]; then \
+		docker compose up -d \
+			--scale sandbox_worker=$(or $(SANDBOX),1) \
+			--scale memory_worker=$(or $(MEMORY),1) \
+			--scale retrospector_worker=$(or $(RETRO),1) \
+			--scale indexing_worker=$(or $(INDEXING),1); \
+	else \
+		docker compose up -d; \
+	fi
 
 down: ## Stop all services
 	docker compose down
@@ -72,7 +80,7 @@ ngrok: ## Start ngrok tunnel to webhook on port 10000
 
 # --- Dev workflows ---
 
-start: build up ngrok ## Build, start services, and open ngrok tunnel
+start: build up ngrok ## Build, start services, and open ngrok tunnel. Optional: make start SANDBOX=10
 
 # --- Cleanup ---
 

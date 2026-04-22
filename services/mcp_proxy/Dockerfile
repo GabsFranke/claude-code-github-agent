@@ -41,8 +41,8 @@ RUN chmod +x /app/hooks/langfuse_hook.py
 COPY services/sandbox_executor/requirements.txt ./
 RUN pip3 install --no-cache-dir -r requirements.txt
 
-# Sandbox Executor source code
-COPY services/sandbox_executor/ /app/services/sandbox_executor/
+# MCP Proxy source code
+COPY services/mcp_proxy/ /app/services/mcp_proxy/
 
 # Copy plugins and skills to /app/ for seeding into bind-mounted ~/.claude/
 RUN mkdir -p /app/plugins /app/skills

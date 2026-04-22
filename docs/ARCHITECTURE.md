@@ -21,6 +21,7 @@ Complete system architecture for the Claude Code GitHub Agent.
   - [10. Indexing Worker](#10-indexing-worker)
   - [11. Codebase Context System](#11-codebase-context-system)
   - [12. Plugin System](#12-plugin-system)
+  - [13. MCP Proxy Service](#13-mcp-proxy-service)
 - [Shared Module Infrastructure](#shared-module-infrastructure)
 - [Data Flow](#data-flow)
 - [Job Queue Architecture](#job-queue-architecture)
@@ -54,7 +55,9 @@ flowchart LR
     AGENT --> |GitHub API| MCP[GitHub<br/>MCP]
     AGENT --> |transcript| PP[(Post-Processing<br/>Pipeline)]
     AGENT --> MEM_MCP[Memory<br/>MCP]
-    AGENT --> LOCAL_MCP[Local MCP<br/>Servers]
+    AGENT --> |SSE| MCPPROXY[MCP Proxy<br/>:18000]
+    MCPPROXY --> LOCAL_MCP[Local MCP<br/>Servers]
+    MCPPROXY --> |host ~/.claude.json| HOST_MCP[Host MCP<br/>Servers]
     AGENT -.->|semantic search| QDRANT
 
     PP --> MEMQ[(Memory<br/>Queue)]
@@ -411,10 +414,10 @@ git --git-dir={repo_dir} worktree remove --force {workspace}
 | Server | Type | Purpose |
 |--------|------|---------|
 | GitHub MCP | HTTP (`api.githubcopilot.com/mcp`) | PR/issue/comment operations |
-| GitHub Actions MCP | stdio (plugin) | CI/CD workflow analysis |
+| GitHub Actions MCP | SSE (via mcp_proxy) | CI/CD workflow analysis |
 | Memory MCP | stdio | Repository memory read/write |
-| Codebase Tools MCP | stdio | AST-based code search and file summaries |
-| Semantic Search MCP | stdio | Embedding-based code search via Qdrant |
+| Codebase Tools MCP | SSE (via mcp_proxy) | AST-based code search and file summaries |
+| Semantic Search MCP | SSE (via mcp_proxy) | Embedding-based code search via Qdrant |
 
 **Sync Coordination**:
 
@@ -449,10 +452,10 @@ git --git-dir={repo_dir} worktree remove --force {workspace}
 - `Read`, `Write`, `Edit` — File operations in worktree
 - `List`, `Search`, `Grep`, `Glob` — Code exploration in worktree
 - `mcp__github__*` — All GitHub MCP tools
-- `mcp__github-actions__*` — CI/CD workflow tools
+- `mcp__github_actions__*` — CI/CD workflow tools
 - `mcp__memory__*` — Repository memory tools
-- `mcp__codebase-tools__*` — AST-based code analysis
-- `mcp__semantic-search__*` — Embedding-based code search
+- `mcp__codebase_tools__*` — AST-based code analysis
+- `mcp__semantic_search__*` — Embedding-based code search
 
 **Local vs Remote Operations**:
 
@@ -660,6 +663,20 @@ Each plugin follows the Claude Code plugin structure (`.claude-plugin/plugin.jso
 | `retrospector` | Self-improvement analysis | — | `retrospect` |
 
 Plugins are auto-discovered from `~/.claude/plugins/` at SDK build time via `SDKOptionsBuilder.with_auto_discovered_plugins()`.
+
+### 13. MCP Proxy Service
+
+**Location**: `services/mcp_proxy/`
+**Port**: 18000
+**Purpose**: Bridges stdio MCP servers to HTTP/SSE so Docker containers can access them
+
+The MCP proxy wraps each stdio MCP server (codebase_tools, github_actions, semantic_search) as an SSE endpoint at `http://mcp_proxy:18000/mcp/{server_name}/sse`. Workers connect via `socat` port forwarding (`localhost:18000 → mcp_proxy:18000`).
+
+It also bridges host services into the Docker network:
+- `localhost:11434` → host Ollama (via `host.docker.internal:11434`)
+- `localhost:6333` → Qdrant
+
+When `ALLOW_HOST_MCP=true`, MCP server definitions from the host's `~/.claude.json` are also available through the proxy, so any server installed with `claude mcp add --scope user` works inside Docker without extra configuration.
 
 ## Shared Module Infrastructure
 
@@ -870,7 +887,7 @@ Plugins are auto-discovered from `~/.claude/plugins/` at SDK build time via `SDK
 
 - permission_mode: `acceptEdits` (auto-approve edits)
 - Full toolset: Task, Skill, Bash, Read, Write, Edit, List, Search, Grep, Glob
-- All MCP tool wildcards: `mcp__github__*`, `mcp__github-actions__*`, `mcp__memory__*`, etc.
+- All MCP tool wildcards: `mcp__github__*`, `mcp__github_actions__*`, `mcp__memory__*`, etc.
 
 **Worker-Specific Toolsets**:
 

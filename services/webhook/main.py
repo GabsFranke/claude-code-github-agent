@@ -31,6 +31,7 @@ app = FastAPI(title="ClaudeCodeGitHubAgent Webhook Service")
 # Initialize queue
 queue = get_queue()
 sync_queue = get_queue(queue_name="agent:sync:requests")
+cleanup_queue = get_queue(queue_name="agent:worktree:cleanup")
 
 # Initialize workflow engine for event filtering
 try:
@@ -101,10 +102,36 @@ async def webhook(request: Request):
                 return {"status": "accepted", "message": "Proactive sync triggered"}
             return {"status": "ignored", "message": "Push event missing repo or ref"}
 
+        # Handle cleanup events for persistent worktrees
+        if repo and event_type in ("pull_request", "issues", "delete"):
+            cleanup_msg = _build_cleanup_message(event_type, action, data, repo)
+            if cleanup_msg:
+                await cleanup_queue.publish(cleanup_msg)
+                logger.info(
+                    "Queued worktree cleanup: %s for %s",
+                    cleanup_msg.get("action"),
+                    repo,
+                )
+                # For close events without a matching workflow, return early
+                if not workflow_engine.get_workflow_for_event(event_type, action):
+                    return {
+                        "status": "accepted",
+                        "message": f"Worktree cleanup queued ({cleanup_msg['action']})",
+                    }
+
+        # Extract state if available (for zombie revival prevention)
+        issue_state = (
+            data.get("issue", {}).get("state")
+            or data.get("pull_request", {}).get("state")
+            or data.get("discussion", {}).get("state")
+            or "open"
+        )
+
         # Determine event data and user query
         event_data = {
             "event_type": event_type,
             "action": action,
+            "issue_state": issue_state,
         }
         user_query = ""
         command = None
@@ -259,6 +286,85 @@ async def webhook(request: Request):
     except Exception as e:
         logger.error("Error processing webhook: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+def _build_cleanup_message(
+    event_type: str, action: str, data: dict, repo: str
+) -> dict | None:
+    """Build a worktree cleanup message from a GitHub event.
+
+    Returns None if the event doesn't warrant cleanup.
+    """
+    if event_type == "pull_request" and action == "closed":
+        pr_number = data.get("pull_request", {}).get("number")
+        if pr_number:
+            return {
+                "action": "expire_thread",
+                "repo": repo,
+                "thread_type": "pr",
+                "thread_id": str(pr_number),
+            }
+
+    if event_type == "issues" and action == "closed":
+        issue_number = data.get("issue", {}).get("number")
+        if issue_number:
+            return {
+                "action": "expire_thread",
+                "repo": repo,
+                "thread_type": "issue",
+                "thread_id": str(issue_number),
+            }
+
+    if event_type == "discussion" and action in ("closed", "deleted", "locked"):
+        discussion_number = data.get("discussion", {}).get("number")
+        if discussion_number:
+            return {
+                "action": "expire_thread",
+                "repo": repo,
+                "thread_type": "discussion",
+                "thread_id": str(discussion_number),
+            }
+
+    if event_type == "delete" and data.get("ref_type") == "branch":
+        branch = data.get("ref")
+        if branch:
+            return {
+                "action": "cleanup_branch",
+                "repo": repo,
+                "branch": branch,
+            }
+
+    if event_type == "pull_request" and action == "reopened":
+        pr_number = data.get("pull_request", {}).get("number")
+        if pr_number:
+            return {
+                "action": "revive_thread",
+                "repo": repo,
+                "thread_type": "pr",
+                "thread_id": str(pr_number),
+            }
+
+    if event_type == "issues" and action == "reopened":
+        issue_number = data.get("issue", {}).get("number")
+        if issue_number:
+            return {
+                "action": "revive_thread",
+                "repo": repo,
+                "thread_type": "issue",
+                "thread_id": str(issue_number),
+            }
+
+    if event_type == "discussion" and action in ("reopened", "unlocked"):
+        discussion_number = data.get("discussion", {}).get("number")
+        if discussion_number:
+            return {
+                "action": "revive_thread",
+                "repo": repo,
+                "thread_type": "discussion",
+                "thread_id": str(discussion_number),
+            }
+
+    return None
 
 
 if __name__ == "__main__":

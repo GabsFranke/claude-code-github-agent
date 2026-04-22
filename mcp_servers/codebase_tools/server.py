@@ -146,7 +146,7 @@ async def handle_request(request: dict[str, Any]) -> dict[str, Any]:
         return {
             "protocolVersion": params.get("protocolVersion", "2024-11-05"),
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": "codebase-tools", "version": "1.0.0"},
+            "serverInfo": {"name": "codebase_tools", "version": "1.0.0"},
         }
 
     if method == "tools/list":
@@ -224,7 +224,7 @@ async def main():
     else:
         logger.warning("REPO_PATH not set, tools will be unavailable")
 
-    await run_server("codebase-tools", handle_request)
+    await run_server("codebase_tools", handle_request)
 
 
 if __name__ == "__main__":
