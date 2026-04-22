@@ -68,16 +68,25 @@ async def reuse_or_create_worktree(
         # Also clean up from bare repo tracking
         try:
             await execute_git_command(
-                f"git --git-dir={bare_repo} worktree remove --force {worktree_path}"
+                [
+                    "git",
+                    f"--git-dir={bare_repo}",
+                    "worktree",
+                    "remove",
+                    "--force",
+                    str(worktree_path),
+                ]
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Worktree remove failed (may not exist): {e}")
 
     # Prune any stale worktree registrations (directory missing but registered)
     try:
-        await execute_git_command(f"git --git-dir={bare_repo} worktree prune")
-    except Exception:
-        pass
+        await execute_git_command(
+            ["git", f"--git-dir={bare_repo}", "worktree", "prune"]
+        )
+    except Exception as e:
+        logger.debug(f"Worktree prune failed (may be clean): {e}")
 
     # Ensure parent directory exists
     worktree_path.parent.mkdir(parents=True, exist_ok=True)
@@ -85,9 +94,15 @@ async def reuse_or_create_worktree(
     # Resolve ref for worktree creation
     bare_ref = _resolve_ref(ref)
 
-    wt_cmd = (
-        f"git --git-dir={bare_repo} worktree add --detach {worktree_path} {bare_ref}"
-    )
+    wt_cmd = [
+        "git",
+        f"--git-dir={bare_repo}",
+        "worktree",
+        "add",
+        "--detach",
+        str(worktree_path),
+        bare_ref,
+    ]
     code, _out, err = await execute_git_command(wt_cmd)
 
     if code != 0:
@@ -96,10 +111,15 @@ async def reuse_or_create_worktree(
             f"Worktree ref {bare_ref} failed: {err}. Trying default branch..."
         )
         default_branch = await _detect_default_branch(bare_repo)
-        wt_cmd_fb = (
-            f"git --git-dir={bare_repo} worktree add --detach "
-            f"{worktree_path} {default_branch}"
-        )
+        wt_cmd_fb = [
+            "git",
+            f"--git-dir={bare_repo}",
+            "worktree",
+            "add",
+            "--detach",
+            str(worktree_path),
+            default_branch,
+        ]
         code, _out, err = await execute_git_command(wt_cmd_fb)
         if code != 0:
             raise RuntimeError(f"Failed to create worktree at {worktree_path}: {err}")
@@ -110,15 +130,17 @@ async def reuse_or_create_worktree(
 async def _fetch_and_checkout(worktree_path: Path, ref: str) -> None:
     """Fetch latest changes and check out the requested ref."""
     # Fetch all remotes
-    await execute_git_command(f"git -C {worktree_path} fetch origin")
+    await execute_git_command(["git", "-C", str(worktree_path), "fetch", "origin"])
 
     # For existing worktrees, try checking out the fetched HEAD
     code, _, err = await execute_git_command(
-        f"git -C {worktree_path} checkout FETCH_HEAD"
+        ["git", "-C", str(worktree_path), "checkout", "FETCH_HEAD"]
     )
     if code != 0:
         logger.warning(f"Checkout of FETCH_HEAD failed: {err}, trying merge")
-        await execute_git_command(f"git -C {worktree_path} merge FETCH_HEAD")
+        await execute_git_command(
+            ["git", "-C", str(worktree_path), "merge", "FETCH_HEAD"]
+        )
 
 
 def _resolve_ref(ref: str) -> str:
@@ -136,7 +158,7 @@ def _resolve_ref(ref: str) -> str:
 async def _detect_default_branch(bare_repo: str) -> str:
     """Detect the default branch from a bare repository."""
     code, out, _ = await execute_git_command(
-        f"git --git-dir={bare_repo} branch --list -r"
+        ["git", f"--git-dir={bare_repo}", "branch", "--list", "-r"]
     )
     if code == 0 and out:
         branches = [b.strip() for b in out.split("\n") if b.strip() and "origin/" in b]
@@ -197,7 +219,14 @@ async def cleanup_worktrees_by_branch(repo: str, branch: str) -> None:
                 continue
             try:
                 code, out, _ = await execute_git_command(
-                    f"git -C {workflow_dir} rev-parse --abbrev-ref HEAD"
+                    [
+                        "git",
+                        "-C",
+                        str(workflow_dir),
+                        "rev-parse",
+                        "--abbrev-ref",
+                        "HEAD",
+                    ]
                 )
                 if code == 0 and branch in (out or ""):
                     shutil.rmtree(workflow_dir, ignore_errors=True)
@@ -207,8 +236,8 @@ async def cleanup_worktrees_by_branch(repo: str, branch: str) -> None:
                     logger.info(
                         f"Cleaned up worktree and project dir for deleted branch: {workflow_dir}"
                     )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Worktree branch check/remove failed: {e}")
 
 
 async def detect_orphan_worktrees(session_store: Any) -> list[Path]:

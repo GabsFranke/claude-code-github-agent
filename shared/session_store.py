@@ -10,6 +10,13 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
+try:
+    import redis.asyncio as aioredis
+
+    RedisClient = aioredis.Redis
+except ImportError:
+    RedisClient = Any  # type: ignore[assignment, misc]
+
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
@@ -104,7 +111,7 @@ class SessionStore:
     Each value is a JSON blob matching ``SessionInfo`` fields.
     """
 
-    def __init__(self, redis_client: Any):
+    def __init__(self, redis_client: RedisClient):
         self.redis = redis_client
 
     async def save_session(
@@ -193,8 +200,8 @@ class SessionStore:
                 if raw:
                     try:
                         sessions.append(SessionInfo.model_validate_json(raw))
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"Skipping corrupt session at {key}: {e}")
             if cursor == 0:
                 break
         return sessions
@@ -223,19 +230,27 @@ class SessionStore:
         workflow: str,
         summary: str,
     ) -> None:
-        """Update the conversation summary for a session."""
+        """Update the conversation summary for a session (atomic via Lua)."""
         key = _session_key(repo, thread_type, thread_id, workflow)
-        raw = await self.redis.get(key)
-        if not raw:
-            return
-        data = json.loads(raw)
-        data["summary"] = summary
-        # Preserve existing TTL
-        ttl = await self.redis.ttl(key)
-        if ttl and ttl > 0:
-            await self.redis.setex(key, ttl, json.dumps(data))
-        else:
-            await self.redis.set(key, json.dumps(data))
+
+        lua_update_summary = """
+        local val = redis.call('GET', KEYS[1])
+        if not val then return 0 end
+        local data = cjson.decode(val)
+        data['summary'] = ARGV[1]
+        local ttl = redis.call('TTL', KEYS[1])
+        local new_val = cjson.encode(data)
+        if ttl > 0 then
+            redis.call('SETEX', KEYS[1], ttl, new_val)
+        else
+            redis.call('SET', KEYS[1], new_val)
+        end
+        return 1
+        """
+        try:
+            await self.redis.eval(lua_update_summary, 1, key, summary)  # type: ignore[misc]
+        except Exception as e:
+            logger.warning(f"Failed to update summary for {key}: {e}")
 
     async def increment_turn_count(
         self,
@@ -245,16 +260,28 @@ class SessionStore:
         workflow: str,
         additional_turns: int,
     ) -> None:
-        """Add to the cumulative turn count after a continuation."""
+        """Add to the cumulative turn count after a continuation (atomic via Lua)."""
         key = _session_key(repo, thread_type, thread_id, workflow)
-        raw = await self.redis.get(key)
-        if not raw:
-            return
-        data = json.loads(raw)
-        data["turn_count"] = data.get("turn_count", 0) + additional_turns
-        data["last_run"] = datetime.now(UTC).isoformat()
-        ttl = await self.redis.ttl(key)
-        if ttl and ttl > 0:
-            await self.redis.setex(key, ttl, json.dumps(data))
-        else:
-            await self.redis.set(key, json.dumps(data))
+        last_run = datetime.now(UTC).isoformat()
+
+        lua_increment_turns = """
+        local val = redis.call('GET', KEYS[1])
+        if not val then return 0 end
+        local data = cjson.decode(val)
+        data['turn_count'] = (data['turn_count'] or 0) + tonumber(ARGV[1])
+        data['last_run'] = ARGV[2]
+        local ttl = redis.call('TTL', KEYS[1])
+        local new_val = cjson.encode(data)
+        if ttl > 0 then
+            redis.call('SETEX', KEYS[1], ttl, new_val)
+        else
+            redis.call('SET', KEYS[1], new_val)
+        end
+        return 1
+        """
+        try:
+            await self.redis.eval(
+                lua_increment_turns, 1, key, str(additional_turns), last_run  # type: ignore[misc]
+            )
+        except Exception as e:
+            logger.warning(f"Failed to increment turn count for {key}: {e}")
