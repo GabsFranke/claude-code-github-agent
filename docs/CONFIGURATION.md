@@ -102,6 +102,17 @@ ANTHROPIC_VERTEX_REGION=us-central1
 | `EMBEDDING_DIMENSION` | `1024` | Output vector dimensionality |
 | `EMBEDDING_BATCH_SIZE` | `20` | Texts per embedding API call |
 
+## Host Integration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ALLOW_HOST_MCP` | `true` | Discover MCP servers from host's `~/.claude.json` inside Docker containers |
+| `WORKER_SESSION_PERSIST` | `true` | Persist conversation state so users can continue multi-turn sessions |
+
+When `ALLOW_HOST_MCP=true`, the sandbox worker reads MCP server definitions from your host `~/.claude.json` (the same file Claude Code CLI uses). This means any MCP server you install with `claude mcp add --scope user` on the host is automatically available to the agent inside Docker — no manual configuration needed.
+
+The `~/.claude/` directory is bind-mounted read-write, so plugins and skills installed on the host via Claude Code CLI are also discovered automatically. On first run, built-in plugins and skills are seeded into `~/.claude/` (without overwriting existing files).
+
 ## Post-session Workers
 
 | Variable | Default | Description |

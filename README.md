@@ -45,11 +45,12 @@ Runs on your infrastructure. Scales horizontally. Full observability via Langfus
 
 ### Claude Code Integration
 
-The agent runs Claude SDK with the full Claude Code feature set:
+The agent runs Claude SDK with the full Claude Code feature set. Because `~/.claude/` is bind-mounted from your host into the container, anything you install with `--scope user` in Claude Code CLI is automatically available to the bot — no extra configuration needed.
 
-- **Plugins** — Drop-in `.claude-plugin/` directories with agents, commands, and MCP servers. Auto-discovered at runtime. Currently includes PR review, CI failure analysis, and retrospector plugins.
-- **Skills** — Reusable prompt templates loaded from `~/.claude/skills/`. Agents invoke them via the `Skill` tool.
-- **Memory** — Persistent per-repo knowledge across sessions. The `@memory-extractor` subagent reads session transcripts after each run and updates memory files (architecture notes, known issues, decisions).
+- **Plugins** — Install with `/plugin` in Claude Code CLI (choose user scope). Built-in plugins include PR review, CI failure analysis, and retrospector. User-installed plugins in `~/.claude/plugins/` are picked up automatically.
+- **Skills** — Any `~/.claude/skills/<skill-name>/SKILL.md` is discovered by the SDK and invokable via the `Skill` tool. Create your own or install from the community.
+- **MCP servers** — Servers installed with `claude mcp add --scope user` are available inside Docker when `ALLOW_HOST_MCP=true` (default). The MCP proxy bridges them over SSE.
+- **Memory** — Persistent per-repo knowledge across sessions. The `@memory-extractor` subagent reads session transcripts after each run and updates memory files.
 - **Hooks** — Event-driven scripts on `Stop`, `SubagentStop`, and other lifecycle events. Used for Langfuse tracing and transcript persistence.
 - **Subagents** — Delegate to specialized agents via the `Task` tool. Each plugin contributes its own agents (12 built in across 4 plugins).
 - **CLAUDE.md** — Per-repo customization files read at session start. Define project conventions, constraints, and preferences.
@@ -58,7 +59,7 @@ The agent runs Claude SDK with the full Claude Code feature set:
 
 - **3-layer context** — File tree → AST code tools → semantic vector search
 - **Structural awareness** — Aider-style repomap with tree-sitter + PageRank (10 languages), personalized per PR
-- **5 MCP servers** — GitHub (HTTP), GitHub Actions, Memory, Codebase Tools, Semantic Search (all stdio)
+- **5 MCP servers** — GitHub (HTTP), GitHub Actions, Memory, Codebase Tools, Semantic Search (proxied via SSE)
 - **Self-improvement** — Retrospector analyzes past sessions and proposes instruction improvements via PRs
 
 ## Quick Start
@@ -132,17 +133,36 @@ docker-compose up --build -d
 
 ### Alternative AI Providers
 
-The agent works with any Anthropic-compatible API:
+The agent works with any Anthropic-compatible API. The easiest way to configure a provider is through `~/.claude/settings.json` — since `~/.claude/` is bind-mounted, the SDK picks it up automatically and it takes precedence over env vars:
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+    "ANTHROPIC_AUTH_TOKEN": "your-token",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "GLM-4.7-Flash",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "GLM-5.1",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "GLM-5.1"
+  }
+}
+```
+
+This works for Ollama, Vertex AI, Z.AI, or any Anthropic-compatible endpoint. Env vars in `.env` are still supported as a fallback but won't override `settings.json`.
+
+<details>
+<summary>Using .env instead (fallback)</summary>
 
 ```bash
 # Z.AI (GLM models)
 ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic
-ANTHROPIC_DEFAULT_SONNET_MODEL=GLM-4.7
+ANTHROPIC_DEFAULT_SONNET_MODEL=GLM-5.1
 
 # Google Vertex AI
 ANTHROPIC_VERTEX_PROJECT_ID=your-project
 ANTHROPIC_VERTEX_REGION=global
 ```
+
+</details>
 
 ## Usage
 

@@ -275,9 +275,11 @@ async def test_queue_publish(mock_redis):
 docker-compose -f docker-compose.minimal.yml up --build -d
 ```
 
-Services: webhook, worker, sandbox_worker, repo_sync, memory_worker, retrospector_worker, Redis, Qdrant, indexing_worker
+Services: webhook, worker, sandbox_worker, mcp_proxy, repo_sync, memory_worker, retrospector_worker, Redis, Qdrant, indexing_worker
 
 Volumes: repo-cache, agent-memory, transcripts, qdrant-storage
+
+**Host `~/.claude/` integration**: The sandbox worker bind-mounts `~/.claude/` from your host. This means MCP servers, plugins, and skills you install with Claude Code CLI on the host are automatically available inside Docker. See [CONFIGURATION.md](CONFIGURATION.md) for `ALLOW_HOST_MCP` details.
 
 **Full** (with Langfuse observability):
 
@@ -298,6 +300,7 @@ Volumes: Minimal + langfuse-db-data, langfuse-clickhouse-data, langfuse-clickhou
 | webhook             | python:3.12-slim | FastAPI                                                            |
 | worker              | python:3.12-slim | Healthcheck                                                        |
 | sandbox_worker      | python:3.12-slim | Non-root `bot` user, OS tools (git, jq, ripgrep), plugins + skills |
+| mcp_proxy           | python:3.12-slim | SSE proxy for stdio MCP servers (port 18000)                       |
 | repo_sync           | python:3.12-slim | Non-root `bot` user, git                                           |
 | memory_worker       | python:3.12-slim | Non-root `bot` user                                                |
 | retrospector_worker | python:3.12-slim | Non-root `bot` user, git                                           |
@@ -514,6 +517,9 @@ workflows:
     context:
       repomap_budget: 2048
       personalized: false
+    conversation:
+      persist: true
+      ttl_hours: 720
     skip_self: true # Default: true
 ```
 

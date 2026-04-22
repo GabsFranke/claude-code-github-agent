@@ -39,7 +39,31 @@ my-workflow:
 | `context.include_test_files` | No | `true` | Include test files in personalization |
 | `context.priority_focus` | No | `[]` | Focus areas for repomap ranking (e.g. `build_system`, `test_structure`) |
 | `description` | No | `""` | Human-readable description |
+| `conversation` | No | — | Multi-turn conversation settings (see below) |
 | `skip_self` | No | `true` | Skip events triggered by the bot itself |
+
+### Conversation Persistence
+
+Add a `conversation:` block to let users continue a conversation across multiple comments:
+
+```yaml
+conversation:
+  persist: true           # save session state after each run
+  ttl_hours: 720          # how long before the session expires (default: 720 = 30 days)
+  auto_continue: true     # automatically resume on next trigger (default: false)
+  max_turns: 50           # turn limit before forcing a new session (optional)
+  summary_fallback: true  # inject a summary if the full session can't be resumed (default: true)
+```
+
+When `persist: true`, users can control continuation in their comments:
+
+| Flag | Behavior |
+|------|----------|
+| `/review -c` or `--continue` | Resume the last session in this thread |
+| `/review -f` or `--fork` | Fork the last session into a new conversation |
+| `/review --new` | Start a fresh session, ignoring any existing one |
+
+Without any flag, the behavior depends on `auto_continue`: if `true`, the session resumes automatically; if `false` (default), a new session starts each time.
 
 ### Event Entries
 
