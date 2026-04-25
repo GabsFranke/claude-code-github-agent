@@ -27,11 +27,6 @@ workflows:
       repomap_budget: 4096
       personalized: true
       include_test_files: true
-      thread_history:
-        enabled: true
-        max_comments: 100
-        include_pr_reviews: true
-        include_issue_body: true
     conversation:
       persist: true
     streaming:
@@ -56,10 +51,7 @@ workflows:
       repomap_budget: 1024
       personalized: false
       thread_history:
-        enabled: true
         max_comments: 50
-        include_pr_reviews: false
-        include_issue_body: true
     conversation:
       persist: true
       auto_continue: true
@@ -85,11 +77,6 @@ workflows:
       repomap_budget: 4096
       personalized: true
       priority_focus: ["build_system", "test_structure"]
-      thread_history:
-        enabled: true
-        max_comments: 100
-        include_pr_reviews: true
-        include_issue_body: true
     conversation:
       persist: true
     streaming:
@@ -109,10 +96,7 @@ workflows:
       repomap_budget: 4096
       personalized: false
       thread_history:
-        enabled: true
         max_comments: 50
-        include_pr_reviews: false
-        include_issue_body: true
     conversation:
       persist: true
     streaming:
@@ -131,11 +115,6 @@ workflows:
     context:
       repomap_budget: 4096
       personalized: false
-      thread_history:
-        enabled: true
-        max_comments: 100
-        include_pr_reviews: true
-        include_issue_body: true
     conversation:
       persist: true
       auto_continue: true
@@ -159,11 +138,6 @@ workflows:
       repomap_budget: 4096
       personalized: true
       include_test_files: true
-      thread_history:
-        enabled: true
-        max_comments: 100
-        include_pr_reviews: true
-        include_issue_body: true
     conversation:
       persist: true
       auto_continue: true
