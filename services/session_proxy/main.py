@@ -47,6 +47,7 @@ from shared.constants import (
     MSG_CHANNEL,
     PENDING_JOB_QUEUE,
     SESSION_HISTORY_KEY,
+    _now_iso,
 )
 from shared.logging_utils import setup_logging
 from shared.streaming_session import StreamingSessionStore
@@ -302,10 +303,12 @@ async def resolve_session(
         owner, repo, thread_type_segment, number, workflow
     )
     if token is not None:
+        # Filter sensitive fields from session data before sending to browser
+        safe_session = {k: v for k, v in session.items() if k != "installation_id"}
         return {
             "status": "found",
             "token": token,
-            "session": session,
+            "session": safe_session,
         }
 
     # Fallback: search transcript files for a matching session
@@ -313,6 +316,8 @@ async def resolve_session(
     if transcript_path is not None:
         # Merge sidecar metadata (installation_id, ref, etc.) for re-invoke
         meta = load_transcript_meta(transcript_path)
+        # Filter installation_id from data sent to browser
+        safe_meta = {k: v for k, v in meta.items() if k != "installation_id"}
         session_proxy_url = os.getenv("SESSION_PROXY_URL", "").strip()
         full_url = build_session_url(
             session_proxy_url, owner, repo, thread_type, issue_number, workflow
@@ -328,7 +333,7 @@ async def resolve_session(
                 "thread_type": thread_type,
                 "status": "completed",
                 "session_proxy_url": full_url,
-                **meta,
+                **safe_meta,
             },
         }
 
@@ -421,6 +426,8 @@ async def _resolve_token_from_path(
     if transcript_path is not None:
         t_token = f"transcript:{transcript_path.stem}"
         meta = load_transcript_meta(transcript_path)
+        # Filter installation_id from data sent to browser
+        safe_meta = {k: v for k, v in meta.items() if k != "installation_id"}
         session_proxy_url = os.getenv("SESSION_PROXY_URL", "").strip()
         full_url = build_session_url(
             session_proxy_url, owner, repo, thread_type, issue_number, workflow
@@ -433,7 +440,7 @@ async def _resolve_token_from_path(
             "thread_type": thread_type,
             "status": "completed",
             "session_proxy_url": full_url,
-            **meta,
+            **safe_meta,
         }
 
     return None, None
@@ -461,6 +468,16 @@ async def websocket_session(
     # Accept first — Starlette requires accept() before any send/close,
     # otherwise it returns 403 Forbidden to the client.
     await websocket.accept()
+
+    # Validate Origin header to prevent cross-site WebSocket hijacking
+    allowed_origins = os.getenv("ALLOWED_ORIGINS", "*")
+    if allowed_origins != "*":
+        origin = websocket.headers.get("origin", "")
+        origin_list = [o.strip() for o in allowed_origins.split(",") if o.strip()]
+        if origin and origin not in origin_list:
+            logger.warning(f"[WS] Rejected WebSocket from disallowed origin: {origin}")
+            await websocket.close(code=4403, reason="Origin not allowed")
+            return
 
     # Validate issue number
     try:
@@ -503,8 +520,10 @@ async def websocket_session(
             )
 
         # Send session metadata + completion signals
+        # Filter installation_id from data sent to browser
+        safe_session = {k: v for k, v in session.items() if k != "installation_id"}
         await websocket.send_text(
-            json.dumps({"type": "session_meta", "data": session, "ts": _now_iso()})
+            json.dumps({"type": "session_meta", "data": safe_session, "ts": _now_iso()})
         )
         await websocket.send_text(
             json.dumps(
@@ -543,8 +562,10 @@ async def websocket_session(
             return
 
         # Send updated session_meta so browser knows we're now live
+        # Filter installation_id from data sent to browser
+        safe_session = {k: v for k, v in session.items() if k != "installation_id"}
         await websocket.send_text(
-            json.dumps({"type": "session_meta", "data": session, "ts": _now_iso()})
+            json.dumps({"type": "session_meta", "data": safe_session, "ts": _now_iso()})
         )
         history_sent = True
 
@@ -562,8 +583,10 @@ async def websocket_session(
                     break
             logger.info(f"[WS] Sent {len(history)} history messages to new client")
 
+        # Filter installation_id from data sent to browser
+        safe_session = {k: v for k, v in session.items() if k != "installation_id"}
         await websocket.send_text(
-            json.dumps({"type": "session_meta", "data": session, "ts": _now_iso()})
+            json.dumps({"type": "session_meta", "data": safe_session, "ts": _now_iso()})
         )
 
     logger.info(
@@ -674,8 +697,8 @@ async def _rehydrate_transcript_session(
                 raw = session.get("conversation_config", "")
                 if raw:
                     conversation_config = json.loads(raw)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"[WS] Failed to parse conversation_config for rehydration: {e}")
             conversation_config.setdefault("persist", True)
 
             job_data = {
@@ -795,14 +818,9 @@ async def _receive_text(websocket: WebSocket):
             yield msg
     except WebSocketDisconnect:
         return
-    except Exception:
+    except Exception as e:
+        logger.warning(f"[WS] Error reading from WebSocket: {e}")
         return
-
-
-def _now_iso() -> str:
-    from datetime import UTC, datetime
-
-    return datetime.now(UTC).isoformat()
 
 
 # ---------------------------------------------------------------------------
