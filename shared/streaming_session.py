@@ -400,7 +400,9 @@ class StreamingSessionStore:
         try:
             raw_items = await self._redis.eval(lua_drain, 1, inbox)  # type: ignore[misc]
         except Exception as e:
-            logger.error(f"[StreamingSessionStore] Failed to drain inbox for {token}: {e}")
+            logger.error(
+                f"[StreamingSessionStore] Failed to drain inbox for {token}: {e}"
+            )
             raw_items = []
 
         messages: list[str] = []

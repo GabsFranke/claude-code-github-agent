@@ -249,7 +249,12 @@ class SessionStore:
                     info = SessionInfo.model_validate_json(raw)
                     if info.streaming_token:
                         await self._propagate_streaming_ttl(
-                            info.streaming_token, repo, thread_id, workflow, ttl_hours, thread_type
+                            info.streaming_token,
+                            repo,
+                            thread_id,
+                            workflow,
+                            ttl_hours,
+                            thread_type,
                         )
                 except Exception as e:
                     logger.warning(f"Failed to propagate streaming TTL for {key}: {e}")
@@ -340,7 +345,9 @@ class SessionStore:
         await self.redis.delete(lookup_key)
         # Also try deleting the legacy key (without thread_type) for cleanup
         if thread_type:
-            legacy_key = _streaming_lookup_key(repo, thread_id, workflow, thread_type="")
+            legacy_key = _streaming_lookup_key(
+                repo, thread_id, workflow, thread_type=""
+            )
             await self.redis.delete(legacy_key)
         logger.info(
             f"Cleaned up streaming session {token[:8]}... for {repo}/{thread_type}/{thread_id}/{workflow}"
@@ -368,7 +375,9 @@ class SessionStore:
         await self.redis.expire(lookup_key, ttl_seconds)
         # Also propagate to legacy key (without thread_type) if present
         if thread_type:
-            legacy_key = _streaming_lookup_key(repo, thread_id, workflow, thread_type="")
+            legacy_key = _streaming_lookup_key(
+                repo, thread_id, workflow, thread_type=""
+            )
             await self.redis.expire(legacy_key, ttl_seconds)
         logger.debug(f"Propagated TTL {ttl_hours}h to streaming session {token[:8]}...")
 

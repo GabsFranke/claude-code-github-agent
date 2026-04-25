@@ -698,7 +698,9 @@ async def _rehydrate_transcript_session(
                 if raw:
                     conversation_config = json.loads(raw)
             except Exception as e:
-                logger.warning(f"[WS] Failed to parse conversation_config for rehydration: {e}")
+                logger.warning(
+                    f"[WS] Failed to parse conversation_config for rehydration: {e}"
+                )
             conversation_config.setdefault("persist", True)
 
             job_data = {
