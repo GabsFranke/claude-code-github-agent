@@ -153,6 +153,7 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
 
         # Ensure repo is synced and setup worktree
         repo = job_data["repo"]
+        issue_number = job_data.get("issue_number")
         ref = job_data.get("ref", "main")
         logger.info(f"Job data keys: {list(job_data.keys())}")
         logger.info(f"Job data ref value: {job_data.get('ref', 'NOT_FOUND')}")
@@ -479,7 +480,6 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
             # Personalize repomap toward relevant files when configured
             if context_profile.get("personalized", False):
                 # Strategy 1: Fetch PR changed files (works for PR-triggered workflows)
-                issue_number = job_data.get("issue_number")
                 github_token = job_data.get("github_token")
                 if issue_number and github_token:
                     try:
@@ -537,6 +537,37 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
                 exc_info=True,
             )
 
+        # Fetch thread history (issue/PR comments) for cross-workflow context
+        thread_history_text = ""
+        try:
+            from shared.thread_history import (
+                ThreadHistoryConfig,
+                fetch_and_format_thread_history,
+            )
+
+            context_profile_data = job_data.get("context_profile", {})
+            th_raw = context_profile_data.get("thread_history", {})
+            thread_config = ThreadHistoryConfig(**th_raw)
+            if thread_config.enabled and issue_number:
+                thread_history_text = await fetch_and_format_thread_history(
+                    repo=repo,
+                    issue_number=issue_number,
+                    token=job_data["github_token"],
+                    thread_type=thread_type,
+                    config=thread_config,
+                )
+                if thread_history_text:
+                    logger.info(
+                        f"Fetched thread history: {len(thread_history_text)} chars"
+                    )
+                else:
+                    logger.info("No thread history available")
+        except Exception as e:
+            logger.warning(
+                f"Thread history fetch failed, continuing without: {e}",
+                exc_info=True,
+            )
+
         # Build SDK options using the factory builder
         model = os.getenv("ANTHROPIC_DEFAULT_SONNET_MODEL", "claude-sonnet-4-20250514")
         github_token = job_data["github_token"]
@@ -583,6 +614,7 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
             .with_repository_context(
                 claude_md=claude_md, memory_index=memory_index
             )  # Repository context (prepended to system prompt)
+            .with_thread_history(thread_history_text)  # Issue/PR comment history
             .with_structural_context(
                 file_tree=file_tree_text, repomap=repomap_text
             )  # Structural context (file tree + repomap)
@@ -763,6 +795,7 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
                     .with_repository_context(
                         claude_md=claude_md, memory_index=memory_index
                     )
+                    .with_thread_history(thread_history_text)
                     .with_structural_context(
                         file_tree=file_tree_text, repomap=repomap_text
                     )

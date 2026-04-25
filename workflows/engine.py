@@ -10,6 +10,7 @@ import yaml  # type: ignore[import]
 from pydantic import BaseModel, Field, ValidationError
 
 from shared.session_store import ConversationConfig as ConversationConfigModel
+from shared.thread_history import ThreadHistoryConfig
 from shared.utils import resolve_path
 
 logger = logging.getLogger(__name__)
@@ -68,6 +69,10 @@ class ContextProfile(BaseModel):
     priority_focus: list[str] = Field(
         default_factory=list,
         description="Focus areas for repomap ranking (e.g., ['build_system', 'test_structure'])",
+    )
+    thread_history: ThreadHistoryConfig = Field(
+        default_factory=lambda: ThreadHistoryConfig(),  # type: ignore[call-arg]
+        description="Thread history injection configuration",
     )
 
 

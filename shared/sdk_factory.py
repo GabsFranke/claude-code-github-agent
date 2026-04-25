@@ -97,6 +97,7 @@ class SDKOptionsBuilder:
         self._agents: dict | None = None
         self._repo_context: dict = {}  # Store context for hooks
         self._structural_context: str | None = None  # File tree + repomap
+        self._thread_history: str | None = None  # Issue/PR comment history
         self._pending_post_jobs: list[dict] = (
             []
         )  # Buffered during session, flushed after
@@ -587,6 +588,25 @@ class SDKOptionsBuilder:
             self._structural_context = "\n\n".join(parts)
         return self
 
+    def with_thread_history(self, history: str | None) -> "SDKOptionsBuilder":
+        """Inject issue/PR comment history into system prompt.
+
+        Thread history has medium priority — higher than structural context
+        (file tree/repomap) but lower than the workflow prompt. When the
+        budget is exceeded, structural is truncated first, then thread
+        history (from the top, dropping oldest comments), then the prompt.
+
+        Args:
+            history: Formatted thread history string (from
+                shared.thread_history.fetch_and_format_thread_history).
+
+        Returns:
+            Self for method chaining
+        """
+        if history and history.strip():
+            self._thread_history = history.strip()
+        return self
+
     async def with_repository_context_auto(
         self, repo: str, fetch_claude_md: bool = True, fetch_memory: bool = True
     ) -> "SDKOptionsBuilder":
@@ -782,20 +802,25 @@ class SDKOptionsBuilder:
     def _assemble_system_prompt(self) -> str | None:
         """Assemble the final system prompt with budget enforcement.
 
-        Three component tiers (highest priority first):
+        Four component tiers (highest priority first):
           1. Prompt content (workflow context, CLAUDE.md, memory index
              -- merged into a single block before this method runs)
-          2. Structural context (file tree + repomap)
-          3. Session signature (always appended, never truncated)
+          2. Thread history (issue/PR comments -- truncated from top/oldest)
+          3. Structural context (file tree + repomap)
+          4. Session signature (always appended, never truncated)
 
-        Structural context is truncated first if the total exceeds
-        SYSTEM_PROMPT_BUDGET tokens. Session signature is always included.
+        When the budget is exceeded, structural is truncated first,
+        then thread history (dropping oldest comments), then prompt.
+        Session signature is always included.
         """
         # Collect components with their token costs
         components: list[tuple[str, str]] = []  # (label, text)
 
         if self._structural_context and self._structural_context.strip():
             components.append(("structural", self._structural_context.strip()))
+
+        if self._thread_history and self._thread_history.strip():
+            components.append(("thread_history", self._thread_history.strip()))
 
         if self._system_prompt and self._system_prompt.strip():
             components.append(("prompt", self._system_prompt.strip()))
@@ -837,7 +862,7 @@ class SDKOptionsBuilder:
 
         # Add prompt and signature first (highest priority — keep intact)
         for label, text in components:
-            if label not in ("structural",):
+            if label not in ("structural", "thread_history"):
                 tokens = _estimate_tokens(text)
                 if tokens <= budget_remaining:
                     final_parts.append(text)
@@ -847,6 +872,23 @@ class SDKOptionsBuilder:
                     if truncated:
                         final_parts.append(truncated)
                         budget_remaining = 0
+                    break
+
+        # Add thread history with remaining budget (medium priority — truncate from top)
+        if budget_remaining > 0:
+            for label, text in components:
+                if label == "thread_history":
+                    tokens = _estimate_tokens(text)
+                    if tokens <= budget_remaining:
+                        final_parts.append(text)
+                        budget_remaining -= tokens
+                    else:
+                        truncated = _truncate_text(
+                            text, budget_remaining, from_top=True
+                        )
+                        if truncated:
+                            final_parts.append(truncated)
+                            budget_remaining = 0
                     break
 
         # Add structural context with remaining budget (lowest priority — truncate first)
@@ -872,12 +914,14 @@ class SDKOptionsBuilder:
         return result
 
 
-def _truncate_text(text: str, max_tokens: int) -> str | None:
-    """Truncate text to fit within a token budget by removing lines from the end.
+def _truncate_text(text: str, max_tokens: int, from_top: bool = False) -> str | None:
+    """Truncate text to fit within a token budget.
 
     Args:
         text: Text to truncate.
         max_tokens: Maximum tokens allowed.
+        from_top: If True, remove lines from the beginning (keeping the end).
+            Use this for thread history so newest comments are preserved.
 
     Returns:
         Truncated text, or None if even one line exceeds the budget.
@@ -891,19 +935,39 @@ def _truncate_text(text: str, max_tokens: int) -> str | None:
         return text
 
     lines = text.split("\n")
-    result_lines: list[str] = []
 
-    for line in lines:
-        candidate = "\n".join(result_lines + [line])
-        if _estimate(candidate) > max_tokens:
-            break
-        result_lines.append(line)
+    if from_top:
+        # Remove lines from the beginning, keeping the end
+        result_lines: list[str] = []
+        for line in reversed(lines):
+            candidate = "\n".join([line] + list(reversed(result_lines)))
+            if _estimate(candidate) > max_tokens:
+                break
+            result_lines.append(line)
+        result_lines.reverse()
 
-    if not result_lines:
-        return None
+        if not result_lines:
+            return None
 
-    result = "\n".join(result_lines)
-    if _estimate(result) > max_tokens:
-        return None
+        result = "\n".join(result_lines)
+        if _estimate(result) > max_tokens:
+            return None
 
-    return result + "\n... (truncated)"
+        return "... (older comments truncated)\n" + result
+    else:
+        # Remove lines from the end, keeping the beginning
+        result_lines = []
+        for line in lines:
+            candidate = "\n".join(result_lines + [line])
+            if _estimate(candidate) > max_tokens:
+                break
+            result_lines.append(line)
+
+        if not result_lines:
+            return None
+
+        result = "\n".join(result_lines)
+        if _estimate(result) > max_tokens:
+            return None
+
+        return result + "\n... (truncated)"
