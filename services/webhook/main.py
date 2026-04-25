@@ -6,7 +6,7 @@ import sys
 
 from fastapi import FastAPI, HTTPException, Request
 from payload_extractor import PayloadExtractor
-from validators import verify_signature
+from validators import verify_signature  # type: ignore[attr-defined]
 
 from shared import get_queue
 from shared.config import get_webhook_config, handle_config_error
@@ -132,6 +132,7 @@ async def webhook(request: Request):
             "event_type": event_type,
             "action": action,
             "issue_state": issue_state,
+            "installation_id": str(data.get("installation", {}).get("id", "")),
         }
         user_query = ""
         command = None

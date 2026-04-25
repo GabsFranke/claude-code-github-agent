@@ -8,6 +8,7 @@ import json
 import logging
 import os
 from pathlib import Path
+from typing import Any
 
 from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
 
@@ -102,6 +103,11 @@ class SDKOptionsBuilder:
         self._resume: str | None = None  # Session ID to resume
         self._continue_conversation: bool = False  # Continue most recent session
         self._fork_session: bool = False  # Fork from existing session
+        # Streaming fields (Phase: session streaming)
+        self._can_use_tool = None  # Optional tool approval callback
+        self._include_partial_messages: bool = False  # Enable StreamEvent output
+        self._streaming_bridge = None  # SessionStreamBridge (not passed to SDK)
+        self._session_signature: str | None = None  # Session URL for comment signature
 
     # Model selection methods
 
@@ -643,6 +649,81 @@ class SDKOptionsBuilder:
 
     # Build method
 
+    # ---------------------------------------------------------------------------
+    # Streaming / remote control
+    # ---------------------------------------------------------------------------
+
+    def with_streaming(self, bridge: "Any") -> "SDKOptionsBuilder":
+        """Enable streaming mode for real-time session observation.
+
+        Sets include_partial_messages=True on the final ClaudeAgentOptions,
+        which causes the SDK message loop to emit StreamEvent objects with
+        token-level deltas (text chunks, tool call inputs) in addition to
+        the normal AssistantMessage / ResultMessage objects.
+
+        The bridge itself is NOT passed to the SDK — it is returned via the
+        streaming_bridge property and must be passed separately to execute_sdk().
+
+        Args:
+            bridge: SessionStreamBridge instance (imported lazily to avoid
+                    circular imports in non-streaming code paths)
+
+        Returns:
+            Self for method chaining
+        """
+        self._streaming_bridge = bridge
+        self._include_partial_messages = True
+        return self
+
+    def with_can_use_tool(self, callback: "Any") -> "SDKOptionsBuilder":
+        """Set a tool approval callback for human-in-the-loop tool gating.
+
+        The callback signature must be:
+            async def callback(
+                tool_name: str,
+                tool_input: dict,
+                context: ToolPermissionContext,
+            ) -> PermissionResultAllow | PermissionResultDeny
+
+        IMPORTANT: Setting can_use_tool automatically requires the prompt to
+        be wrapped as an AsyncIterable (SDK constraint). sdk_executor handles
+        this transparently — callers do not need to change how they pass prompts.
+
+        Args:
+            callback: Async callable for tool approval decisions
+
+        Returns:
+            Self for method chaining
+        """
+        self._can_use_tool = callback
+        return self
+
+    @property
+    def streaming_bridge(self) -> "Any":
+        """The SessionStreamBridge instance (if streaming is configured).
+
+        Pass this to execute_sdk(streaming_bridge=builder.streaming_bridge) to
+        enable real-time message publishing.
+        """
+        return self._streaming_bridge
+
+    def with_session_signature(self, session_url: str) -> "SDKOptionsBuilder":
+        """Append a session URL signature instruction to the system prompt.
+
+        When remote control is enabled, the agent should include the session
+        URL at the end of every GitHub comment it posts.
+
+        Args:
+            session_url: Full URL to the session proxy (human-readable format).
+
+        Returns:
+            Self for method chaining
+        """
+        self._session_signature = session_url
+        return self
+
+    # Build method
+
     def build(self) -> ClaudeAgentOptions:
         """Build the final ClaudeAgentOptions object.
 
@@ -693,18 +774,22 @@ class SDKOptionsBuilder:
             resume=self._resume,
             continue_conversation=self._continue_conversation,
             fork_session=self._fork_session,
+            # Streaming support
+            can_use_tool=self._can_use_tool,
+            include_partial_messages=self._include_partial_messages,
         )
 
     def _assemble_system_prompt(self) -> str | None:
         """Assemble the final system prompt with budget enforcement.
 
-        Two component tiers (highest priority first):
+        Three component tiers (highest priority first):
           1. Prompt content (workflow context, CLAUDE.md, memory index
              -- merged into a single block before this method runs)
           2. Structural context (file tree + repomap)
+          3. Session signature (always appended, never truncated)
 
         Structural context is truncated first if the total exceeds
-        SYSTEM_PROMPT_BUDGET tokens.
+        SYSTEM_PROMPT_BUDGET tokens. Session signature is always included.
         """
         # Collect components with their token costs
         components: list[tuple[str, str]] = []  # (label, text)
@@ -714,6 +799,19 @@ class SDKOptionsBuilder:
 
         if self._system_prompt and self._system_prompt.strip():
             components.append(("prompt", self._system_prompt.strip()))
+
+        # Session signature (always appended, never truncated)
+        if self._session_signature:
+            signature_instruction = (
+                "When posting any GitHub comment (via add_issue_comment or "
+                "pull_request_review_write), you MUST append this signature "
+                "at the very end of your comment:\n\n"
+                "---\n"
+                f"[Link to remote control this session]({self._session_signature})"
+                "\n\nDo not include this signature in PR descriptions, "
+                "commit messages, or any other output — only GitHub comments."
+            )
+            components.append(("signature", signature_instruction))
 
         if not components:
             return None
@@ -737,9 +835,9 @@ class SDKOptionsBuilder:
         budget_remaining = SYSTEM_PROMPT_BUDGET
         final_parts: list[str] = []
 
-        # Add prompt content first (highest priority — keep intact)
+        # Add prompt and signature first (highest priority — keep intact)
         for label, text in components:
-            if label != "structural":
+            if label not in ("structural",):
                 tokens = _estimate_tokens(text)
                 if tokens <= budget_remaining:
                     final_parts.append(text)

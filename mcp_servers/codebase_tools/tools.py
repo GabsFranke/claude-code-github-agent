@@ -168,7 +168,7 @@ def _get_or_parse(filepath: Path) -> tuple[Any, bytes | None]:
 
         tree = parser.parse(source)
         if tree is None:
-            return None, None
+            return None, None  # type: ignore[unreachable]
 
         result = (tree, source)
         _ast_cache[cache_key] = result

@@ -22,6 +22,17 @@ from shared import (  # noqa: E402
     setup_graceful_shutdown,
     wait_for_repo_sync,
 )
+from shared.constants import (  # noqa: E402
+    AUTO_APPROVE_TIMEOUT,
+    CLOSED_SESSION_TTL_HOURS,
+    FALLBACK_CONVERSATION_TTL_HOURS,
+    JOB_TTL_SECONDS,
+    MAX_AUTO_CONTINUES as MAX_AUTO_CONTINUES_CONST,
+    ORPHAN_LOCK_KEY,
+    ORPHAN_LOCK_TTL_SECONDS,
+    REVIVED_SESSION_TTL_HOURS,
+    WORKTREE_CLEANUP_QUEUE,
+)
 from shared.context_builder import (  # noqa: E402
     find_priority_focus_files,
     generate_structural_context,
@@ -30,6 +41,7 @@ from shared.logging_utils import setup_logging  # noqa: E402
 from shared.sdk_executor import execute_sdk  # noqa: E402
 from shared.sdk_factory import SDKOptionsBuilder  # noqa: E402
 from shared.session_store import SessionStore  # noqa: E402
+from shared.utils import build_session_url  # noqa: E402
 from shared.worktree_lock import PendingPrompt, WorktreeKey, WorktreeLock  # noqa: E402
 from shared.worktree_manager import (  # noqa: E402
     cleanup_worktrees,
@@ -54,6 +66,58 @@ SDK_RETRY_BASE_DELAY = float(os.getenv("SDK_RETRY_BASE_DELAY", "5.0"))
 
 # Global state
 shutdown_event = asyncio.Event()
+
+
+def _write_transcript_meta(transcript_path: str, meta: dict) -> None:
+    """Write a sidecar .meta.json file alongside a transcript JSONL.
+
+    Persists session metadata (installation_id, ref, etc.) so that
+    re-invoke works even after the Redis session expires.
+    """
+    import json
+    from pathlib import Path
+
+    try:
+        meta_path = Path(transcript_path).with_suffix(".meta.json")
+        meta_path.write_text(json.dumps(meta), encoding="utf-8")
+        logger.debug(f"Wrote transcript metadata to {meta_path}")
+    except Exception as e:
+        logger.warning(f"Failed to write transcript metadata: {e}")
+
+
+def _find_transcript_path(session_id: str, cwd: str) -> str | None:
+    """Locate the SDK transcript JSONL file for a given session.
+
+    The SDK writes transcripts to ~/.claude/projects/<sanitized-cwd>/<session_id>.jsonl
+    where <sanitized-cwd> replaces non-alphanumeric chars with '-'.
+
+    If the exact path doesn't exist, scans all project dirs for the session_id.
+    """
+    import re
+    from pathlib import Path
+
+    claude_home = Path.home() / ".claude"
+    projects_dir = claude_home / "projects"
+
+    if not projects_dir.exists():
+        return None
+
+    # Try direct path from sanitized cwd
+    if cwd:
+        sanitized = re.sub(r"[^a-zA-Z0-9]", "-", cwd)
+        direct = projects_dir / sanitized / f"{session_id}.jsonl"
+        if direct.exists():
+            return str(direct)
+
+    # Fallback: scan project directories for the session file
+    for project_dir in projects_dir.iterdir():
+        if not project_dir.is_dir():
+            continue
+        candidate = project_dir / f"{session_id}.jsonl"
+        if candidate.exists():
+            return str(candidate)
+
+    return None
 
 
 async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
@@ -94,6 +158,26 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
         logger.info(f"Job data ref value: {job_data.get('ref', 'NOT_FOUND')}")
         logger.info(f"Setting up worktree for {repo} (ref {ref})")
 
+        # Generate GitHub token from installation_id if not provided
+        # (e.g., for re-invoke jobs from the session_proxy)
+        if not job_data.get("github_token") and job_data.get("installation_id"):
+            try:
+                from shared.github_auth import GitHubAuthService
+
+                auth = GitHubAuthService(
+                    installation_id=str(job_data["installation_id"])
+                )
+                async with auth:
+                    job_data["github_token"] = await auth.get_token()
+                logger.info(
+                    f"Generated GitHub token from installation_id "
+                    f"{job_data['installation_id']}"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Failed to generate GitHub token from installation_id: {e}"
+                )
+
         repo_dir = await wait_for_repo_sync(repo, ref, job_queue.redis)
 
         # Session persistence: determine worktree path and session mode
@@ -105,7 +189,9 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
         conversation_config = job_data.get("conversation_config") or {}
 
         persist_session = conversation_config.get("persist", False)
-        ttl_hours = conversation_config.get("ttl_hours", 168)
+        ttl_hours = conversation_config.get(
+            "ttl_hours", FALLBACK_CONVERSATION_TTL_HOURS
+        )
         logger.info(
             f"Session config: persist={persist_session}, ttl={ttl_hours}h, "
             f"mode={session_mode}, workflow={workflow_name}, "
@@ -318,7 +404,7 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
         )
         # Validate that bot_username and bot_email contain only safe characters
         # to prevent shell injection even though we use list format
-        _safe_pattern = re.compile(r"^[a-zA-Z0-9\s.\-@]+$")
+        _safe_pattern = re.compile(r"^[a-zA-Z0-9\s.\-\[\]@]+$")
         if not _safe_pattern.match(bot_username):
             raise ValueError(
                 f"BOT_USERNAME contains invalid characters: {bot_username!r}"
@@ -523,9 +609,131 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
                 (system_context or "") + summary_context
             )
 
-        # For persistent sessions, wrap SDK execution with cancel subscription
+        # ---------------------------------------------------------------------------
+        # Session streaming setup
+        # ---------------------------------------------------------------------------
+        streaming_bridge = None
+        streaming_control = None
+        user_interrupt_event = asyncio.Event()
+        if job_data.get("streaming_enabled") and job_data.get("session_token"):
+            session_token = job_data["session_token"]
+            try:
+                from claude_agent_sdk.types import (
+                    PermissionResultAllow,
+                    PermissionResultDeny,
+                )
+
+                from shared.session_stream import ControlChannel, SessionStreamBridge
+                from shared.streaming_session import StreamingSessionStore
+
+                streaming_bridge = SessionStreamBridge(
+                    token=session_token,
+                    redis=job_queue.redis,
+                )
+                streaming_control = ControlChannel(
+                    token=session_token,
+                    redis=job_queue.redis,
+                    interrupt_event=user_interrupt_event,
+                )
+                await streaming_control.start()
+
+                # Publish session init so browsers know what job we're running
+                await streaming_bridge.publish_init(
+                    repo=repo,
+                    issue_number=job_data.get("issue_number", 0),
+                    workflow=job_data.get("workflow_name", "unknown"),
+                )
+                # Publish run_start with run count for multi-run sessions
+                session_meta = await StreamingSessionStore(job_queue.redis).get_session(
+                    session_token
+                )
+                run_count = int(
+                    session_meta.get("run_count", "1") if session_meta else 1
+                )
+                await streaming_bridge.publish(
+                    "run_start",
+                    {"run_number": run_count, "session_id": session_id},
+                )
+
+                # Build can_use_tool callback if tool_approval is enabled
+                if job_data.get("tool_approval_enabled", False):
+                    _store = StreamingSessionStore(job_queue.redis)
+                    _bridge = streaming_bridge
+                    _control = streaming_control
+                    _token = session_token
+                    _auto_approve_timeout = job_data.get(
+                        "auto_approve_timeout", AUTO_APPROVE_TIMEOUT
+                    )
+
+                    async def _can_use_tool(tool_name, tool_input, context):
+                        # If nobody is watching, auto-approve immediately
+                        if not await _store.has_subscribers(_token):
+                            logger.info(
+                                f"[Streaming] No subscribers, auto-approving {tool_name}"
+                            )
+                            return PermissionResultAllow()
+
+                        # Publish approval request to browser
+                        tool_use_id = getattr(context, "tool_use_id", None) or "unknown"
+                        await _bridge.publish_tool_approval_request(
+                            tool_name=tool_name,
+                            tool_use_id=tool_use_id,
+                            tool_input=tool_input,
+                        )
+
+                        # Wait for browser response (auto-approves on timeout)
+                        approved = await _control.wait_for_approval(
+                            tool_use_id=tool_use_id,
+                            timeout=float(_auto_approve_timeout),
+                        )
+                        return (
+                            PermissionResultAllow()
+                            if approved
+                            else PermissionResultDeny()
+                        )
+
+                    builder.with_can_use_tool(_can_use_tool)
+
+                # Enable partial messages for token-level streaming
+                builder.with_streaming(streaming_bridge)
+
+                # Inject session URL signature into system prompt for GitHub comments
+                session_proxy_url = (
+                    os.getenv("SESSION_PROXY_URL", "").strip().rstrip("/")
+                )
+                if session_proxy_url:
+                    owner, _, repo_name = repo.partition("/")
+                    issue_num = job_data.get("issue_number", 0)
+                    session_url = build_session_url(
+                        session_proxy_url,
+                        owner,
+                        repo_name,
+                        thread_type,
+                        issue_num,
+                        workflow_name,
+                    )
+                    builder.with_session_signature(session_url)
+
+                logger.info(
+                    f"[Streaming] Session streaming enabled for token {session_token[:8]}..."
+                )
+            except Exception as e:
+                logger.warning(
+                    f"[Streaming] Failed to set up streaming for {session_token[:8]}...: {e}. "
+                    "Continuing without streaming."
+                )
+                streaming_bridge = None
+                streaming_control = None
+
+        # ---------------------------------------------------------------------------
+        # SDK execution loop (supports auto-continue from browser messages)
+        # ---------------------------------------------------------------------------
+        MAX_AUTO_CONTINUES = MAX_AUTO_CONTINUES_CONST
         result = None
         sdk_task: asyncio.Task | None = None
+        current_prompt = job_data["prompt"]
+        current_session_id = session_id  # from session resume/fork setup above
+        interrupted = False
 
         async def handle_cancel():
             """Callback when cancel signal received - interrupt SDK."""
@@ -535,52 +743,217 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
             if sdk_task and not sdk_task.done():
                 sdk_task.cancel()
 
-        if worktree_lock:
-            async with worktree_lock.cancel_subscription(handle_cancel):
-                # Run SDK in a task so it can be cancelled
-                sdk_task = asyncio.create_task(
-                    execute_sdk(
-                        prompt=job_data["prompt"],
-                        options=builder.build(),
-                        max_retries=SDK_MAX_RETRIES,
-                        retry_base_delay=SDK_RETRY_BASE_DELAY,
+        for continue_count in range(MAX_AUTO_CONTINUES + 1):
+            interrupted = False
+            user_interrupt_event.clear()
+
+            # Rebuild builder for continuation (resume mode after first run)
+            if continue_count > 0:
+                builder = SDKOptionsBuilder(cwd=workspace).with_model(model)
+                builder = (
+                    builder.with_auto_discovered_plugins()
+                    .with_full_toolset()
+                    .with_agents(AGENTS)
+                    .with_langfuse_hooks(parent_span_id=parent_span_id)
+                    .with_transcript_staging(repo, workflow_name, ref=ref)
+                    .with_writable_dir(
+                        str(Path.home() / ".claude" / "memory" / repo / "memory")
+                    )
+                    .with_system_prompt(system_context)
+                    .with_repository_context(
+                        claude_md=claude_md, memory_index=memory_index
+                    )
+                    .with_structural_context(
+                        file_tree=file_tree_text, repomap=repomap_text
                     )
                 )
+                if current_session_id:
+                    builder = builder.with_session_resume(current_session_id)
+                # Re-apply streaming hooks
+                if streaming_bridge:
+                    if job_data.get("tool_approval_enabled", False):
+                        builder.with_can_use_tool(_can_use_tool)
+                    builder.with_streaming(streaming_bridge)
+                    # Re-apply session signature
+                    session_proxy_url = (
+                        os.getenv("SESSION_PROXY_URL", "").strip().rstrip("/")
+                    )
+                    if session_proxy_url:
+                        owner, _, repo_name = repo.partition("/")
+                        issue_num = job_data.get("issue_number", 0)
+                        session_url = build_session_url(
+                            session_proxy_url,
+                            owner,
+                            repo_name,
+                            thread_type,
+                            issue_num,
+                            workflow_name,
+                        )
+                        builder.with_session_signature(session_url)
 
-                try:
-                    result = await sdk_task
-                except asyncio.CancelledError:
-                    logger.info(f"SDK execution cancelled for {worktree_key}")
-                    interrupted = True
-                    # Update lock status to indicate interruption
-                    await worktree_lock.set_interrupted()
-        else:
-            # No lock needed (non-persistent session), execute normally
-            result = await execute_sdk(
-                prompt=job_data["prompt"],
-                options=builder.build(),
-                max_retries=SDK_MAX_RETRIES,
-                retry_base_delay=SDK_RETRY_BASE_DELAY,
-            )
+            # Execute SDK
+            if worktree_lock:
+                async with worktree_lock.cancel_subscription(handle_cancel):
+                    sdk_task = asyncio.create_task(
+                        execute_sdk(
+                            prompt=current_prompt,
+                            options=builder.build(),
+                            max_retries=SDK_MAX_RETRIES,
+                            retry_base_delay=SDK_RETRY_BASE_DELAY,
+                            streaming_bridge=streaming_bridge,
+                        )
+                    )
 
-        # Handle interrupted job
-        if interrupted:
-            logger.info(f"Job {job_id} interrupted, marking as superseded")
-            await job_queue.complete_job(
-                job_id,
-                {
-                    "status": "superseded",
-                    "repo": repo,
-                    "issue_number": job_data.get("issue_number", 0),
-                    "message": "Interrupted by new prompt, session saved for continuation",
-                },
-                status="superseded",
-            )
-            logger.info(f"Job {job_id} completed as superseded")
-            return  # Exit early, lock released in finally
+                    # Wait for SDK task OR user interrupt
+                    done = False
+                    while not done:
+                        # Race between SDK completion and user interrupt
+                        sdk_done_task = asyncio.ensure_future(sdk_task)
+                        interrupt_wait = asyncio.create_task(
+                            user_interrupt_event.wait()
+                        )
+                        try:
+                            await asyncio.wait(
+                                [sdk_done_task, interrupt_wait],
+                                return_when=asyncio.FIRST_COMPLETED,
+                            )
+                        except asyncio.CancelledError:
+                            # Worktree cancel while we were waiting
+                            interrupted = True
+                            if not sdk_task.done():
+                                sdk_task.cancel()
+                            break
 
-        if not result:
-            raise RuntimeError("SDK execution returned no result")
+                        if sdk_done_task.done():
+                            interrupt_wait.cancel()
+                            try:
+                                result = sdk_done_task.result()
+                            except asyncio.CancelledError:
+                                interrupted = True
+                                await worktree_lock.set_interrupted()
+                            done = True
+                        else:
+                            # User interrupt — cancel SDK
+                            sdk_done_task.cancel()
+                            interrupt_wait.cancel()
+                            if not sdk_task.done():
+                                sdk_task.cancel()
+                                try:
+                                    await sdk_task
+                                except asyncio.CancelledError:
+                                    pass
+                            interrupted = True
+                            done = True
+            else:
+                result = await execute_sdk(
+                    prompt=current_prompt,
+                    options=builder.build(),
+                    max_retries=SDK_MAX_RETRIES,
+                    retry_base_delay=SDK_RETRY_BASE_DELAY,
+                    streaming_bridge=streaming_bridge,
+                )
+
+            # Handle worktree-interrupted job (not user interrupt)
+            if interrupted and not user_interrupt_event.is_set():
+                logger.info(f"Job {job_id} interrupted, marking as superseded")
+                await job_queue.complete_job(
+                    job_id,
+                    {
+                        "status": "superseded",
+                        "repo": repo,
+                        "issue_number": job_data.get("issue_number", 0),
+                        "message": "Interrupted by new prompt, session saved for continuation",
+                    },
+                    status="superseded",
+                )
+                logger.info(f"Job {job_id} completed as superseded")
+                return  # Exit early, lock released in finally
+
+            if not result and not interrupted:
+                raise RuntimeError("SDK execution returned no result")
+
+            # Check inbox for user messages (from browser)
+            if streaming_bridge is not None and job_data.get("session_token"):
+                from shared.streaming_session import StreamingSessionStore
+
+                store = StreamingSessionStore(job_queue.redis)
+                inbox_messages = await store.pop_inbox_messages(
+                    job_data["session_token"]
+                )
+
+                if inbox_messages and not interrupted:
+                    # Auto-continue: take first message as next prompt
+                    current_prompt = inbox_messages[0]
+                    if len(inbox_messages) > 1:
+                        current_prompt += (
+                            "\n\n(Follow-up: " + "; ".join(inbox_messages[1:]) + ")"
+                        )
+                    current_session_id = result.get("session_id") if result else None
+
+                    # Notify browser
+                    await streaming_bridge.publish_user_message(inbox_messages[0])
+                    await streaming_bridge.publish_init(
+                        repo=repo,
+                        issue_number=job_data.get("issue_number", 0),
+                        workflow=job_data.get("workflow_name", "unknown"),
+                    )
+                    await store.set_running(job_data["session_token"])
+                    logger.info(
+                        f"[Streaming] Auto-continue #{continue_count + 1} "
+                        f"with user message for {job_data['session_token'][:8]}..."
+                    )
+                    continue  # Loop back for next execution
+                elif inbox_messages and interrupted:
+                    # User interrupted → resume with their message
+                    current_prompt = inbox_messages[0]
+                    if len(inbox_messages) > 1:
+                        current_prompt += (
+                            "\n\n(Follow-up: " + "; ".join(inbox_messages[1:]) + ")"
+                        )
+                    current_session_id = (result or {}).get("session_id")
+
+                    # Notify browser
+                    await streaming_bridge.publish_user_message(inbox_messages[0])
+                    await streaming_bridge.publish_init(
+                        repo=repo,
+                        issue_number=job_data.get("issue_number", 0),
+                        workflow=job_data.get("workflow_name", "unknown"),
+                    )
+                    await store.set_running(job_data["session_token"])
+                    logger.info(
+                        f"[Streaming] User interrupt → auto-continue "
+                        f"with message for {job_data['session_token'][:8]}..."
+                    )
+                    continue  # Loop back for next execution
+
+            # No inbox messages — session is done
+            break
+
+        # Tear down streaming after loop exits
+        if streaming_bridge is not None:
+            try:
+                is_error = (result or {}).get("is_error", False)
+                new_session_id = (result or {}).get("session_id") if result else None
+                if job_data.get("session_token"):
+                    from shared.streaming_session import StreamingSessionStore
+
+                    store = StreamingSessionStore(job_queue.redis)
+                    await store.set_completed(
+                        token=job_data["session_token"],
+                        is_error=is_error,
+                        repo=repo,
+                        issue_number=job_data.get("issue_number"),
+                        workflow=job_data.get("workflow_name", "unknown"),
+                        session_id=new_session_id,
+                    )
+                await streaming_bridge.close()
+            except Exception as e:
+                logger.warning(f"[Streaming] Error during streaming teardown: {e}")
+        if streaming_control is not None:
+            try:
+                await streaming_control.stop()
+            except Exception as e:
+                logger.warning(f"[Streaming] Error stopping control channel: {e}")
 
         response = result["response"]
 
@@ -601,7 +974,7 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
                 # Override TTL if the issue is closed
                 issue_state = job_data.get("event_data", {}).get("issue_state", "open")
                 if issue_state == "closed":
-                    ttl_hours = 72
+                    ttl_hours = CLOSED_SESSION_TTL_HOURS
                     logger.info(
                         f"Issue is closed, overriding session TTL to {ttl_hours}h"
                     )
@@ -617,6 +990,7 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
                     ref=ref,
                     turn_count=result.get("num_turns", 0),
                     ttl_hours=ttl_hours,
+                    streaming_token=job_data.get("session_token"),
                 )
                 logger.info(
                     f"Saved session {new_session_id[:8]}... for "
@@ -627,6 +1001,43 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
                     await worktree_lock.set_session_id(new_session_id)
             except Exception as e:
                 logger.warning(f"Failed to save session metadata: {e}")
+
+        # Update streaming session metadata for re-invoke
+        # Note: session_id is already set atomically in set_completed() above
+        # if streaming was enabled. This block handles the transcript path
+        # and the non-streaming case (where set_completed wasn't called).
+        if new_session_id and job_data.get("session_token"):
+            try:
+                from shared.streaming_session import StreamingSessionStore
+
+                stream_store = StreamingSessionStore(job_queue.redis)
+                # Only update session_id if it wasn't already set atomically
+                # in set_completed (i.e., streaming was not enabled)
+                if streaming_bridge is None:
+                    await stream_store.update_session_id(
+                        job_data["session_token"], new_session_id
+                    )
+                # Store transcript path so session_proxy can load history
+                transcript_path = _find_transcript_path(new_session_id, workspace or "")
+                if transcript_path:
+                    await stream_store.update_transcript_path(
+                        job_data["session_token"], transcript_path
+                    )
+                    # Write sidecar metadata for re-invoke after Redis expires
+                    _write_transcript_meta(
+                        transcript_path,
+                        {
+                            "installation_id": job_data.get("installation_id", ""),
+                            "ref": ref,
+                            "user": job_data.get("user", "remote-control"),
+                            "thread_type": job_data.get("thread_type", "issue"),
+                            "conversation_config": job_data.get(
+                                "conversation_config", ""
+                            ),
+                        },
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to update streaming session metadata: {e}")
 
         # Mark job as complete (agent already posted to GitHub via MCP)
         await job_queue.complete_job(
@@ -653,6 +1064,34 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
                 await builder.flush_pending_post_jobs()
         except Exception as flush_err:
             logger.error(f"Failed to flush post-processing jobs: {flush_err}")
+
+        # Mark streaming session as errored so the session_proxy doesn't
+        # leave it stuck in "running" state forever (no worker listening).
+        if job_data.get("session_token"):
+            try:
+                from shared.session_stream import SessionStreamBridge
+                from shared.streaming_session import StreamingSessionStore
+
+                err_store = StreamingSessionStore(job_queue.redis)
+                await err_store.set_completed(
+                    token=job_data["session_token"],
+                    is_error=True,
+                    repo=repo,
+                    issue_number=job_data.get("issue_number"),
+                    workflow=job_data.get("workflow_name", "unknown"),
+                )
+                # Notify connected browsers that the session has errored
+                err_bridge = SessionStreamBridge(
+                    job_data["session_token"], job_queue.redis
+                )
+                await err_bridge.publish_error(str(e))
+                await err_bridge.close()
+                logger.info(
+                    f"Marked session {job_data['session_token'][:8]}... as error "
+                    f"after job failure"
+                )
+            except Exception as session_err:
+                logger.warning(f"Failed to mark session as errored: {session_err}")
 
         logger.error(f"Job {job_id} failed: {e}", exc_info=True)
 
@@ -759,7 +1198,7 @@ async def _process_cleanup_requests(redis: Any) -> None:
     import json as _json
 
     while True:
-        raw = await redis.lpop("agent:worktree:cleanup")
+        raw = await redis.lpop(WORKTREE_CLEANUP_QUEUE)
         if not raw:
             break
 
@@ -808,7 +1247,7 @@ async def _process_cleanup_requests(redis: Any) -> None:
                                 thread_type,
                                 thread_id,
                                 s.workflow_name,
-                                ttl_hours=72,
+                                ttl_hours=CLOSED_SESSION_TTL_HOURS,
                             )
                 except Exception as e:
                     logger.warning(f"Failed to expire session metadata: {e}")
@@ -817,7 +1256,7 @@ async def _process_cleanup_requests(redis: Any) -> None:
                 thread_type = msg.get("thread_type", "issue")
                 thread_id = msg.get("thread_id", "")
                 logger.info(
-                    f"Setting 30d (720h) expiration for revived worktrees in {repo}/{thread_type}/{thread_id}"
+                    f"Setting 30d expiration for revived worktrees in {repo}/{thread_type}/{thread_id}"
                 )
                 try:
                     session_store = SessionStore(redis)
@@ -829,7 +1268,7 @@ async def _process_cleanup_requests(redis: Any) -> None:
                                 thread_type,
                                 thread_id,
                                 s.workflow_name,
-                                ttl_hours=720,
+                                ttl_hours=REVIVED_SESSION_TTL_HOURS,
                             )
                 except Exception as e:
                     logger.warning(f"Failed to revive session metadata: {e}")
@@ -852,11 +1291,13 @@ async def _orphan_cleanup_loop(redis: Any) -> None:
         return
 
     session_store = SessionStore(redis)
-    lock_key = "lock:orphan_cleanup"
+    lock_key = ORPHAN_LOCK_KEY
 
     while not shutdown_event.is_set():
         # Try to acquire lock, expires in 1 hour
-        acquired = await redis.set(lock_key, "locked", nx=True, ex=3600)
+        acquired = await redis.set(
+            lock_key, "locked", nx=True, ex=ORPHAN_LOCK_TTL_SECONDS
+        )
 
         if acquired:
             try:
@@ -898,7 +1339,7 @@ async def main():
     job_queue = JobQueue(
         redis_url=redis_url,
         password=redis_password,
-        job_ttl=3600,
+        job_ttl=JOB_TTL_SECONDS,
     )
 
     logger.info("Sandbox worker ready, waiting for jobs...")

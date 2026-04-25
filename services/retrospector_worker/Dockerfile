@@ -31,7 +31,7 @@ RUN pip3 install --no-cache-dir -r requirements.txt
 
 # Entrypoint seeds plugins/skills into ~/.claude/ on first run
 COPY services/sandbox_executor/entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/entrypoint.sh
+RUN sed -i 's/\r$//' /app/entrypoint.sh && chmod +x /app/entrypoint.sh
 
 # Claude home directory (bind-mounted from host ~/.claude/)
 RUN mkdir -p /home/bot/.claude && chown -R bot:bot /home/bot/.claude

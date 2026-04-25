@@ -71,6 +71,37 @@ class ContextProfile(BaseModel):
     )
 
 
+class StreamingConfig(BaseModel):
+    """Configuration for real-time session streaming (remote control).
+
+    When enabled, the sandbox worker publishes SDK messages to Redis pub/sub
+    and posts a live-view URL in the GitHub comment. The session_proxy service
+    bridges those messages to a browser via WebSocket.
+
+    Example workflows.yaml:
+        workflows:
+          review-pr:
+            streaming:
+              enabled: true
+              tool_approval: false   # observe-only
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="Enable real-time streaming for this workflow",
+    )
+    tool_approval: bool = Field(
+        default=False,
+        description="Require human approval before each tool call. "
+        "If false, tools run automatically but are still visible in the UI.",
+    )
+    auto_approve_timeout: int = Field(
+        default=30,
+        description="Seconds to wait for tool approval before auto-approving. "
+        "Only relevant when tool_approval=true.",
+    )
+
+
 class WorkflowConfig(BaseModel):
     """Configuration for a single workflow."""
 
@@ -89,6 +120,13 @@ class WorkflowConfig(BaseModel):
         default_factory=ConversationConfigModel,
         description="Conversation persistence settings",
     )
+    streaming: StreamingConfig = Field(
+        default_factory=StreamingConfig,
+        description="Real-time session streaming settings",
+    )
+
+
+
 
 
 class WorkflowsConfig(BaseModel):
