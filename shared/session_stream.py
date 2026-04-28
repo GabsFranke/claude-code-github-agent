@@ -36,7 +36,6 @@ import logging
 from typing import Any
 
 from shared.constants import (
-    AUTO_APPROVE_TIMEOUT,
     CTL_CHANNEL,
     DEFAULT_SESSION_TTL_SECONDS,
     HISTORY_MAX,
@@ -165,19 +164,6 @@ class SessionStreamBridge:
             },
         )
 
-    async def publish_tool_approval_request(
-        self, tool_name: str, tool_use_id: str, tool_input: dict
-    ) -> None:
-        """Publish a tool approval request for the browser to render."""
-        await self.publish(
-            "tool_approval_request",
-            {
-                "tool_name": tool_name,
-                "tool_use_id": tool_use_id,
-                "input": tool_input,
-            },
-        )
-
     async def publish_user_message(self, content: str) -> None:
         """Publish a user message event so the browser displays it."""
         await self.publish("user_message", {"content": content})
@@ -195,19 +181,14 @@ class SessionStreamBridge:
 
 
 class ControlChannel:
-    """Subscribes to control messages from session_proxy and resolves Futures.
+    """Subscribes to control messages from session_proxy.
 
     The ControlChannel runs a background task that listens on
-    session:ctl:{token}. When a tool approval arrives, it resolves the
-    corresponding asyncio.Future so the can_use_tool callback can return.
+    session:ctl:{token} for user messages injected from the browser.
 
     Example:
         ctl = ControlChannel(token="abc123", redis=redis_client)
         await ctl.start()
-
-        # In can_use_tool callback:
-        approved = await ctl.wait_for_approval(tool_use_id, timeout=30.0)
-
         await ctl.stop()
     """
 
@@ -220,7 +201,6 @@ class ControlChannel:
         self._token = token
         self._redis = redis
         self._channel = _ctl_channel(token)
-        self._pending: dict[str, asyncio.Future] = {}
         self._task: asyncio.Task | None = None
         self._stopped = False
         self._interrupt_event = interrupt_event
@@ -230,33 +210,6 @@ class ControlChannel:
         self._task = asyncio.get_running_loop().create_task(
             self._listen(), name=f"ctl-listener-{self._token[:8]}"
         )
-
-    async def wait_for_approval(
-        self, tool_use_id: str, timeout: float = AUTO_APPROVE_TIMEOUT
-    ) -> bool:
-        """Wait for a tool approval decision.
-
-        If no browser is watching or the timeout expires, auto-approves.
-
-        Args:
-            tool_use_id: The SDK tool_use_id to wait for.
-            timeout: Seconds before auto-approving. Default 30.
-
-        Returns:
-            True if approved (or timed out), False if denied.
-        """
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[bool] = loop.create_future()
-        self._pending[tool_use_id] = future
-        try:
-            return await asyncio.wait_for(asyncio.shield(future), timeout=timeout)
-        except TimeoutError:
-            logger.info(
-                f"[ControlChannel] Tool approval timeout for {tool_use_id}, auto-approving"
-            )
-            return True
-        finally:
-            self._pending.pop(tool_use_id, None)
 
     async def _listen(self) -> None:
         """Background task: subscribe and dispatch control messages."""
@@ -287,27 +240,7 @@ class ControlChannel:
         """Dispatch an incoming control message."""
         msg_type = msg.get("type")
 
-        if msg_type == "tool_approval":
-            tool_use_id = msg.get("tool_use_id")
-            if tool_use_id is None:
-                logger.warning(
-                    "[ControlChannel] Received tool_approval without tool_use_id"
-                )
-                return
-            approved = bool(msg.get("approved", False))
-            future = self._pending.get(tool_use_id)
-            if future and not future.done():
-                future.set_result(approved)
-                logger.info(
-                    f"[ControlChannel] Tool {tool_use_id} "
-                    f"{'approved' if approved else 'denied'}"
-                )
-            else:
-                logger.warning(
-                    f"[ControlChannel] Received approval for unknown tool_use_id: {tool_use_id}"
-                )
-
-        elif msg_type == "inject_message":
+        if msg_type == "inject_message":
             content = msg.get("content", "")
             if not content or not content.strip():
                 logger.debug("[ControlChannel] Empty inject_message, ignoring")
@@ -335,17 +268,8 @@ class ControlChannel:
             logger.debug(f"[ControlChannel] Unknown control message type: {msg_type}")
 
     async def stop(self) -> None:
-        """Stop the listener and resolve all pending futures (auto-approve)."""
+        """Stop the listener."""
         self._stopped = True
-        # Resolve any pending futures so can_use_tool callbacks don't hang
-        for tool_use_id, future in self._pending.items():
-            if not future.done():
-                logger.info(
-                    f"[ControlChannel] Resolving pending approval for {tool_use_id} on shutdown (auto-approve)"
-                )
-                future.set_result(True)
-        self._pending.clear()
-
         if self._task and not self._task.done():
             self._task.cancel()
             try:

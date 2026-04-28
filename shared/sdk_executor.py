@@ -180,22 +180,7 @@ async def _execute_sdk_once(
             async with ClaudeSDKClient(options=options) as client:
                 logger.info("SDK client created, sending query...")
 
-                # When can_use_tool is configured, the SDK requires an AsyncIterable
-                # prompt rather than a bare string (client.py:116-122). Wrap it here
-                # so callers don't need to know about this SDK constraint.
-                if options.can_use_tool:
-
-                    async def _wrap_prompt(text: str):
-                        yield {
-                            "type": "user",
-                            "message": {"role": "user", "content": text},
-                            "parent_tool_use_id": None,
-                            "session_id": "default",
-                        }
-
-                    await client.query(_wrap_prompt(prompt))
-                else:
-                    await client.query(prompt)
+                await client.query(prompt)
 
                 logger.info("Waiting for SDK response...")
 

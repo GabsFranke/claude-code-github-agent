@@ -7,7 +7,6 @@ Environment variable overrides:
     STREAMING_SESSION_TTL_HOURS  — default streaming session TTL (default: 720)
     HISTORY_MAX                  — max messages in Redis history list (default: 2000)
     JOB_TTL_SECONDS              — job data TTL in Redis (default: 3600)
-    AUTO_APPROVE_TIMEOUT         — tool approval wait in seconds (default: 30)
     MAX_AUTO_CONTINUES           — max auto-continue iterations (default: 10)
 """
 
@@ -51,9 +50,6 @@ HISTORY_MAX = int(os.getenv("HISTORY_MAX", "2000"))
 
 # Max auto-continue iterations per job.
 MAX_AUTO_CONTINUES = int(os.getenv("MAX_AUTO_CONTINUES", "10"))
-
-# Tool approval auto-approve timeout (seconds).
-AUTO_APPROVE_TIMEOUT = int(os.getenv("AUTO_APPROVE_TIMEOUT", "30"))
 
 # ---------------------------------------------------------------------------
 # Redis key prefixes and queue names

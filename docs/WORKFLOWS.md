@@ -81,16 +81,12 @@ Add a `streaming:` block to enable real-time session streaming. When enabled, th
 
 ```yaml
 streaming:
-  enabled: true            # enable real-time streaming (default: false)
-  tool_approval: false     # require human approval before each tool call (default: false)
-  auto_approve_timeout: 30 # seconds to wait for approval before auto-approving (default: 30)
+  enabled: true  # enable real-time streaming (default: false)
 ```
 
 | Field | Default | Description |
 |-------|---------|-------------|
 | `streaming.enabled` | `false` | Enable real-time streaming for this workflow |
-| `streaming.tool_approval` | `false` | Require human approval before each tool call. If `false`, tools run automatically but are still visible in the UI |
-| `streaming.auto_approve_timeout` | `30` | Seconds to wait for tool approval before auto-approving. Only relevant when `tool_approval: true` |
 
 ### Event Entries
 

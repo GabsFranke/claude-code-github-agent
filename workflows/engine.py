@@ -88,22 +88,11 @@ class StreamingConfig(BaseModel):
           review-pr:
             streaming:
               enabled: true
-              tool_approval: false   # observe-only
     """
 
     enabled: bool = Field(
         default=False,
         description="Enable real-time streaming for this workflow",
-    )
-    tool_approval: bool = Field(
-        default=False,
-        description="Require human approval before each tool call. "
-        "If false, tools run automatically but are still visible in the UI.",
-    )
-    auto_approve_timeout: int = Field(
-        default=30,
-        description="Seconds to wait for tool approval before auto-approving. "
-        "Only relevant when tool_approval=true.",
     )
 
 

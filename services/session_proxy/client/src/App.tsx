@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useSessionSocket } from './hooks/useSessionSocket'
 import { AssistantMessage } from './components/AssistantMessage'
 import { ToolCall } from './components/ToolCall'
-import { ToolApproval } from './components/ToolApproval'
 import { StatusBar } from './components/StatusBar'
 import { MessageInput } from './components/MessageInput'
 import type {
@@ -10,11 +9,9 @@ import type {
   SessionPath,
   SessionStatus,
   WSMessage,
-  ToolApprovalRequestData,
 } from './types/messages'
 
 const RESOLVE_POLL_MS = 3000
-const TOOL_APPROVAL_TIMEOUT = 30
 
 // ─── Parse human-readable URL ──────────────────────────────────────────────────
 
@@ -52,7 +49,6 @@ async function fetchSessionResolve(
 type LogEntry =
   | { id: string; kind: 'assistant'; text: string; streaming: boolean }
   | { id: string; kind: 'tool'; name: string; input: Record<string, unknown>; result?: string; isError?: boolean }
-  | { id: string; kind: 'approval'; data: ToolApprovalRequestData }
   | { id: string; kind: 'error'; message: string }
   | { id: string; kind: 'user'; text: string }
   | { id: string; kind: 'run_boundary'; runNumber: number }
@@ -177,10 +173,6 @@ export function App() {
         }
         break
       }
-
-      case 'tool_approval_request':
-        setLog((l) => [...l, { id: uid(), kind: 'approval', data: msg.data }])
-        break
 
       case 'result':
         setStatus(msg.data.is_error ? 'error' : 'completed')
@@ -347,18 +339,6 @@ export function App() {
               />
             )
           }
-          if (entry.kind === 'approval') {
-            return (
-              <ToolApproval
-                key={entry.id}
-                toolName={entry.data.tool_name}
-                toolUseId={entry.data.tool_use_id}
-                toolInput={entry.data.input}
-                timeoutSecs={TOOL_APPROVAL_TIMEOUT}
-                onDecision={handleApproval}
-              />
-            )
-          }
           if (entry.kind === 'thinking') {
             return (
               <div key={entry.id} className="thinking-indicator">
@@ -400,24 +380,6 @@ export function App() {
       <MessageInput onSend={handleSendMessage} disabled={!canSend} status={status} />
     </div>
   )
-
-  function handleApproval(toolUseId: string, approved: boolean) {
-    send({ type: 'tool_approval', tool_use_id: toolUseId, approved })
-    setLog((l) =>
-      l.map((e) =>
-        e.kind === 'approval' && e.data.tool_use_id === toolUseId
-          ? {
-              id: e.id,
-              kind: 'tool' as const,
-              name: e.data.tool_name,
-              input: e.data.input,
-              result: approved ? undefined : '(denied)',
-              isError: !approved,
-            }
-          : e,
-      ),
-    )
-  }
 
   function handleSendMessage(content: string) {
     send({ type: 'inject_message', content })

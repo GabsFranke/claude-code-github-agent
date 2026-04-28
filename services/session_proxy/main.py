@@ -38,7 +38,6 @@ from services.session_proxy.transcript_loader import (
     load_transcript_meta,
 )
 from shared.constants import (
-    AUTO_APPROVE_TIMEOUT,
     CTL_CHANNEL,
     DEFAULT_SESSION_TTL_HOURS,
     JOB_DATA_PREFIX,
@@ -215,8 +214,6 @@ async def _handle_resume_message(token: str, content: str, session: dict) -> Non
         "session_id": session_id or None,
         "session_token": token,
         "streaming_enabled": True,
-        "tool_approval_enabled": False,
-        "auto_approve_timeout": AUTO_APPROVE_TIMEOUT,
         "installation_id": installation_id,
         "thread_type": thread_type,
         "thread_id": str(issue_number),
@@ -302,7 +299,7 @@ async def resolve_session(
     token, session = await _resolve_session(
         owner, repo, thread_type_segment, number, workflow
     )
-    if token is not None:
+    if token is not None and session is not None:
         # Filter sensitive fields from session data before sending to browser
         safe_session = {k: v for k, v in session.items() if k != "installation_id"}
         return {
@@ -714,8 +711,6 @@ async def _rehydrate_transcript_session(
                 "session_id": session_id or None,
                 "session_token": new_token,
                 "streaming_enabled": True,
-                "tool_approval_enabled": False,
-                "auto_approve_timeout": AUTO_APPROVE_TIMEOUT,
                 "installation_id": session.get("installation_id", ""),
                 "thread_type": session.get("thread_type", "issue"),
                 "thread_id": str(issue_number),

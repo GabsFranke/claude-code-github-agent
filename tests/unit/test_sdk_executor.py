@@ -132,14 +132,16 @@ class TestExecuteSDK:
             mock_client.receive_messages.return_value = mock_messages()
             mock_client_class.return_value = mock_client
 
-            result = await execute_sdk(
-                prompt="test",
-                options=mock_options,
-                collect_text=True,
-            )
+            # Patch TextBlock so isinstance checks pass against MagicMock blocks
+            with patch("shared.sdk_executor.TextBlock", MagicMock):
+                result = await execute_sdk(
+                    prompt="test",
+                    options=mock_options,
+                    collect_text=True,
+                )
 
-            assert "First part" in result["response"]
-            assert "Second part" in result["response"]
+                assert "First part" in result["response"]
+                assert "Second part" in result["response"]
 
 
 class TestExecuteSDKRetry:

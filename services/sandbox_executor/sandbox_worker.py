@@ -23,7 +23,6 @@ from shared import (  # noqa: E402
     wait_for_repo_sync,
 )
 from shared.constants import (  # noqa: E402
-    AUTO_APPROVE_TIMEOUT,
     CLOSED_SESSION_TTL_HOURS,
     FALLBACK_CONVERSATION_TTL_HOURS,
     JOB_TTL_SECONDS,
@@ -650,11 +649,6 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
         if job_data.get("streaming_enabled") and job_data.get("session_token"):
             session_token = job_data["session_token"]
             try:
-                from claude_agent_sdk.types import (
-                    PermissionResultAllow,
-                    PermissionResultDeny,
-                )
-
                 from shared.session_stream import ControlChannel, SessionStreamBridge
                 from shared.streaming_session import StreamingSessionStore
 
@@ -686,45 +680,6 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
                     "run_start",
                     {"run_number": run_count, "session_id": session_id},
                 )
-
-                # Build can_use_tool callback if tool_approval is enabled
-                if job_data.get("tool_approval_enabled", False):
-                    _store = StreamingSessionStore(job_queue.redis)
-                    _bridge = streaming_bridge
-                    _control = streaming_control
-                    _token = session_token
-                    _auto_approve_timeout = job_data.get(
-                        "auto_approve_timeout", AUTO_APPROVE_TIMEOUT
-                    )
-
-                    async def _can_use_tool(tool_name, tool_input, context):
-                        # If nobody is watching, auto-approve immediately
-                        if not await _store.has_subscribers(_token):
-                            logger.info(
-                                f"[Streaming] No subscribers, auto-approving {tool_name}"
-                            )
-                            return PermissionResultAllow()
-
-                        # Publish approval request to browser
-                        tool_use_id = getattr(context, "tool_use_id", None) or "unknown"
-                        await _bridge.publish_tool_approval_request(
-                            tool_name=tool_name,
-                            tool_use_id=tool_use_id,
-                            tool_input=tool_input,
-                        )
-
-                        # Wait for browser response (auto-approves on timeout)
-                        approved = await _control.wait_for_approval(
-                            tool_use_id=tool_use_id,
-                            timeout=float(_auto_approve_timeout),
-                        )
-                        return (
-                            PermissionResultAllow()
-                            if approved
-                            else PermissionResultDeny()
-                        )
-
-                    builder.with_can_use_tool(_can_use_tool)
 
                 # Enable partial messages for token-level streaming
                 builder.with_streaming(streaming_bridge)
@@ -804,8 +759,6 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
                     builder = builder.with_session_resume(current_session_id)
                 # Re-apply streaming hooks
                 if streaming_bridge:
-                    if job_data.get("tool_approval_enabled", False):
-                        builder.with_can_use_tool(_can_use_tool)
                     builder.with_streaming(streaming_bridge)
                     # Re-apply session signature
                     session_proxy_url = (

@@ -31,12 +31,6 @@ export interface ContentBlock {
   input?: Record<string, unknown>
 }
 
-export interface ToolApprovalRequestData {
-  tool_name: string
-  tool_use_id: string
-  input: Record<string, unknown>
-}
-
 export interface ResultData {
   num_turns: number
   duration_ms: number
@@ -71,7 +65,6 @@ export type WSMessage =
   | { type: 'session_init'; data: SessionInitData; ts: string }
   | { type: 'stream_event'; data: StreamEventData; ts: string }
   | { type: 'assistant_message'; data: AssistantMessageData; ts: string }
-  | { type: 'tool_approval_request'; data: ToolApprovalRequestData; ts: string }
   | { type: 'result'; data: ResultData; ts: string }
   | { type: 'session_closed'; data: Record<string, never>; ts: string }
   | { type: 'session_error'; data: SessionErrorData; ts: string }
@@ -98,12 +91,6 @@ export interface SessionPath {
 }
 
 // ─── Control messages (browser → server) ────────────────────────────────────
-
-export interface ToolApprovalControl {
-  type: 'tool_approval'
-  tool_use_id: string
-  approved: boolean
-}
 
 export interface InjectMessageControl {
   type: 'inject_message'

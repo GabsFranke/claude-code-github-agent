@@ -12,7 +12,6 @@ import httpx
 from langfuse import Langfuse
 
 from shared import GitHubAuthService, JobQueue
-from shared.constants import AUTO_APPROVE_TIMEOUT
 from shared.session_store import SessionStore, resolve_thread_type
 from shared.streaming_session import StreamingSessionStore
 from shared.utils import build_session_url
@@ -356,8 +355,6 @@ class RequestProcessor:
         streaming_enabled = False
         session_token = None
         session_proxy_url = None
-        tool_approval_enabled = False
-        auto_approve_timeout = AUTO_APPROVE_TIMEOUT
 
         workflow_config = self.workflow_engine.workflows.get(workflow_name)
         if workflow_config and workflow_config.streaming.enabled:
@@ -419,7 +416,7 @@ class RequestProcessor:
                         )
                         logger.info(
                             f"[Streaming] Created session {session_token[:8]}... "
-                            f"for {repo}#{issue_number} (tool_approval={tool_approval_enabled})"
+                            f"for {repo}#{issue_number}"
                         )
 
                     # Publish initial user query to the session history
@@ -438,10 +435,6 @@ class RequestProcessor:
                             )
 
                     streaming_enabled = True
-                    tool_approval_enabled = workflow_config.streaming.tool_approval
-                    auto_approve_timeout = (
-                        workflow_config.streaming.auto_approve_timeout
-                    )
 
                 except Exception as e:
                     logger.warning(
@@ -490,8 +483,6 @@ class RequestProcessor:
                 # Streaming session fields (remote control)
                 "streaming_enabled": streaming_enabled,
                 "session_token": session_token,
-                "tool_approval_enabled": tool_approval_enabled,
-                "auto_approve_timeout": auto_approve_timeout,
             }
         )
 

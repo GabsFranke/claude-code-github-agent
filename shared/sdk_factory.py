@@ -104,8 +104,7 @@ class SDKOptionsBuilder:
         self._resume: str | None = None  # Session ID to resume
         self._continue_conversation: bool = False  # Continue most recent session
         self._fork_session: bool = False  # Fork from existing session
-        # Streaming fields (Phase: session streaming)
-        self._can_use_tool = None  # Optional tool approval callback
+        # Streaming fields
         self._include_partial_messages: bool = False  # Enable StreamEvent output
         self._streaming_bridge = None  # SessionStreamBridge (not passed to SDK)
         self._session_signature: str | None = None  # Session URL for comment signature
@@ -695,29 +694,6 @@ class SDKOptionsBuilder:
         self._include_partial_messages = True
         return self
 
-    def with_can_use_tool(self, callback: "Any") -> "SDKOptionsBuilder":
-        """Set a tool approval callback for human-in-the-loop tool gating.
-
-        The callback signature must be:
-            async def callback(
-                tool_name: str,
-                tool_input: dict,
-                context: ToolPermissionContext,
-            ) -> PermissionResultAllow | PermissionResultDeny
-
-        IMPORTANT: Setting can_use_tool automatically requires the prompt to
-        be wrapped as an AsyncIterable (SDK constraint). sdk_executor handles
-        this transparently — callers do not need to change how they pass prompts.
-
-        Args:
-            callback: Async callable for tool approval decisions
-
-        Returns:
-            Self for method chaining
-        """
-        self._can_use_tool = callback
-        return self
-
     @property
     def streaming_bridge(self) -> "Any":
         """The SessionStreamBridge instance (if streaming is configured).
@@ -794,8 +770,6 @@ class SDKOptionsBuilder:
             resume=self._resume,
             continue_conversation=self._continue_conversation,
             fork_session=self._fork_session,
-            # Streaming support
-            can_use_tool=self._can_use_tool,
             include_partial_messages=self._include_partial_messages,
         )
 

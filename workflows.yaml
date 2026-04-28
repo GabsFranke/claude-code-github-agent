@@ -31,7 +31,6 @@ workflows:
       persist: true
     streaming:
       enabled: true
-      tool_approval: false
 
   triage-issue:
     triggers:
@@ -57,7 +56,6 @@ workflows:
       auto_continue: true
     streaming:
       enabled: true
-      tool_approval: false
 
   fix-ci:
     triggers:
@@ -81,7 +79,6 @@ workflows:
       persist: true
     streaming:
       enabled: true
-      tool_approval: false
     skip_self: true
 
   test-toolkit:
@@ -101,7 +98,6 @@ workflows:
       persist: true
     streaming:
       enabled: true
-      tool_approval: false
     skip_self: false
 
   generic:
@@ -120,7 +116,6 @@ workflows:
       auto_continue: true
     streaming:
       enabled: true
-      tool_approval: false
     skip_self: false
 
   fix-review:
@@ -143,5 +138,4 @@ workflows:
       auto_continue: true
     streaming:
       enabled: true
-      tool_approval: false
     skip_self: false
