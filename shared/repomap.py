@@ -525,6 +525,12 @@ class RepoMap:
             scores = nx.pagerank(
                 G, personalization=personalization, max_iter=50, tol=1e-4
             )
+        except ImportError:
+            logger.info(
+                "scipy not installed — falling back to simple ranking. "
+                "Install scipy for PageRank-based ranking."
+            )
+            return None
         except Exception as e:
             logger.debug(f"PageRank failed: {e}")
             return None
