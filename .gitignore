@@ -31,6 +31,10 @@ env/
 ENV/
 .venv
 
+# node
+services/session_proxy/client/node_modules
+services/session_proxy/client/dist
+
 # IDE
 .vscode/
 .idea/
@@ -71,6 +75,7 @@ ngrok.yml
 
 .claude
 claude-plugins-official/
+plans/
 
 # Repository setup configuration (may contain sensitive commands)
 repo-setup.yaml

@@ -2,9 +2,11 @@ services:
   redis:
     image: redis:7-alpine
     env_file: .env
-    command: sh -c 'redis-server --requirepass "$${REDIS_PASSWORD:-myredissecret}"'
+    command: sh -c 'redis-server --requirepass "$${REDIS_PASSWORD:-myredissecret}" --appendonly yes'
     ports:
       - "6379:6379"
+    volumes:
+      - redis-data:/data
     healthcheck:
       test:
         [
@@ -62,6 +64,8 @@ services:
       - REDIS_URL=redis://redis:6379
       - REDIS_PASSWORD=${REDIS_PASSWORD:-myredissecret}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      # Session streaming URL (for live-view links in GitHub comments)
+      - SESSION_PROXY_URL=${SESSION_PROXY_URL:-http://localhost:10001}
     depends_on:
       redis:
         condition: service_healthy
@@ -447,8 +451,29 @@ services:
       qdrant:
         condition: service_healthy
 
+  session_proxy:
+    build:
+      context: .
+      dockerfile: services/session_proxy/Dockerfile
+    command: sh -c 'python -m services.session_proxy.main 2>&1 | tee /var/log/bot/session_proxy.log'
+    ports:
+      - "10001:8080"
+    volumes:
+      - ./logs:/var/log/bot
+      - ~/.claude:/home/bot/.claude:ro
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-myredissecret}
+      - PYTHONPATH=/app
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - CLAUDE_HOME=/home/bot/.claude
+    depends_on:
+      redis:
+        condition: service_healthy
+
 volumes:
   repo-cache:
+  redis-data:
   langfuse-db-data:
   langfuse-clickhouse-data:
   langfuse-clickhouse-logs:

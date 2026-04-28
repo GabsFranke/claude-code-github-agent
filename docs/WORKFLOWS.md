@@ -25,6 +25,11 @@ my-workflow:
     personalized: true                     # personalize repomap toward changed files
     include_test_files: true               # include test files in personalization
     priority_focus: ["build_system"]       # focus areas for repomap ranking
+    thread_history:                        # inject issue/PR comment history
+      enabled: true                        # default: true
+      max_comments: 100                    # default: 100
+      include_pr_reviews: true             # default: true (PRs only)
+      include_issue_body: true             # default: true
   skip_self: true                          # default: true
 ```
 
@@ -38,8 +43,13 @@ my-workflow:
 | `context.personalized` | No | `false` | Personalize repomap toward changed files |
 | `context.include_test_files` | No | `true` | Include test files in personalization |
 | `context.priority_focus` | No | `[]` | Focus areas for repomap ranking (e.g. `build_system`, `test_structure`) |
+| `context.thread_history.enabled` | No | `true` | Whether to inject issue/PR comment history into the agent's context |
+| `context.thread_history.max_comments` | No | `100` | Maximum number of comments to fetch from GitHub |
+| `context.thread_history.include_pr_reviews` | No | `true` | Whether to include PR review comments (inline code comments). Only applies to PRs |
+| `context.thread_history.include_issue_body` | No | `true` | Whether to include the issue/PR description as the root of the history |
 | `description` | No | `""` | Human-readable description |
 | `conversation` | No | — | Multi-turn conversation settings (see below) |
+| `streaming` | No | — | Real-time streaming settings (see below) |
 | `skip_self` | No | `true` | Skip events triggered by the bot itself |
 
 ### Conversation Persistence
@@ -64,6 +74,19 @@ When `persist: true`, users can control continuation in their comments:
 | `/review --new` | Start a fresh session, ignoring any existing one |
 
 Without any flag, the behavior depends on `auto_continue`: if `true`, the session resumes automatically; if `false` (default), a new session starts each time.
+
+### Streaming
+
+Add a `streaming:` block to enable real-time session streaming. When enabled, the sandbox worker publishes SDK messages to Redis pub/sub and posts a live-view URL in the GitHub comment. The session_proxy service bridges those messages to a browser via WebSocket.
+
+```yaml
+streaming:
+  enabled: true  # enable real-time streaming (default: false)
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `streaming.enabled` | `false` | Enable real-time streaming for this workflow |
 
 ### Event Entries
 
@@ -175,6 +198,24 @@ triggers:
 
 If no `filters` are defined on an event entry, the workflow always triggers on that event.
 
+#### Workflow-Level Filters
+
+You can also set `filters` at the trigger level as a fallback for events that don't have their own per-event filters:
+
+```yaml
+# Workflow-level filters apply to all events without per-event filters
+triggers:
+  filters:
+    action: "opened"                   # applies to events without their own filters
+  events:
+    - event: pull_request.opened       # no per-event filters → uses trigger-level filters
+    - event: pull_request.labeled      # has own filters → ignores trigger-level filters
+      filters:
+        label.name: ["review"]
+```
+
+Per-event filters take priority — when an event entry has its own `filters`, the trigger-level filters are ignored for that event.
+
 ## Prompts
 
 ### Template Placeholders
@@ -211,6 +252,42 @@ system_context: |
 By default, workflows ignore events triggered by the bot itself (prevents infinite loops). Set `skip_self: false` to allow the bot to respond to its own events.
 
 Even with `skip_self: true`, humans can manually trigger workflows on bot PRs using commands like `/review`.
+
+### Thread History
+
+By default, every agent invocation includes the full comment history from the issue or PR it's running on. This means a `/triage` run followed by an `/agent` run on the same issue shares context — the second agent sees everything the first one posted.
+
+Thread history is injected as a `<thread_history>` block in the system prompt, between the workflow instructions and the structural context (file tree/repomap). If the total prompt exceeds the 12K token budget, older comments are truncated first, keeping the most recent ones.
+
+Supported thread types:
+
+| Type | API Used | What's Included |
+|------|----------|----------------|
+| `issue` | REST API | Issue body + all comments |
+| `pr` | REST API | PR description + issue comments + review comments (inline) |
+| `discussion` | GraphQL API | Discussion body + comments + nested replies |
+
+Configuration (under `context.thread_history`):
+
+```yaml
+context:
+  thread_history:
+    enabled: true           # default: true — set false to disable
+    max_comments: 100       # default: 100 — cap on comments fetched
+    include_pr_reviews: true  # default: true — inline review comments on PRs
+    include_issue_body: true  # default: true — include the issue/PR description
+```
+
+All fields are optional — the defaults work for most workflows. Override only when you need different behavior, e.g. fewer comments for lightweight tasks:
+
+```yaml
+triage-issue:
+  context:
+    thread_history:
+      max_comments: 50        # less history for a quick triage
+```
+
+Thread history is **disabled for events without a thread** (e.g., `workflow_job`, `push`). The fetch silently returns empty and the agent runs without history.
 
 ## Creating a New Workflow
 

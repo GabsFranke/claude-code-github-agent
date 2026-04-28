@@ -5,15 +5,16 @@
 # - description: Human-readable description
 # - skip_self: Whether to skip events triggered by the bot itself (optional, default: true)
 # - conversation: Persistence settings for multi-turn conversations (optional)
+#   - ttl_hours defaults to 720 (30 days) via shared/constants.py if omitted
 
 workflows:
   review-pr:
     triggers:
       events:
-      - event: pull_request.opened
-      - event: pull_request.labeled
-        filters:
-          label.name: ["review", "pr-review", "review-pr"]
+        - event: pull_request.opened
+        - event: pull_request.labeled
+          filters:
+            label.name: ["review", "pr-review", "review-pr"]
       commands:
         - /review
         - /pr-review
@@ -28,8 +29,8 @@ workflows:
       include_test_files: true
     conversation:
       persist: true
-      ttl_hours: 720
-    # skip_self defaults to true (can be omitted)
+    streaming:
+      enabled: true
 
   triage-issue:
     triggers:
@@ -48,11 +49,13 @@ workflows:
     context:
       repomap_budget: 1024
       personalized: false
+      thread_history:
+        max_comments: 50
     conversation:
       persist: true
-      ttl_hours: 720
       auto_continue: true
-    # skip_self defaults to true (can be omitted)
+    streaming:
+      enabled: true
 
   fix-ci:
     triggers:
@@ -74,8 +77,9 @@ workflows:
       priority_focus: ["build_system", "test_structure"]
     conversation:
       persist: true
-      ttl_hours: 720
-    skip_self: true # Explicitly set - don't auto-fix CI failures on bot's own PRs
+    streaming:
+      enabled: true
+    skip_self: true
 
   test-toolkit:
     triggers:
@@ -88,9 +92,12 @@ workflows:
     context:
       repomap_budget: 4096
       personalized: false
+      thread_history:
+        max_comments: 50
     conversation:
       persist: true
-      ttl_hours: 720
+    streaming:
+      enabled: true
     skip_self: false
 
   generic:
@@ -106,9 +113,10 @@ workflows:
       personalized: false
     conversation:
       persist: true
-      ttl_hours: 720
-      auto_continue: false
-    skip_self: false # Allow bot to respond to its own /agent commands if needed
+      auto_continue: true
+    streaming:
+      enabled: true
+    skip_self: false
 
   fix-review:
     triggers:
@@ -127,6 +135,7 @@ workflows:
       include_test_files: true
     conversation:
       persist: true
-      ttl_hours: 720
       auto_continue: true
-    skip_self: false # Allow bot's own label trigger from review-pr (loop prevented by reviewer's skip_self)
+    streaming:
+      enabled: true
+    skip_self: false

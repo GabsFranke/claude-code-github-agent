@@ -19,6 +19,8 @@ except ImportError:
 
 from pydantic import BaseModel, Field
 
+from .constants import DEFAULT_SESSION_TTL_HOURS
+
 logger = logging.getLogger(__name__)
 
 
@@ -37,6 +39,7 @@ class SessionInfo(BaseModel):
     turn_count: int = 0
     status: str = "active"
     summary: str | None = None
+    streaming_token: str | None = None
 
 
 class ConversationConfig(BaseModel):
@@ -44,7 +47,8 @@ class ConversationConfig(BaseModel):
 
     persist: bool = Field(default=False, description="Enable session persistence")
     ttl_hours: int = Field(
-        default=168, description="Session TTL in hours (default 7 days)"
+        default=DEFAULT_SESSION_TTL_HOURS,
+        description="Session TTL in hours (default from constants)",
     )
     max_turns: int = Field(
         default=50, description="Max total turns across continuations"
@@ -126,6 +130,7 @@ class SessionStore:
         turn_count: int = 0,
         summary: str | None = None,
         ttl_hours: int = 168,
+        streaming_token: str | None = None,
     ) -> None:
         """Create or update a session mapping in Redis."""
         key = _session_key(repo, thread_type, thread_id, workflow)
@@ -138,6 +143,8 @@ class SessionStore:
             turn_count = existing.get("turn_count", 0) + turn_count
             if summary is None:
                 summary = existing.get("summary")
+            if streaming_token is None:
+                streaming_token = existing.get("streaming_token")
         else:
             created_at = now
 
@@ -154,6 +161,7 @@ class SessionStore:
             turn_count=turn_count,
             status="active",
             summary=summary,
+            streaming_token=streaming_token,
         )
 
         ttl_seconds = ttl_hours * 3600
@@ -181,8 +189,21 @@ class SessionStore:
     async def close_session(
         self, repo: str, thread_type: str, thread_id: str, workflow: str
     ) -> None:
-        """Mark a session as closed (or delete it)."""
+        """Mark a session as closed (or delete it).
+
+        Also cleans up the associated streaming session and lookup key.
+        """
         key = _session_key(repo, thread_type, thread_id, workflow)
+        raw = await self.redis.get(key)
+        if raw:
+            try:
+                info = SessionInfo.model_validate_json(raw)
+                if info.streaming_token:
+                    await self._cleanup_streaming(
+                        info.streaming_token, repo, thread_id, workflow, thread_type
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to clean up streaming for {key}: {e}")
         await self.redis.delete(key)
         logger.info(f"Closed session for {repo}/{thread_type}/{thread_id}/{workflow}")
 
@@ -214,10 +235,29 @@ class SessionStore:
         workflow: str,
         ttl_hours: int = 72,
     ) -> None:
-        """Set a new TTL for an existing session (e.g., when an issue is closed)."""
+        """Set a new TTL for an existing session (e.g., when an issue is closed).
+
+        Also propagates TTL to the associated streaming session.
+        """
         key = _session_key(repo, thread_type, thread_id, workflow)
         if await self.redis.exists(key):
             await self.redis.expire(key, ttl_hours * 3600)
+            # Propagate TTL to streaming session
+            raw = await self.redis.get(key)
+            if raw:
+                try:
+                    info = SessionInfo.model_validate_json(raw)
+                    if info.streaming_token:
+                        await self._propagate_streaming_ttl(
+                            info.streaming_token,
+                            repo,
+                            thread_id,
+                            workflow,
+                            ttl_hours,
+                            thread_type,
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to propagate streaming TTL for {key}: {e}")
             logger.info(
                 f"Set TTL to {ttl_hours}h for session {repo}/{thread_type}/{thread_id}/{workflow}"
             )
@@ -285,3 +325,72 @@ class SessionStore:
             )
         except Exception as e:
             logger.warning(f"Failed to increment turn count for {key}: {e}")
+
+    async def _cleanup_streaming(
+        self,
+        token: str,
+        repo: str,
+        thread_id: str,
+        workflow: str,
+        thread_type: str = "",
+    ) -> None:
+        """Delete streaming session data and lookup key."""
+        # Delete the streaming session hash
+        session_key = f"session:stream:{token}"
+        await self.redis.delete(session_key)
+        # Delete the lookup key
+        lookup_key = _streaming_lookup_key(
+            repo, thread_id, workflow, thread_type=thread_type
+        )
+        await self.redis.delete(lookup_key)
+        # Also try deleting the legacy key (without thread_type) for cleanup
+        if thread_type:
+            legacy_key = _streaming_lookup_key(
+                repo, thread_id, workflow, thread_type=""
+            )
+            await self.redis.delete(legacy_key)
+        logger.info(
+            f"Cleaned up streaming session {token[:8]}... for {repo}/{thread_type}/{thread_id}/{workflow}"
+        )
+
+    async def _propagate_streaming_ttl(
+        self,
+        token: str,
+        repo: str,
+        thread_id: str,
+        workflow: str,
+        ttl_hours: int,
+        thread_type: str = "",
+    ) -> None:
+        """Propagate session TTL to streaming session and all sub-keys."""
+        from shared.streaming_session import StreamingSessionStore
+
+        ttl_seconds = ttl_hours * 3600
+        store = StreamingSessionStore(self.redis)
+        await store.set_ttl(token, ttl_seconds)
+        # Also propagate to the lookup key
+        lookup_key = _streaming_lookup_key(
+            repo, thread_id, workflow, thread_type=thread_type
+        )
+        await self.redis.expire(lookup_key, ttl_seconds)
+        # Also propagate to legacy key (without thread_type) if present
+        if thread_type:
+            legacy_key = _streaming_lookup_key(
+                repo, thread_id, workflow, thread_type=""
+            )
+            await self.redis.expire(legacy_key, ttl_seconds)
+        logger.debug(f"Propagated TTL {ttl_hours}h to streaming session {token[:8]}...")
+
+
+def _streaming_lookup_key(
+    repo: str, thread_id: str, workflow: str, thread_type: str = ""
+) -> str:
+    """Build the Redis key for the streaming token lookup.
+
+    Includes thread_type when provided to match the key format used by
+    StreamingSessionStore._lookup_key().
+    """
+    safe_repo = repo.replace("/", ":")
+    if thread_type:
+        return f"session:stream:lookup:{safe_repo}:{thread_type}:{thread_id}:{workflow}"
+    return f"session:stream:lookup:{safe_repo}:{thread_id}:{workflow}"

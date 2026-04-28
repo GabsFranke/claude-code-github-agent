@@ -10,6 +10,7 @@ import yaml  # type: ignore[import]
 from pydantic import BaseModel, Field, ValidationError
 
 from shared.session_store import ConversationConfig as ConversationConfigModel
+from shared.thread_history import ThreadHistoryConfig
 from shared.utils import resolve_path
 
 logger = logging.getLogger(__name__)
@@ -69,6 +70,30 @@ class ContextProfile(BaseModel):
         default_factory=list,
         description="Focus areas for repomap ranking (e.g., ['build_system', 'test_structure'])",
     )
+    thread_history: ThreadHistoryConfig = Field(
+        default_factory=lambda: ThreadHistoryConfig(),  # type: ignore[call-arg]
+        description="Thread history injection configuration",
+    )
+
+
+class StreamingConfig(BaseModel):
+    """Configuration for real-time session streaming (remote control).
+
+    When enabled, the sandbox worker publishes SDK messages to Redis pub/sub
+    and posts a live-view URL in the GitHub comment. The session_proxy service
+    bridges those messages to a browser via WebSocket.
+
+    Example workflows.yaml:
+        workflows:
+          review-pr:
+            streaming:
+              enabled: true
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="Enable real-time streaming for this workflow",
+    )
 
 
 class WorkflowConfig(BaseModel):
@@ -89,6 +114,13 @@ class WorkflowConfig(BaseModel):
         default_factory=ConversationConfigModel,
         description="Conversation persistence settings",
     )
+    streaming: StreamingConfig = Field(
+        default_factory=StreamingConfig,
+        description="Real-time session streaming settings",
+    )
+
+
+
 
 
 class WorkflowsConfig(BaseModel):

@@ -19,8 +19,7 @@ import tempfile
 import uuid
 from pathlib import Path
 
-from shared import dlq as _dlq_mod
-from shared import setup_graceful_shutdown
+from shared import dlq as _dlq_mod, setup_graceful_shutdown
 from shared.chunker import chunk_repo
 from shared.dlq import enqueue_for_retry, is_transient_error
 from shared.file_tree import collection_name_for_repo

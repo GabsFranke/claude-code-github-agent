@@ -149,7 +149,7 @@ def semantic_search(
                 FieldCondition(key="kind", match=MatchValue(value=kind_filter))
             )
 
-        search_filter = Filter(must=conditions) if conditions else None
+        search_filter = Filter(must=conditions) if conditions else None  # type: ignore[arg-type]
 
         # Over-fetch to compensate for client-side file_filter
         fetch_limit = max_results * 3 if file_filter else max_results

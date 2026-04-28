@@ -51,7 +51,7 @@ COPY skills/ /app/skills/
 
 # Entrypoint seeds plugins/skills into ~/.claude/ on first run
 COPY services/sandbox_executor/entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/entrypoint.sh
+RUN sed -i 's/\r$//' /app/entrypoint.sh && chmod +x /app/entrypoint.sh
 
 # Create repo cache directory and set ownership to bot user
 RUN mkdir -p /var/cache/repos && chown -R bot:bot /var/cache/repos
