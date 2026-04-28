@@ -32,6 +32,23 @@ from shared.constants import (
 logger = logging.getLogger(__name__)
 
 
+# Lua scripts for atomic subscriber count operations
+_INCR_SUBSCRIBERS_LUA = """
+local count = redis.call('INCR', KEYS[1])
+redis.call('EXPIRE', KEYS[1], ARGV[1])
+return count
+"""
+
+_DECR_SUBSCRIBERS_LUA = """
+local count = redis.call('DECR', KEYS[1])
+if count < 0 then
+    redis.call('SET', KEYS[1], 0)
+    count = 0
+end
+return count
+"""
+
+
 def _session_key(token: str) -> str:
     return SESSION_KEY.format(token)
 
@@ -278,19 +295,17 @@ class StreamingSessionStore:
         )
 
     async def increment_subscribers(self, token: str) -> int:
-        """Increment subscriber count. Returns new count."""
+        """Increment subscriber count atomically. Returns new count."""
         key = _subscribers_key(token)
-        count = await self._redis.incr(key)
-        await self._redis.expire(key, DEFAULT_SESSION_TTL_SECONDS)
+        count = await self._redis.eval(
+            _INCR_SUBSCRIBERS_LUA, 1, key, str(DEFAULT_SESSION_TTL_SECONDS)
+        )
         return int(count)
 
     async def decrement_subscribers(self, token: str) -> int:
-        """Decrement subscriber count (floor 0). Returns new count."""
+        """Decrement subscriber count atomically (floor 0). Returns new count."""
         key = _subscribers_key(token)
-        count = await self._redis.decr(key)
-        if count < 0:
-            await self._redis.set(key, 0)
-            count = 0
+        count = await self._redis.eval(_DECR_SUBSCRIBERS_LUA, 1, key)
         return int(count)
 
     async def has_subscribers(self, token: str) -> bool:
@@ -384,7 +399,10 @@ class StreamingSessionStore:
         """
         try:
             raw_items = await self._redis.eval(lua_drain, 1, inbox)  # type: ignore[misc]
-        except Exception:
+        except Exception as e:
+            logger.error(
+                f"[StreamingSessionStore] Failed to drain inbox for {token}: {e}"
+            )
             raw_items = []
 
         messages: list[str] = []

@@ -200,7 +200,7 @@ class SessionStore:
                 info = SessionInfo.model_validate_json(raw)
                 if info.streaming_token:
                     await self._cleanup_streaming(
-                        info.streaming_token, repo, thread_id, workflow
+                        info.streaming_token, repo, thread_id, workflow, thread_type
                     )
             except Exception as e:
                 logger.warning(f"Failed to clean up streaming for {key}: {e}")
@@ -249,7 +249,12 @@ class SessionStore:
                     info = SessionInfo.model_validate_json(raw)
                     if info.streaming_token:
                         await self._propagate_streaming_ttl(
-                            info.streaming_token, repo, thread_id, workflow, ttl_hours
+                            info.streaming_token,
+                            repo,
+                            thread_id,
+                            workflow,
+                            ttl_hours,
+                            thread_type,
                         )
                 except Exception as e:
                     logger.warning(f"Failed to propagate streaming TTL for {key}: {e}")
@@ -327,16 +332,25 @@ class SessionStore:
         repo: str,
         thread_id: str,
         workflow: str,
+        thread_type: str = "",
     ) -> None:
         """Delete streaming session data and lookup key."""
         # Delete the streaming session hash
         session_key = f"session:stream:{token}"
         await self.redis.delete(session_key)
         # Delete the lookup key
-        lookup_key = _streaming_lookup_key(repo, thread_id, workflow)
+        lookup_key = _streaming_lookup_key(
+            repo, thread_id, workflow, thread_type=thread_type
+        )
         await self.redis.delete(lookup_key)
+        # Also try deleting the legacy key (without thread_type) for cleanup
+        if thread_type:
+            legacy_key = _streaming_lookup_key(
+                repo, thread_id, workflow, thread_type=""
+            )
+            await self.redis.delete(legacy_key)
         logger.info(
-            f"Cleaned up streaming session {token[:8]}... for {repo}/{thread_id}/{workflow}"
+            f"Cleaned up streaming session {token[:8]}... for {repo}/{thread_type}/{thread_id}/{workflow}"
         )
 
     async def _propagate_streaming_ttl(
@@ -346,6 +360,7 @@ class SessionStore:
         thread_id: str,
         workflow: str,
         ttl_hours: int,
+        thread_type: str = "",
     ) -> None:
         """Propagate session TTL to streaming session and all sub-keys."""
         from shared.streaming_session import StreamingSessionStore
@@ -354,12 +369,28 @@ class SessionStore:
         store = StreamingSessionStore(self.redis)
         await store.set_ttl(token, ttl_seconds)
         # Also propagate to the lookup key
-        lookup_key = _streaming_lookup_key(repo, thread_id, workflow)
+        lookup_key = _streaming_lookup_key(
+            repo, thread_id, workflow, thread_type=thread_type
+        )
         await self.redis.expire(lookup_key, ttl_seconds)
+        # Also propagate to legacy key (without thread_type) if present
+        if thread_type:
+            legacy_key = _streaming_lookup_key(
+                repo, thread_id, workflow, thread_type=""
+            )
+            await self.redis.expire(legacy_key, ttl_seconds)
         logger.debug(f"Propagated TTL {ttl_hours}h to streaming session {token[:8]}...")
 
 
-def _streaming_lookup_key(repo: str, thread_id: str, workflow: str) -> str:
-    """Build the Redis key for the streaming token lookup."""
+def _streaming_lookup_key(
+    repo: str, thread_id: str, workflow: str, thread_type: str = ""
+) -> str:
+    """Build the Redis key for the streaming token lookup.
+
+    Includes thread_type when provided to match the key format used by
+    StreamingSessionStore._lookup_key().
+    """
     safe_repo = repo.replace("/", ":")
+    if thread_type:
+        return f"session:stream:lookup:{safe_repo}:{thread_type}:{thread_id}:{workflow}"
     return f"session:stream:lookup:{safe_repo}:{thread_id}:{workflow}"

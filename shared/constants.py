@@ -12,6 +12,7 @@ Environment variable overrides:
 """
 
 import os
+from datetime import UTC, datetime
 
 # ---------------------------------------------------------------------------
 # TTLs — sourced from ConversationConfig.ttl_hours in the normal flow,
@@ -77,3 +78,13 @@ SESSION_HISTORY_KEY = "session:history:{}"
 # Streaming channels
 MSG_CHANNEL = "session:msg:{}"
 CTL_CHANNEL = "session:ctl:{}"
+
+
+# ---------------------------------------------------------------------------
+# Utility functions
+# ---------------------------------------------------------------------------
+
+
+def _now_iso() -> str:
+    """Return the current UTC time as an ISO 8601 string."""
+    return datetime.now(UTC).isoformat()

@@ -33,7 +33,6 @@ Usage inside sdk_executor._execute_sdk_once():
 import asyncio
 import json
 import logging
-from datetime import UTC, datetime
 from typing import Any
 
 from shared.constants import (
@@ -43,14 +42,11 @@ from shared.constants import (
     HISTORY_MAX,
     HISTORY_TTL_SECONDS,
     MSG_CHANNEL,
-    SESSION_HISTORY_KEY,
+    _now_iso,
 )
+from shared.streaming_session import _history_key, _inbox_key
 
 logger = logging.getLogger(__name__)
-
-
-def _now_iso() -> str:
-    return datetime.now(UTC).isoformat()
 
 
 def _msg_channel(token: str) -> str:
@@ -59,10 +55,6 @@ def _msg_channel(token: str) -> str:
 
 def _ctl_channel(token: str) -> str:
     return CTL_CHANNEL.format(token)
-
-
-def _history_key(token: str) -> str:
-    return SESSION_HISTORY_KEY.format(token)
 
 
 class SessionStreamBridge:
@@ -198,8 +190,8 @@ class SessionStreamBridge:
         """Publish session close event."""
         try:
             await self.publish("session_closed", {})
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"[StreamBridge] Failed to publish session_closed: {e}")
 
 
 class ControlChannel:
@@ -235,7 +227,7 @@ class ControlChannel:
 
     async def start(self) -> None:
         """Start background listener task."""
-        self._task = asyncio.get_event_loop().create_task(
+        self._task = asyncio.get_running_loop().create_task(
             self._listen(), name=f"ctl-listener-{self._token[:8]}"
         )
 
@@ -253,7 +245,7 @@ class ControlChannel:
         Returns:
             True if approved (or timed out), False if denied.
         """
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         future: asyncio.Future[bool] = loop.create_future()
         self._pending[tool_use_id] = future
         try:
@@ -302,7 +294,7 @@ class ControlChannel:
                     "[ControlChannel] Received tool_approval without tool_use_id"
                 )
                 return
-            approved = bool(msg.get("approved", True))
+            approved = bool(msg.get("approved", False))
             future = self._pending.get(tool_use_id)
             if future and not future.done():
                 future.set_result(approved)
@@ -321,7 +313,6 @@ class ControlChannel:
                 logger.debug("[ControlChannel] Empty inject_message, ignoring")
                 return
             # Store in Redis inbox for the sandbox worker to pick up
-            from shared.streaming_session import _inbox_key
 
             inbox_key = _inbox_key(self._token)
             message_data = json.dumps(
