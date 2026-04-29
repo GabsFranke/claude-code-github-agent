@@ -1,33 +1,32 @@
 """Sandbox worker that pulls jobs from queue and executes them in isolated workspaces."""
 
 import asyncio
+import json
 import logging
 import os
 import shutil
 import sys
-import tempfile
-import uuid
-from pathlib import Path
+from typing import Any
 
-from repo_setup import RepoSetupEngine  # noqa: E402
-from shared import (  # noqa: E402
-    JobQueue,
-    RepositorySyncError,
-    SDKError,
-    SDKTimeoutError,
-    WorktreeCreationError,
-    execute_git_command,
-    setup_graceful_shutdown,
-    wait_for_repo_sync,
+from shared import JobQueue, setup_graceful_shutdown
+from shared.constants import (
+    CLOSED_SESSION_TTL_HOURS,
+    JOB_TTL_SECONDS,
+    ORPHAN_LOCK_KEY,
+    ORPHAN_LOCK_TTL_SECONDS,
+    REVIVED_SESSION_TTL_HOURS,
+    WORKTREE_CLEANUP_QUEUE,
 )
-from shared.context_builder import (  # noqa: E402
-    find_priority_focus_files,
-    generate_structural_context,
+from shared.logging_utils import setup_logging
+from shared.session_store import SessionStore
+from shared.worktree_manager import (
+    cleanup_worktrees,
+    cleanup_worktrees_by_branch,
+    detect_orphan_worktrees,
+    get_project_dir_for_worktree,
 )
-from shared.logging_utils import setup_logging  # noqa: E402
-from shared.sdk_executor import execute_sdk  # noqa: E402
-from shared.sdk_factory import SDKOptionsBuilder  # noqa: E402
-from subagents import AGENTS  # noqa: E402
+
+from .processor import JobProcessor
 
 # Configure logging
 setup_logging(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -35,10 +34,6 @@ logger = logging.getLogger(__name__)
 
 # Configure Claude Agent SDK logger to match our log level
 logging.getLogger("claude_agent_sdk").setLevel(os.getenv("LOG_LEVEL", "INFO"))
-
-# SDK retry configuration
-SDK_MAX_RETRIES = int(os.getenv("SDK_MAX_RETRIES", "3"))
-SDK_RETRY_BASE_DELAY = float(os.getenv("SDK_RETRY_BASE_DELAY", "5.0"))
 
 # Global state
 shutdown_event = asyncio.Event()
@@ -52,415 +47,146 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
         job_id: Job identifier
         job_data: Job data dictionary
     """
-    workspace = None
-    repo_dir = None
-    builder = None
+    processor = JobProcessor(job_queue, job_id, job_data)
+    await processor.process()
 
-    try:
-        # Validate job_id format for security (prevent directory traversal)
+
+async def _process_cleanup_requests(redis: Any) -> None:
+    """Process pending worktree cleanup requests from Redis.
+
+    Webhook service queues cleanup events (PR close, issue close,
+    branch delete) to the ``agent:worktree:cleanup`` Redis list.
+    This function drains all pending requests each cycle.
+    """
+    if redis is None:
+        return
+
+    while True:
+        raw = await redis.lpop(WORKTREE_CLEANUP_QUEUE)
+        if not raw:
+            break
+
         try:
-            uuid.UUID(job_id)
-        except (ValueError, AttributeError):
-            logger.error(f"Invalid job_id format: {job_id}")
-            await job_queue.complete_job(
-                job_id,
-                {
-                    "status": "error",
-                    "error": f"Invalid job_id format: {job_id}",
-                    "repo": job_data.get("repo", "unknown"),
-                    "issue_number": job_data.get("issue_number", 0),
-                },
-                status="error",
-            )
-            return
+            msg = json.loads(raw)
+            action = msg.get("action")
+            repo = msg.get("repo", "")
 
-        # Ensure repo is synced and setup worktree
-        repo = job_data["repo"]
-        ref = job_data.get("ref", "main")
-        logger.info(f"Job data keys: {list(job_data.keys())}")
-        logger.info(f"Job data ref value: {job_data.get('ref', 'NOT_FOUND')}")
-        logger.info(f"Setting up worktree for {repo} (ref {ref})")
-
-        repo_dir = await wait_for_repo_sync(repo, ref, job_queue.redis)
-
-        # Create isolated workspace under /tmp — cleaned up explicitly after job
-        workspace_base = tempfile.mkdtemp(
-            prefix=f"job_{job_id[:8]}_",
-            dir="/tmp",  # nosec B108
-        )
-        os.rmdir(workspace_base)  # git worktree add needs it to not exist
-        workspace = workspace_base
-        logger.info(f"Created workspace for job {job_id}: {workspace}")
-
-        # Create worktree without creating a new branch
-        # The agent will create branches as needed using git commands
-        # Handle different ref formats:
-        # - refs/heads/main -> refs/remotes/origin/main (regular branch)
-        # - refs/pull/30/head -> refs/pull/30/head (PR ref, keep as-is)
-        # - refs/tags/v1.0 -> refs/tags/v1.0 (tag, keep as-is)
-        if ref.startswith("refs/pull/"):
-            # PR refs need to be kept as-is
-            bare_ref = ref
-        elif ref.startswith("refs/tags/"):
-            # Tag refs need to be kept as-is
-            bare_ref = ref
-        else:
-            # Regular branch refs: convert refs/heads/main -> refs/remotes/origin/main
-            base_ref = (
-                ref.replace("refs/heads/", "")
-                if ref.startswith("refs/heads/")
-                else ref.replace("refs/", "")
-            )
-            bare_ref = f"refs/remotes/origin/{base_ref}"
-
-        # Create worktree in detached HEAD state - agent will create branches as needed
-        wt_cmd = (
-            f"git --git-dir={repo_dir} worktree add --detach {workspace} {bare_ref}"
-        )
-        code, _out, err = await execute_git_command(wt_cmd)
-
-        if code != 0:
-            logger.warning(
-                f"Worktree ref {bare_ref} failed: {err}. Trying to detect default branch..."
-            )
-
-            # List all branches and pick the first one (usually main or master)
-            list_cmd = f"git --git-dir={repo_dir} branch --list -r"
-            list_code, list_out, list_err = await execute_git_command(list_cmd)
-
-            default_branch = "refs/remotes/origin/main"  # Fallback
-            if list_code == 0 and list_out:
-                # Output is like "  origin/main" or "  origin/master", pick first branch
-                branches = [
-                    b.strip()
-                    for b in list_out.split("\n")
-                    if b.strip() and "origin/" in b
-                ]
-                if branches:
-                    # branches[0] is like "origin/main", convert to refs/remotes/origin/main
-                    branch_name_only = branches[0].replace("origin/", "")
-                    default_branch = f"refs/remotes/origin/{branch_name_only}"
-                    logger.info(f"Detected default branch: {default_branch}")
-            else:
-                logger.warning(
-                    f"Could not list branches: {list_err}. Using fallback: {default_branch}"
+            if action == "cleanup_thread":
+                thread_type = msg.get("thread_type", "issue")
+                thread_id = msg.get("thread_id", "")
+                logger.info(
+                    f"Cleaning up worktrees for {repo}/{thread_type}/{thread_id}"
                 )
+                await cleanup_worktrees(repo, thread_type, thread_id)
 
-            # Try with detected default branch in detached HEAD state
-            wt_cmd_fallback = f"git --git-dir={repo_dir} worktree add --detach {workspace} {default_branch}"
-            code, _out, err = await execute_git_command(wt_cmd_fallback)
-            if code != 0:
-                raise WorktreeCreationError(f"Failed to create worktree: {err}")
-
-        # Inject git credentials into the workspace
-        # Configure git to use credential helper
-        config_code, _, config_err = await execute_git_command(
-            "git config credential.helper store", cwd=workspace
-        )
-        if config_code != 0:
-            raise WorktreeCreationError(
-                f"Failed to configure git credentials: {config_err}"
-            )
-
-        # Write credentials to home directory where git expects them
-        home_dir = os.path.expanduser("~")
-        os.makedirs(home_dir, exist_ok=True)
-        credentials_file = os.path.join(home_dir, ".git-credentials")
-        fd = os.open(credentials_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        try:
-            os.write(
-                fd,
-                f"https://x-access-token:{job_data['github_token']}@github.com\n".encode(),
-            )
-        finally:
-            os.close(fd)
-
-        # Configure git user for commits (required for git commit to work)
-        bot_username = os.getenv("BOT_USERNAME", "Claude Code Agent")
-        bot_email = os.getenv(
-            "BOT_USER_EMAIL", "claude-code-agent[bot]@users.noreply.github.com"
-        )
-        await execute_git_command(
-            f'git config user.name "{bot_username}"', cwd=workspace
-        )
-        await execute_git_command(f'git config user.email "{bot_email}"', cwd=workspace)
-
-        # Run repository setup commands if configured
-        try:
-            setup_engine = RepoSetupEngine()
-            setup_config = setup_engine.get_setup_config(repo)
-
-            if setup_config:
-                logger.info(f"Found setup configuration for {repo}")
-                setup_result = await setup_engine.run_setup(
-                    workspace, repo, setup_config
-                )
-
-                if not setup_result["all_successful"]:
-                    logger.warning(
-                        f"Some setup commands failed for {repo}, continuing anyway..."
-                    )
-                    # Log failed commands for debugging
-                    for result in setup_result["results"]:
-                        if not result.get("success"):
-                            # Handle both old (command) and new (commands) structure
-                            cmd_info = result.get(
-                                "commands", result.get("command", "unknown")
-                            )
-                            if isinstance(cmd_info, list):
-                                cmd_info = " && ".join(cmd_info)
-                            logger.warning(
-                                f"Failed command(s): {cmd_info} - {result.get('error', 'unknown error')}"
-                            )
-                else:
-                    logger.info(
-                        f"Setup completed successfully for {repo} in {setup_result['elapsed_seconds']:.1f}s"
-                    )
-            # If no setup config, silently skip (this is normal)
-
-        except Exception as e:
-            logger.warning(
-                f"Error during repository setup for {repo}: {e}. Continuing with job execution...",
-                exc_info=True,
-            )
-            # Don't fail the job if setup fails - agent can still work with source code
-
-        # Generate structural context (file tree + repomap)
-        # This is an async step outside the synchronous builder
-        file_tree_text = ""
-        repomap_text = ""
-        try:
-            # Determine personalization from workflow context
-            mentioned_files = []
-            context_budget = 4096  # Default repomap budget
-            include_test_files = True  # Default: include test files
-
-            # Get context profile from job data (set by WorkflowEngine)
-            context_profile = job_data.get("context_profile", {})
-            if context_profile:
-                context_budget = context_profile.get("repomap_budget", 4096)
-                include_test_files = context_profile.get("include_test_files", True)
-
-            # Personalize repomap toward relevant files when configured
-            workflow_name = job_data.get("workflow_name")
-            if context_profile.get("personalized", False):
-                # Strategy 1: Fetch PR changed files (works for PR-triggered workflows)
-                issue_number = job_data.get("issue_number")
-                github_token = job_data.get("github_token")
-                if issue_number and github_token:
-                    try:
-                        import httpx
-
-                        async with httpx.AsyncClient() as client:
-                            url = f"https://api.github.com/repos/{repo}/pulls/{issue_number}/files"
-                            headers = {
-                                "Authorization": f"Bearer {github_token}",
-                                "Accept": "application/vnd.github.v3+json",
-                            }
-                            resp = await client.get(url, headers=headers, timeout=10.0)
-                            if resp.status_code == 200:
-                                files = resp.json()
-                                mentioned_files = [
-                                    f["path"] for f in files if "path" in f
-                                ]
-                                logger.info(
-                                    f"Personalizing repomap toward {len(mentioned_files)} changed files"
-                                )
-                    except Exception as e:
-                        logger.debug(
-                            f"PR file fetch skipped (not a PR or API error): {e}"
-                        )
-
-                # Strategy 2: Add files matching priority_focus patterns
-                priority_focus = context_profile.get("priority_focus", [])
-                if priority_focus:
-                    focus_files = find_priority_focus_files(
-                        Path(workspace), priority_focus
-                    )
-                    mentioned_files.extend(focus_files)
-                    if focus_files:
-                        logger.info(
-                            f"Added {len(focus_files)} priority focus files "
-                            f"for areas: {priority_focus}"
-                        )
-
-            file_tree_text, repomap_text = await generate_structural_context(
-                repo_path=Path(workspace),
-                repo=repo,
-                mentioned_files=mentioned_files,
-                token_budget=context_budget,
-                include_test_files=include_test_files,
-                cache_dir=Path("/home/bot/agent-memory"),
-            )
-            logger.info(
-                f"Generated structural context: "
-                f"file_tree={len(file_tree_text)} chars, "
-                f"repomap={len(repomap_text)} chars"
-            )
-        except Exception as e:
-            logger.warning(
-                f"Structural context generation failed, continuing without: {e}",
-                exc_info=True,
-            )
-
-        # Build SDK options using the factory builder
-        model = os.getenv("ANTHROPIC_DEFAULT_SONNET_MODEL", "claude-sonnet-4-20250514")
-        github_token = job_data["github_token"]
-        workflow_name = job_data.get("workflow_name")
-        system_context = job_data.get("system_context")
-        claude_md = job_data.get("claude_md")
-        memory_index = job_data.get("memory_index")
-
-        # Inject GitHub token for tools/plugins to use
-        os.environ["GITHUB_TOKEN"] = github_token
-
-        # Log token availability for debugging (length only, no partial tokens)
-        if github_token:
-            logger.info(f"GitHub token available: {len(github_token)} characters")
-        else:
-            logger.warning("No GitHub token provided to sandbox executor")
-
-        # Start with base configuration
-        builder = SDKOptionsBuilder(cwd=workspace).with_model(model)
-
-        # Add MCP servers conditionally
-        if github_token:
-            builder.with_github_mcp(github_token).with_github_actions_mcp(github_token)
-
-        builder.with_memory_mcp(repo)
-        builder.with_codebase_tools(workspace)
-        builder.with_semantic_search(repo)
-
-        # Get parent span ID for trace linking (if enabled)
-        parent_span_id = job_data.get("parent_span_id")
-
-        # Build final options with all sandbox-specific features
-        builder = (
-            builder.with_auto_discovered_plugins()
-            .with_full_toolset()
-            .with_agents(AGENTS)
-            .with_langfuse_hooks(parent_span_id=parent_span_id)
-            .with_transcript_staging(repo, workflow_name, ref=ref)
-            .with_writable_dir(f"/home/bot/agent-memory/{repo}/memory")
-            .with_system_prompt(system_context)  # Workflow-specific system context
-            .with_repository_context(
-                claude_md=claude_md, memory_index=memory_index
-            )  # Repository context (prepended to system prompt)
-            .with_structural_context(
-                file_tree=file_tree_text, repomap=repomap_text
-            )  # Structural context (file tree + repomap)
-        )
-
-        # Execute via centralized executor with retry
-        result = await execute_sdk(
-            prompt=job_data["prompt"],
-            options=builder.build(),
-            max_retries=SDK_MAX_RETRIES,
-            retry_base_delay=SDK_RETRY_BASE_DELAY,
-        )
-
-        response = result["response"]
-
-        # Flush buffered post-processing jobs. The SDK may fire
-        # Stop/SubagentStop hooks multiple times per session — the
-        # flush deduplicates by (transcript, event, job_type) and
-        # enqueues only the final set.
-        await builder.flush_pending_post_jobs()
-
-        # Mark job as complete (agent already posted to GitHub via MCP)
-        await job_queue.complete_job(
-            job_id,
-            {
-                "status": "success",
-                "response": response,
-                "repo": job_data["repo"],
-                "issue_number": job_data["issue_number"],
-            },
-            status="success",
-        )
-
-        logger.info(f"Job {job_id} completed successfully")
-
-    except Exception as e:
-        import time
-
-        # Flush buffered jobs even on failure — partial sessions can
-        # still produce useful retrospection data.
-        try:
-            if builder is not None:
-                await builder.flush_pending_post_jobs()
-        except Exception as flush_err:
-            logger.error(f"Failed to flush post-processing jobs: {flush_err}")
-
-        logger.error(f"Job {job_id} failed: {e}", exc_info=True)
-
-        # Categorize error type
-        error_type = type(e).__name__
-        error_category = "unknown"
-        if isinstance(e, (WorktreeCreationError, RepositorySyncError)):
-            error_category = "infrastructure"
-        elif isinstance(e, (SDKError, SDKTimeoutError)):
-            error_category = "sdk"
-        elif isinstance(e, TimeoutError):
-            error_category = "timeout"
-        else:
-            error_category = "execution"
-
-        # Mark job as failed with detailed context
-        await job_queue.complete_job(
-            job_id,
-            {
-                "status": "error",
-                "error": str(e),
-                "error_type": error_type,
-                "error_category": error_category,
-                "timestamp": time.time(),
-                "repo": job_data["repo"],
-                "issue_number": job_data["issue_number"],
-            },
-            status="error",
-        )
-
-    finally:
-        # CRITICAL: Clean up GITHUB_TOKEN from environment
-        if "GITHUB_TOKEN" in os.environ:
-            del os.environ["GITHUB_TOKEN"]
-            logger.debug("Cleaned up GITHUB_TOKEN from environment")
-
-        # Cleanup credentials
-        try:
-            credentials_file = os.path.join(os.path.expanduser("~"), ".git-credentials")
-            if os.path.exists(credentials_file):
-                os.remove(credentials_file)
-                logger.debug("Cleaned up git credentials")
-        except Exception as e:
-            logger.warning(f"Failed to cleanup credentials: {e}")
-
-        # Cleanup workspace and worktree
-        if workspace:
-            # Try cleanup with retry (up to 3 attempts)
-            for attempt in range(3):
+                # Also clean up session metadata
                 try:
-                    if repo_dir and os.path.exists(workspace):
-                        # Remove worktree from bare repo tracking
-                        await execute_git_command(
-                            f"git --git-dir={repo_dir} worktree remove --force {workspace}"
-                        )
-                    elif os.path.exists(workspace):
-                        shutil.rmtree(workspace)
-                    logger.debug(f"Cleaned up workspace: {workspace}")
-                    break  # Success, exit retry loop
+                    session_store = SessionStore(redis)
+                    # Find and delete sessions for this thread
+                    sessions = await session_store.list_sessions(repo)
+                    for s in sessions:
+                        if s.thread_type == thread_type and s.thread_id == thread_id:
+                            await session_store.close_session(
+                                repo, thread_type, thread_id, s.workflow_name
+                            )
+                            logger.info(
+                                f"Closed session for {repo}/{thread_type}/{thread_id}/{s.workflow_name}"
+                            )
                 except Exception as e:
-                    if attempt < 2:  # Not the last attempt
-                        logger.warning(
-                            f"Failed to cleanup workspace {workspace} (attempt {attempt + 1}/3): {e}. Retrying..."
-                        )
-                        await asyncio.sleep(1)  # Wait before retry
-                    else:
-                        logger.error(
-                            f"Failed to cleanup workspace {workspace} after 3 attempts: {e}",
-                            exc_info=True,
-                        )
+                    logger.warning(f"Failed to cleanup session metadata: {e}")
+
+            elif action == "expire_thread":
+                thread_type = msg.get("thread_type", "issue")
+                thread_id = msg.get("thread_id", "")
+                logger.info(
+                    f"Setting 72h expiration for worktrees in {repo}/{thread_type}/{thread_id}"
+                )
+                try:
+                    session_store = SessionStore(redis)
+                    sessions = await session_store.list_sessions(repo)
+                    for s in sessions:
+                        if s.thread_type == thread_type and s.thread_id == thread_id:
+                            await session_store.expire_session(
+                                repo,
+                                thread_type,
+                                thread_id,
+                                s.workflow_name,
+                                ttl_hours=CLOSED_SESSION_TTL_HOURS,
+                            )
+                except Exception as e:
+                    logger.warning(f"Failed to expire session metadata: {e}")
+
+            elif action == "revive_thread":
+                thread_type = msg.get("thread_type", "issue")
+                thread_id = msg.get("thread_id", "")
+                logger.info(
+                    f"Setting 30d expiration for revived worktrees in {repo}/{thread_type}/{thread_id}"
+                )
+                try:
+                    session_store = SessionStore(redis)
+                    sessions = await session_store.list_sessions(repo)
+                    for s in sessions:
+                        if s.thread_type == thread_type and s.thread_id == thread_id:
+                            await session_store.expire_session(
+                                repo,
+                                thread_type,
+                                thread_id,
+                                s.workflow_name,
+                                ttl_hours=REVIVED_SESSION_TTL_HOURS,
+                            )
+                except Exception as e:
+                    logger.warning(f"Failed to revive session metadata: {e}")
+
+            elif action == "cleanup_branch":
+                branch = msg.get("branch", "")
+                logger.info(f"Cleaning up worktrees for branch {branch} in {repo}")
+                await cleanup_worktrees_by_branch(repo, branch)
+
+        except Exception as e:
+            logger.error(f"Failed to process cleanup request: {e}", exc_info=True)
+
+
+async def _orphan_cleanup_loop(redis: Any) -> None:
+    """Periodically scan for and remove orphan worktrees.
+
+    A worktree becomes an orphan when its Redis session TTL expires.
+    """
+    if redis is None:
+        return
+
+    session_store = SessionStore(redis)
+    lock_key = ORPHAN_LOCK_KEY
+
+    while not shutdown_event.is_set():
+        # Try to acquire lock, expires in 1 hour
+        acquired = await redis.set(
+            lock_key, "locked", nx=True, ex=ORPHAN_LOCK_TTL_SECONDS
+        )
+
+        if acquired:
+            try:
+                orphans = await detect_orphan_worktrees(session_store)
+                for orphan in orphans:
+                    logger.info(f"TTL expired, cleaning up orphan worktree: {orphan}")
+                    shutil.rmtree(orphan, ignore_errors=True)
+
+                    project_dir = get_project_dir_for_worktree(orphan)
+                    if project_dir.exists():
+                        shutil.rmtree(project_dir, ignore_errors=True)
+            except Exception as e:
+                logger.error(f"Error in orphan cleanup loop: {e}")
+            finally:
+                # Release lock so other workers can acquire it promptly
+                try:
+                    await redis.delete(lock_key)
+                except Exception:
+                    pass
+
+        # Sleep for 1 hour, checking for shutdown occasionally
+        for _ in range(3600):
+            if shutdown_event.is_set():
+                break
+            await asyncio.sleep(1)
 
 
 async def main():
@@ -477,14 +203,20 @@ async def main():
     job_queue = JobQueue(
         redis_url=redis_url,
         password=redis_password,
-        job_ttl=3600,
+        job_ttl=JOB_TTL_SECONDS,
     )
 
     logger.info("Sandbox worker ready, waiting for jobs...")
 
+    # Start background cleanup task
+    cleanup_task = asyncio.create_task(_orphan_cleanup_loop(job_queue.redis))
+
     try:
         while not shutdown_event.is_set():
             try:
+                # Process pending worktree cleanup requests
+                await _process_cleanup_requests(job_queue.redis)
+
                 # Pull next job (blocking with timeout)
                 result = await job_queue.get_next_job(timeout=5)
 
@@ -506,6 +238,8 @@ async def main():
 
     finally:
         logger.info("Shutting down sandbox worker...")
+        if cleanup_task and not cleanup_task.done():
+            cleanup_task.cancel()
         await job_queue.close()
         logger.info("Sandbox worker shutdown complete")
 

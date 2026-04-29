@@ -1,9 +1,17 @@
 """Unit tests for sandbox worker module."""
 
 import asyncio
+import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+# Default BOT_USER_EMAIL contains [bot] which fails the safe-character regex
+# in process_job. Provide clean env vars so the validation passes.
+_SAFE_ENV_OVERRIDES = {
+    "BOT_USERNAME": "Claude Code Agent",
+    "BOT_USER_EMAIL": "claude-code-agent@users.noreply.github.com",
+}
 
 
 @pytest.fixture(autouse=True)
@@ -53,18 +61,19 @@ class TestProcessJob:
         }
 
         with (
+            patch.dict(os.environ, _SAFE_ENV_OVERRIDES),
             patch(
-                "services.sandbox_executor.sandbox_worker.wait_for_repo_sync",
+                "services.sandbox_executor.processor.wait_for_repo_sync",
                 new_callable=AsyncMock,
                 return_value="/var/cache/repos/owner/repo.git",
             ),
             patch(
-                "services.sandbox_executor.sandbox_worker.execute_git_command",
+                "services.sandbox_executor.processor.execute_git_command",
                 new_callable=AsyncMock,
                 return_value=(0, "", ""),
             ),
             patch(
-                "services.sandbox_executor.sandbox_worker.execute_sdk",
+                "services.sandbox_executor.processor.execute_sdk",
                 new_callable=AsyncMock,
                 return_value={
                     "response": "Test response",
@@ -75,22 +84,33 @@ class TestProcessJob:
                 },
             ),
             patch(
-                "services.sandbox_executor.sandbox_worker.tempfile.mkdtemp"
+                "services.sandbox_executor.processor.tempfile.mkdtemp"
             ) as mock_mkdtemp,
-            patch("services.sandbox_executor.sandbox_worker.os.rmdir"),
-            patch("services.sandbox_executor.sandbox_worker.os.chdir"),
+            patch("services.sandbox_executor.processor.os.rmdir"),
+            patch("services.sandbox_executor.processor.os.chdir", create=True),
             patch(
-                "services.sandbox_executor.sandbox_worker.os.getcwd",
+                "services.sandbox_executor.processor.os.getcwd",
                 return_value="/original",
+                create=True,
             ),
-            patch("services.sandbox_executor.sandbox_worker.os.makedirs"),
+            patch("services.sandbox_executor.processor.os.makedirs", create=True),
+            patch("services.sandbox_executor.processor.os.open"),
+            patch("services.sandbox_executor.processor.os.write"),
+            patch("services.sandbox_executor.processor.os.close"),
+            patch("services.sandbox_executor.processor.os.remove"),
             patch(
-                "services.sandbox_executor.sandbox_worker.os.path.exists",
+                "services.sandbox_executor.processor.os.path.exists",
                 return_value=False,
             ),
             patch(
-                "services.sandbox_executor.sandbox_worker.RepoSetupEngine"
+                "services.sandbox_executor.processor.RepoSetupEngine"
             ) as mock_engine_class,
+            patch("shared.mcp_json_writer.write_mcp_json"),
+            patch(
+                "services.sandbox_executor.processor.generate_structural_context",
+                new_callable=AsyncMock,
+                return_value=("", ""),
+            ),
         ):
             # Mock workspace path
             mock_mkdtemp.return_value = "/tmp/test_workspace"
@@ -129,38 +149,50 @@ class TestProcessJob:
         }
 
         with (
+            patch.dict(os.environ, _SAFE_ENV_OVERRIDES),
             patch(
-                "services.sandbox_executor.sandbox_worker.wait_for_repo_sync",
+                "services.sandbox_executor.processor.wait_for_repo_sync",
                 new_callable=AsyncMock,
                 return_value="/var/cache/repos/owner/repo.git",
             ),
             patch(
-                "services.sandbox_executor.sandbox_worker.execute_git_command",
+                "services.sandbox_executor.processor.execute_git_command",
                 new_callable=AsyncMock,
                 return_value=(0, "", ""),
             ),
             patch(
-                "services.sandbox_executor.sandbox_worker.execute_sdk",
+                "services.sandbox_executor.processor.execute_sdk",
                 new_callable=AsyncMock,
                 side_effect=Exception("Execution failed"),
             ),
             patch(
-                "services.sandbox_executor.sandbox_worker.tempfile.mkdtemp"
+                "services.sandbox_executor.processor.tempfile.mkdtemp"
             ) as mock_mkdtemp,
-            patch("services.sandbox_executor.sandbox_worker.os.rmdir"),
-            patch("services.sandbox_executor.sandbox_worker.os.chdir"),
+            patch("services.sandbox_executor.processor.os.rmdir"),
+            patch("services.sandbox_executor.processor.os.chdir", create=True),
             patch(
-                "services.sandbox_executor.sandbox_worker.os.getcwd",
+                "services.sandbox_executor.processor.os.getcwd",
                 return_value="/original",
+                create=True,
             ),
-            patch("services.sandbox_executor.sandbox_worker.os.makedirs"),
+            patch("services.sandbox_executor.processor.os.makedirs", create=True),
+            patch("services.sandbox_executor.processor.os.open"),
+            patch("services.sandbox_executor.processor.os.write"),
+            patch("services.sandbox_executor.processor.os.close"),
+            patch("services.sandbox_executor.processor.os.remove"),
             patch(
-                "services.sandbox_executor.sandbox_worker.os.path.exists",
+                "services.sandbox_executor.processor.os.path.exists",
                 return_value=False,
             ),
             patch(
-                "services.sandbox_executor.sandbox_worker.RepoSetupEngine"
+                "services.sandbox_executor.processor.RepoSetupEngine"
             ) as mock_engine_class,
+            patch("shared.mcp_json_writer.write_mcp_json"),
+            patch(
+                "services.sandbox_executor.processor.generate_structural_context",
+                new_callable=AsyncMock,
+                return_value=("", ""),
+            ),
         ):
             # Mock workspace path
             mock_mkdtemp.return_value = "/tmp/test_workspace"
@@ -215,18 +247,29 @@ class TestMainLoop:
         mock_queue.get_next_job = get_next_job_side_effect
         mock_queue.close = AsyncMock()
 
-        with patch(
-            "services.sandbox_executor.sandbox_worker.JobQueue", return_value=mock_queue
-        ):
-            with patch(
+        with (
+            patch(
+                "services.sandbox_executor.sandbox_worker.JobQueue",
+                return_value=mock_queue,
+            ),
+            patch(
+                "services.sandbox_executor.sandbox_worker._orphan_cleanup_loop",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "services.sandbox_executor.sandbox_worker._process_cleanup_requests",
+                new_callable=AsyncMock,
+            ),
+            patch(
                 "services.sandbox_executor.sandbox_worker.process_job",
                 new_callable=AsyncMock,
-            ) as mock_process:
-                await main()
+            ) as mock_process,
+        ):
+            await main()
 
-                # Verify job was processed
-                mock_process.assert_called_once()
-                mock_queue.close.assert_called_once()
+            # Verify job was processed
+            mock_process.assert_called_once()
+            mock_queue.close.assert_called_once()
 
         # Reset shutdown event
         shutdown_event.clear()
@@ -247,15 +290,29 @@ class TestMainLoop:
             if call_count == 1:
                 raise RuntimeError("Queue error")
             else:
-                await asyncio.sleep(0.1)
                 shutdown_event.set()
                 return None
 
         mock_queue.get_next_job = get_next_job_side_effect
         mock_queue.close = AsyncMock()
 
-        with patch(
-            "services.sandbox_executor.sandbox_worker.JobQueue", return_value=mock_queue
+        with (
+            patch(
+                "services.sandbox_executor.sandbox_worker.JobQueue",
+                return_value=mock_queue,
+            ),
+            patch(
+                "services.sandbox_executor.sandbox_worker._orphan_cleanup_loop",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "services.sandbox_executor.sandbox_worker._process_cleanup_requests",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "services.sandbox_executor.sandbox_worker.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
         ):
             await main()
 
@@ -277,8 +334,19 @@ class TestMainLoop:
         # Set shutdown immediately
         shutdown_event.set()
 
-        with patch(
-            "services.sandbox_executor.sandbox_worker.JobQueue", return_value=mock_queue
+        with (
+            patch(
+                "services.sandbox_executor.sandbox_worker.JobQueue",
+                return_value=mock_queue,
+            ),
+            patch(
+                "services.sandbox_executor.sandbox_worker._orphan_cleanup_loop",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "services.sandbox_executor.sandbox_worker._process_cleanup_requests",
+                new_callable=AsyncMock,
+            ),
         ):
             await main()
 

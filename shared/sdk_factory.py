@@ -4,22 +4,45 @@ This module provides a builder pattern for constructing ClaudeAgentOptions
 with sensible defaults and flexible customization for different worker types.
 """
 
+import json
 import logging
 import os
 from pathlib import Path
+from typing import Any
 
 from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
 
 from shared.langfuse_hooks import setup_langfuse_hooks
 from shared.post_processing import flush_pending_post_jobs as _flush_pending_post_jobs
-from shared.post_processing import (
-    stage_transcript_with_retry as _stage_transcript_with_retry,
-)
 
 logger = logging.getLogger(__name__)
 
 # Total system prompt budget in tokens
 SYSTEM_PROMPT_BUDGET = 12_000
+
+
+def _discover_host_mcp_names(cwd: str | None = None) -> list[str]:
+    """Read MCP server names from ~/.claude.json for allowed_tools."""
+    claude_json = Path.home() / ".claude.json"
+    if not claude_json.exists():
+        return []
+    try:
+        data = json.load(open(claude_json, encoding="utf-8"))
+    except Exception as e:
+        logger.warning(f"Failed to read ~/.claude.json for MCP discovery: {e}")
+        return []
+
+    names: set[str] = set(data.get("mcpServers", {}).keys())
+
+    if cwd:
+        projects = data.get("projects", {})
+        entry = projects.get(cwd) or projects.get(
+            next((k for k in projects if k.lower() == (cwd or "").lower()), ""), {}
+        )
+        if isinstance(entry, dict):
+            names.update(entry.get("mcpServers", {}).keys())
+
+    return sorted(names)
 
 
 class SDKOptionsBuilder:
@@ -74,9 +97,20 @@ class SDKOptionsBuilder:
         self._agents: dict | None = None
         self._repo_context: dict = {}  # Store context for hooks
         self._structural_context: str | None = None  # File tree + repomap
+        self._thread_history: str | None = None  # Issue/PR comment history
         self._pending_post_jobs: list[dict] = (
             []
         )  # Buffered during session, flushed after
+        self._resume: str | None = None  # Session ID to resume
+        self._continue_conversation: bool = False  # Continue most recent session
+        self._fork_session: bool = False  # Fork from existing session
+        # Streaming fields
+        self._include_partial_messages: bool = False  # Enable StreamEvent output
+        self._streaming_bridge = None  # SessionStreamBridge (not passed to SDK)
+        self._session_signature: str | None = None  # Session URL for comment signature
+        self._max_buffer_size: int = int(
+            os.getenv("SDK_MAX_BUFFER_SIZE", "4194304")
+        )  # 4MB default (was 1MB)
 
     # Model selection methods
 
@@ -114,6 +148,18 @@ class SDKOptionsBuilder:
         )
         return self
 
+    def with_max_buffer_size(self, size: int) -> "SDKOptionsBuilder":
+        """Override the default SDK max buffer size.
+
+        Args:
+            size: Max buffer size in bytes
+
+        Returns:
+            Self for method chaining
+        """
+        self._max_buffer_size = size
+        return self
+
     # MCP server methods (à la carte)
 
     def with_github_mcp(self, token: str) -> "SDKOptionsBuilder":
@@ -129,57 +175,6 @@ class SDKOptionsBuilder:
             "type": "http",
             "url": "https://api.githubcopilot.com/mcp",
             "headers": {"Authorization": f"Bearer {token}"},
-        }
-        return self
-
-    def with_github_actions_mcp(self, token: str) -> "SDKOptionsBuilder":
-        """Add GitHub Actions MCP server for CI/CD operations.
-
-        Args:
-            token: GitHub authentication token
-
-        Returns:
-            Self for method chaining
-        """
-        # Determine plugin path (priority order):
-        # 1. Docker container: /app/plugins/ci-failure-toolkit
-        # 2. Project directory: <project_root>/plugins/ci-failure-toolkit
-        # 3. User home: ~/.claude/plugins/ci-failure-toolkit
-
-        plugin_path = None
-        server_script = None
-
-        # Check Docker container path
-        if os.path.exists("/app/plugins/ci-failure-toolkit"):
-            plugin_path = "/app/plugins/ci-failure-toolkit"
-            server_script = (
-                "/app/plugins/ci-failure-toolkit/servers/github_actions_server.py"
-            )
-        else:
-            # Check project directory (relative to this file)
-            project_plugin_path = os.path.join(
-                Path(__file__).parent.parent, "plugins/ci-failure-toolkit"
-            )
-            if os.path.exists(project_plugin_path):
-                plugin_path = str(project_plugin_path)
-                server_script = os.path.join(
-                    plugin_path, "servers/github_actions_server.py"
-                )
-            else:
-                # Fall back to user home directory
-                plugin_path = os.path.expanduser("~/.claude/plugins/ci-failure-toolkit")
-                server_script = os.path.join(
-                    plugin_path, "servers/github_actions_server.py"
-                )
-
-        self._mcp_servers["github-actions"] = {
-            "type": "stdio",
-            "command": "python",
-            "args": [server_script],
-            "env": {
-                "PYTHONPATH": plugin_path,
-                "GITHUB_TOKEN": token,
-            },
         }
         return self
 
@@ -201,67 +196,6 @@ class SDKOptionsBuilder:
                 "PYTHONPATH": "/app",
             },
         }
-        return self
-
-    def with_codebase_tools(self, worktree_path: str) -> "SDKOptionsBuilder":
-        """Add codebase tools MCP server for structured code search.
-
-        Provides find_definitions, find_references, search_codebase, and
-        read_file_summary tools that reuse the tree-sitter infrastructure.
-
-        Args:
-            worktree_path: Absolute path to the git worktree.
-
-        Returns:
-            Self for method chaining
-        """
-        self._mcp_servers["codebase-tools"] = {
-            "type": "stdio",
-            "command": "python3",
-            "args": ["/app/mcp_servers/codebase_tools/server.py"],
-            "env": {
-                "REPO_PATH": worktree_path,
-                "PYTHONPATH": "/app",
-            },
-        }
-        return self
-
-    def with_semantic_search(self, repo: str) -> "SDKOptionsBuilder":
-        """Add semantic search MCP server for embedding-based code queries.
-
-        Only registers the server if indexing is enabled and both Qdrant
-        and Gemini API are configured. If unavailable, the tool gracefully
-        returns empty results.
-
-        Args:
-            repo: Repository identifier (e.g., "owner/repo") for collection lookup.
-
-        Returns:
-            Self for method chaining
-        """
-        indexing_enabled, qdrant_url, gemini_key = self._resolve_indexing_config()
-
-        if indexing_enabled and qdrant_url and gemini_key:
-            self._mcp_servers["semantic-search"] = {
-                "type": "stdio",
-                "command": "python3",
-                "args": ["/app/mcp_servers/semantic_search/server.py"],
-                "env": {
-                    "REPO_PATH": self.cwd,
-                    "GITHUB_REPOSITORY": repo,
-                    "QDRANT_URL": qdrant_url,
-                    "GEMINI_API_KEY": gemini_key,
-                    "EMBEDDING_DIMENSION": os.getenv("EMBEDDING_DIMENSION", "1024"),
-                    "PYTHONPATH": "/app",
-                },
-            }
-            logger.info(f"Semantic search MCP registered for {repo}")
-        else:
-            logger.debug(
-                "Semantic search skipped: INDEXING_ENABLED not set or "
-                "Qdrant/Gemini not configured"
-            )
-
         return self
 
     # Plugin methods (à la carte)
@@ -317,7 +251,7 @@ class SDKOptionsBuilder:
         Returns:
             Self for method chaining
         """
-        return self.with_tools(
+        tools = [
             "Task",
             "Skill",
             "Agent",
@@ -330,14 +264,17 @@ class SDKOptionsBuilder:
             "Grep",
             "Glob",
             "mcp__github__*",
-            "mcp__github-actions__*",
+            "mcp__github_actions__*",
             "mcp__memory__memory_read",
-            "mcp__codebase-tools__find_definitions",
-            "mcp__codebase-tools__find_references",
-            "mcp__codebase-tools__search_codebase",
-            "mcp__codebase-tools__read_file_summary",
-            "mcp__semantic-search__semantic_search",
-        )
+            "mcp__codebase_tools__*",
+            "mcp__semantic_search__*",
+        ]
+
+        if os.getenv("ALLOW_HOST_MCP", "false").lower() == "true":
+            for name in _discover_host_mcp_names(self.cwd):
+                tools.append(f"mcp__{name}__*")
+
+        return self.with_tools(*tools)
 
     def with_retrospector_toolset(self) -> "SDKOptionsBuilder":
         """Add toolset for retrospector worker (instruction analysis).
@@ -401,14 +338,17 @@ class SDKOptionsBuilder:
     def with_transcript_staging(
         self, repo: str, workflow_name: str | None = None, ref: str | None = None
     ) -> "SDKOptionsBuilder":
-        """Add post-session hooks for transcript staging and job buffering.
+        """Add post-session hooks for transcript path capture and job buffering.
 
-        This hook stages transcripts to the shared volume and buffers
+        This hook captures the native transcript path from the SDK and buffers
         post-processing jobs (memory, retrospector, indexing) in
         ``_pending_post_jobs``. Jobs are NOT enqueued immediately — the
         SDK may fire Stop/SubagentStop multiple times per session. The
         caller must invoke ``flush_pending_post_jobs()`` after the SDK
         session ends to deduplicate and enqueue the final set of jobs.
+
+        Workers read transcripts directly from the native SDK path via
+        the shared ``~/.claude/`` volume — no staging copy is needed.
 
         Args:
             repo: Repository identifier (e.g., "owner/repo")
@@ -423,7 +363,6 @@ class SDKOptionsBuilder:
             os.getenv("RETROSPECTOR_ENABLED", "true").lower() == "true"
         )
         indexing_enabled, _, gemini_key = self._resolve_indexing_config()
-        # Preserve original env-fallback guard: require GEMINI_API_KEY
         indexing_enabled = indexing_enabled and bool(gemini_key)
 
         # Capture context from builder for hooks to use
@@ -431,48 +370,31 @@ class SDKOptionsBuilder:
         pending = self._pending_post_jobs
 
         async def capture_and_buffer(input_data, _tool_use_id, _context):
-            """Stage transcript and buffer post-processing jobs for later flush."""
+            """Capture native transcript path and buffer jobs for later flush."""
             event = input_data.get("hook_event_name", "Stop")
 
-            # Select the correct transcript source based on event type.
             if event == "SubagentStop":
-                transcript = input_data.get("agent_transcript_path")
+                transcript_path = input_data.get("agent_transcript_path")
             else:
-                transcript = input_data.get("transcriptPath") or input_data.get(
+                transcript_path = input_data.get("transcriptPath") or input_data.get(
                     "transcript_path"
                 )
 
-            if not transcript:
+            if not transcript_path:
                 logger.warning(
                     "Post-session hook: no transcript path in hook input, "
                     "skipping post-processing"
                 )
                 return {"success": False, "error": "no_transcript_path"}
 
-            logger.debug(f"Post-session hook triggered: {transcript} ({event})")
+            logger.debug(f"Post-session hook triggered: {transcript_path} ({event})")
 
-            # Copy to shared volume for post-processing workers
-            staged_path = await _stage_transcript_with_retry(
-                repo,
-                transcript,
-                hook_event=event,
-                agent_id=input_data.get("agent_id"),
-                workflow_name=workflow_name,
-            )
-            if not staged_path:
-                logger.error(
-                    f"Failed to stage transcript {transcript} after retries, "
-                    "skipping post-processing"
-                )
-                return {"success": False, "error": "transcript_staging_failed"}
-
-            # Buffer the job — don't enqueue yet
             if memory_enabled:
                 pending.append(
                     {
                         "type": "memory",
                         "repo": repo,
-                        "staged_path": staged_path,
+                        "transcript_path": transcript_path,
                         "event": event,
                         "claude_md": repo_context.get("claude_md"),
                         "memory_index": repo_context.get("memory_index"),
@@ -484,7 +406,7 @@ class SDKOptionsBuilder:
                     {
                         "type": "retrospector",
                         "repo": repo,
-                        "staged_path": staged_path,
+                        "transcript_path": transcript_path,
                         "event": event,
                         "workflow_name": workflow_name,
                         "session_meta": {
@@ -525,7 +447,7 @@ class SDKOptionsBuilder:
     async def flush_pending_post_jobs(self) -> None:
         """Flush buffered post-processing jobs after the SDK session ends.
 
-        Deduplicates buffered jobs by (staged_path, event, type) — keeping
+        Deduplicates buffered jobs by (transcript_path, event, type) — keeping
         only the last occurrence — then enqueues them to the respective
         Redis queues. Must be called after ``execute_sdk()`` returns.
 
@@ -534,6 +456,51 @@ class SDKOptionsBuilder:
         jobs = self._pending_post_jobs
         self._pending_post_jobs = []
         await _flush_pending_post_jobs(jobs)
+
+    # Session persistence methods
+
+    def with_session_resume(self, session_id: str) -> "SDKOptionsBuilder":
+        """Resume an existing SDK session by ID.
+
+        The SDK loads the full conversation history from the session file
+        stored under ``~/.claude/projects/<encoded-cwd>/``.
+
+        Args:
+            session_id: UUID of the session to resume.
+
+        Returns:
+            Self for method chaining
+        """
+        self._resume = session_id
+        return self
+
+    def with_session_continue(self) -> "SDKOptionsBuilder":
+        """Continue the most recent session in ``cwd``.
+
+        The SDK finds the latest session file in the working directory
+        and resumes it automatically.
+
+        Returns:
+            Self for method chaining
+        """
+        self._continue_conversation = True
+        return self
+
+    def with_session_fork(self, session_id: str) -> "SDKOptionsBuilder":
+        """Fork from an existing session without modifying the original.
+
+        Starts a new session that inherits the conversation history of
+        ``session_id`` but diverges from this point forward.
+
+        Args:
+            session_id: UUID of the session to fork from.
+
+        Returns:
+            Self for method chaining
+        """
+        self._resume = session_id
+        self._fork_session = True
+        return self
 
     # Directory methods
 
@@ -635,6 +602,25 @@ class SDKOptionsBuilder:
             self._structural_context = "\n\n".join(parts)
         return self
 
+    def with_thread_history(self, history: str | None) -> "SDKOptionsBuilder":
+        """Inject issue/PR comment history into system prompt.
+
+        Thread history has medium priority — higher than structural context
+        (file tree/repomap) but lower than the workflow prompt. When the
+        budget is exceeded, structural is truncated first, then thread
+        history (from the top, dropping oldest comments), then the prompt.
+
+        Args:
+            history: Formatted thread history string (from
+                shared.thread_history.fetch_and_format_thread_history).
+
+        Returns:
+            Self for method chaining
+        """
+        if history and history.strip():
+            self._thread_history = history.strip()
+        return self
+
     async def with_repository_context_auto(
         self, repo: str, fetch_claude_md: bool = True, fetch_memory: bool = True
     ) -> "SDKOptionsBuilder":
@@ -680,7 +666,9 @@ class SDKOptionsBuilder:
         # Fetch memory from local volume
         if fetch_memory:
             try:
-                memory_path = f"/home/bot/agent-memory/{repo}/memory/index.md"
+                memory_path = str(
+                    Path.home() / ".claude" / "memory" / repo / "memory" / "index.md"
+                )
                 if os.path.exists(memory_path):
                     with open(memory_path, encoding="utf-8") as f:
                         memory_index = f.read()
@@ -692,6 +680,58 @@ class SDKOptionsBuilder:
         return self.with_repository_context(
             claude_md=claude_md, memory_index=memory_index
         )
+
+    # Build method
+
+    # ---------------------------------------------------------------------------
+    # Streaming / remote control
+    # ---------------------------------------------------------------------------
+
+    def with_streaming(self, bridge: "Any") -> "SDKOptionsBuilder":
+        """Enable streaming mode for real-time session observation.
+
+        Sets include_partial_messages=True on the final ClaudeAgentOptions,
+        which causes the SDK message loop to emit StreamEvent objects with
+        token-level deltas (text chunks, tool call inputs) in addition to
+        the normal AssistantMessage / ResultMessage objects.
+
+        The bridge itself is NOT passed to the SDK — it is returned via the
+        streaming_bridge property and must be passed separately to execute_sdk().
+
+        Args:
+            bridge: SessionStreamBridge instance (imported lazily to avoid
+                    circular imports in non-streaming code paths)
+
+        Returns:
+            Self for method chaining
+        """
+        self._streaming_bridge = bridge
+        self._include_partial_messages = True
+        return self
+
+    @property
+    def streaming_bridge(self) -> "Any":
+        """The SessionStreamBridge instance (if streaming is configured).
+
+        Pass this to execute_sdk(streaming_bridge=builder.streaming_bridge) to
+        enable real-time message publishing.
+        """
+        return self._streaming_bridge
+
+    def with_session_signature(self, session_url: str) -> "SDKOptionsBuilder":
+        """Append a session URL signature instruction to the system prompt.
+
+        When remote control is enabled, the agent should include the session
+        URL at the end of every GitHub comment it posts.
+
+        Args:
+            session_url: Full URL to the session proxy (human-readable format).
+
+        Returns:
+            Self for method chaining
+        """
+        self._session_signature = session_url
+        return self
 
     # Build method
 
@@ -742,18 +782,26 @@ class SDKOptionsBuilder:
             add_dirs=self._add_dirs,  # type: ignore[arg-type]
             stderr=lambda msg: logger.warning(f"SDK stderr: {msg}"),
             system_prompt=self._system_prompt,
+            resume=self._resume,
+            continue_conversation=self._continue_conversation,
+            fork_session=self._fork_session,
+            include_partial_messages=self._include_partial_messages,
+            max_buffer_size=self._max_buffer_size,
         )
 
     def _assemble_system_prompt(self) -> str | None:
         """Assemble the final system prompt with budget enforcement.
 
-        Two component tiers (highest priority first):
+        Four component tiers (highest priority first):
           1. Prompt content (workflow context, CLAUDE.md, memory index
              -- merged into a single block before this method runs)
-          2. Structural context (file tree + repomap)
+          2. Thread history (issue/PR comments -- truncated from top/oldest)
+          3. Structural context (file tree + repomap)
+          4. Session signature (always appended, never truncated)
 
-        Structural context is truncated first if the total exceeds
-        SYSTEM_PROMPT_BUDGET tokens.
+        When the budget is exceeded, structural is truncated first,
+        then thread history (dropping oldest comments), then prompt.
+        Session signature is always included.
         """
         # Collect components with their token costs
         components: list[tuple[str, str]] = []  # (label, text)
@@ -761,8 +809,24 @@ class SDKOptionsBuilder:
         if self._structural_context and self._structural_context.strip():
             components.append(("structural", self._structural_context.strip()))
 
+        if self._thread_history and self._thread_history.strip():
+            components.append(("thread_history", self._thread_history.strip()))
+
         if self._system_prompt and self._system_prompt.strip():
             components.append(("prompt", self._system_prompt.strip()))
+
+        # Session signature (always appended, never truncated)
+        if self._session_signature:
+            signature_instruction = (
+                "When posting any GitHub comment (via add_issue_comment or "
+                "pull_request_review_write), you MUST append this signature "
+                "at the very end of your comment:\n\n"
+                "---\n"
+                f"[Link to remote control this session]({self._session_signature})"
+                "\n\nDo not include this signature in PR descriptions, "
+                "commit messages, or any other output — only GitHub comments."
+            )
+            components.append(("signature", signature_instruction))
 
         if not components:
             return None
@@ -786,9 +850,9 @@ class SDKOptionsBuilder:
         budget_remaining = SYSTEM_PROMPT_BUDGET
         final_parts: list[str] = []
 
-        # Add prompt content first (highest priority — keep intact)
+        # Add prompt and signature first (highest priority — keep intact)
         for label, text in components:
-            if label != "structural":
+            if label not in ("structural", "thread_history"):
                 tokens = _estimate_tokens(text)
                 if tokens <= budget_remaining:
                     final_parts.append(text)
@@ -798,6 +862,23 @@ class SDKOptionsBuilder:
                     if truncated:
                         final_parts.append(truncated)
                         budget_remaining = 0
+                    break
+
+        # Add thread history with remaining budget (medium priority — truncate from top)
+        if budget_remaining > 0:
+            for label, text in components:
+                if label == "thread_history":
+                    tokens = _estimate_tokens(text)
+                    if tokens <= budget_remaining:
+                        final_parts.append(text)
+                        budget_remaining -= tokens
+                    else:
+                        truncated = _truncate_text(
+                            text, budget_remaining, from_top=True
+                        )
+                        if truncated:
+                            final_parts.append(truncated)
+                            budget_remaining = 0
                     break
 
         # Add structural context with remaining budget (lowest priority — truncate first)
@@ -823,12 +904,14 @@ class SDKOptionsBuilder:
         return result
 
 
-def _truncate_text(text: str, max_tokens: int) -> str | None:
-    """Truncate text to fit within a token budget by removing lines from the end.
+def _truncate_text(text: str, max_tokens: int, from_top: bool = False) -> str | None:
+    """Truncate text to fit within a token budget.
 
     Args:
         text: Text to truncate.
         max_tokens: Maximum tokens allowed.
+        from_top: If True, remove lines from the beginning (keeping the end).
+            Use this for thread history so newest comments are preserved.
 
     Returns:
         Truncated text, or None if even one line exceeds the budget.
@@ -842,19 +925,39 @@ def _truncate_text(text: str, max_tokens: int) -> str | None:
         return text
 
     lines = text.split("\n")
-    result_lines: list[str] = []
 
-    for line in lines:
-        candidate = "\n".join(result_lines + [line])
-        if _estimate(candidate) > max_tokens:
-            break
-        result_lines.append(line)
+    if from_top:
+        # Remove lines from the beginning, keeping the end
+        result_lines: list[str] = []
+        for line in reversed(lines):
+            candidate = "\n".join([line] + list(reversed(result_lines)))
+            if _estimate(candidate) > max_tokens:
+                break
+            result_lines.append(line)
+        result_lines.reverse()
 
-    if not result_lines:
-        return None
+        if not result_lines:
+            return None
 
-    result = "\n".join(result_lines)
-    if _estimate(result) > max_tokens:
-        return None
+        result = "\n".join(result_lines)
+        if _estimate(result) > max_tokens:
+            return None
 
-    return result + "\n... (truncated)"
+        return "... (older comments truncated)\n" + result
+    else:
+        # Remove lines from the end, keeping the beginning
+        result_lines = []
+        for line in lines:
+            candidate = "\n".join(result_lines + [line])
+            if _estimate(candidate) > max_tokens:
+                break
+            result_lines.append(line)
+
+        if not result_lines:
+            return None
+
+        result = "\n".join(result_lines)
+        if _estimate(result) > max_tokens:
+            return None
+
+        return result + "\n... (truncated)"

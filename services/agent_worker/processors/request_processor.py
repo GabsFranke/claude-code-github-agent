@@ -1,14 +1,20 @@
 """Request processor that creates jobs for sandbox execution."""
 
 import asyncio
+import json
 import logging
 import os
+import re
+import uuid
 from typing import TYPE_CHECKING, Literal, Optional
 
 import httpx
 from langfuse import Langfuse
 
 from shared import GitHubAuthService, JobQueue
+from shared.session_store import SessionStore, resolve_thread_type
+from shared.streaming_session import StreamingSessionStore
+from shared.utils import build_session_url
 from workflows import WorkflowEngine
 
 from .repository_context_loader import RepositoryContextLoader
@@ -17,6 +23,26 @@ if TYPE_CHECKING:
     from shared import HealthChecker, MultiRateLimiter
 
 logger = logging.getLogger(__name__)
+
+_SESSION_FLAG_RE = re.compile(
+    r"^\s*/\S+(?:\s+(-c|-f|--continue|--fork|--new))?(?:\s+(.*))?$"
+)
+
+
+def _parse_session_flag(user_query: str) -> tuple[str, str]:
+    """Extract session flag and remaining query from a slash command."""
+    m = _SESSION_FLAG_RE.match(user_query)
+    if not m:
+        return "", user_query  # type: ignore[unreachable]
+    flag = (m.group(1) or "").strip()
+    rest = (m.group(2) or "").strip()
+    if flag in ("-c", "--continue"):
+        return "resume", rest
+    if flag in ("-f", "--fork"):
+        return "fork", rest
+    if flag == "--new":
+        return "new", rest
+    return "", rest
 
 
 # Type alias for process return value
@@ -215,6 +241,70 @@ class RequestProcessor:
         # Get context profile for structural context generation
         context_profile = self.workflow_engine.get_context_profile(workflow_name)
 
+        # Get conversation config and resolve session
+        conversation_config = self.workflow_engine.get_conversation_config(
+            workflow_name
+        )
+        session_mode = "new"
+        session_id = None
+        conversation_summary = None
+        thread_type = resolve_thread_type(event_data)
+
+        if conversation_config.persist and issue_number:
+            try:
+                await self.job_queue.ensure_connected()
+                session_store = SessionStore(self.job_queue.redis)
+                existing_session = await session_store.get_session(
+                    repo=repo,
+                    thread_type=thread_type,
+                    thread_id=str(issue_number),
+                    workflow=workflow_name,
+                )
+                if existing_session:
+                    # Check if user explicitly requested continuation
+                    session_flag, _ = _parse_session_flag(user_query)
+                    if session_flag == "resume":
+                        session_mode = "resume"
+                        session_id = existing_session.session_id
+                    elif session_flag == "fork":
+                        session_mode = "fork"
+                        session_id = existing_session.session_id
+                    elif session_flag == "new":
+                        session_mode = "new"
+                    elif conversation_config.auto_continue:
+                        # Auto-continue for follow-up replies
+                        session_mode = "resume"
+                        session_id = existing_session.session_id
+
+                    # Check turn limit
+                    if (
+                        session_mode != "new"
+                        and existing_session.turn_count >= conversation_config.max_turns
+                    ):
+                        logger.info(
+                            f"Session reached turn limit "
+                            f"({existing_session.turn_count}/{conversation_config.max_turns}), "
+                            f"starting fresh"
+                        )
+                        session_mode = "new"
+                        session_id = None
+
+                    # Provide summary as fallback
+                    if (
+                        session_mode in ("resume", "continue")
+                        and conversation_config.summary_fallback
+                        and existing_session.summary
+                    ):
+                        conversation_summary = existing_session.summary
+
+                    if session_mode != "new":
+                        logger.info(
+                            f"Session: mode={session_mode}, "
+                            f"id={session_id[:8] if session_id else 'N/A'}..."
+                        )
+            except Exception as e:
+                logger.warning(f"Session lookup failed, starting fresh: {e}")
+
         # Fetch repository context (CLAUDE.md and memory) for system prompt
         # These will be injected by the SDK factory, not prepended to user prompt
         claude_md = None
@@ -246,16 +336,114 @@ class RequestProcessor:
         # Generate parent span ID for trace linking (if enabled)
         parent_span_id = None
         if os.getenv("LANGFUSE_TRACE_LINKING", "true").lower() == "true":
-            import uuid
-
             parent_span_id = str(uuid.uuid4())
             logger.debug(
                 f"Generated parent span ID for trace linking: {parent_span_id}"
             )
 
+        # ---------------------------------------------------------------------------
+        # Session streaming setup (remote control)
+        # ---------------------------------------------------------------------------
+        streaming_enabled = False
+        session_token = None
+        session_proxy_url = None
+
+        workflow_config = self.workflow_engine.workflows.get(workflow_name)
+        if workflow_config and workflow_config.streaming.enabled:
+            session_proxy_url = os.getenv("SESSION_PROXY_URL", "").strip()
+            if session_proxy_url:
+                try:
+                    await self.job_queue.ensure_connected()
+                    streaming_store = StreamingSessionStore(self.job_queue.redis)
+
+                    # Find existing streaming session (any status) for stable URLs
+                    existing_token = await streaming_store.find_session(
+                        repo=repo,
+                        issue_number=issue_number or 0,
+                        workflow=workflow_name,
+                        thread_type=thread_type,
+                    )
+                    if existing_token:
+                        session_token = existing_token
+                        # Set session back to running for the new invocation
+                        ttl_hours = conversation_config.ttl_hours
+                        await streaming_store.set_running(
+                            session_token, ttl_seconds=ttl_hours * 3600
+                        )
+                        logger.info(
+                            f"[Streaming] Reusing session {session_token[:8]}... "
+                            f"for {repo}#{issue_number}"
+                        )
+                    else:
+                        # Generate a new session token
+                        session_token = str(uuid.uuid4())
+                        ttl_hours = conversation_config.ttl_hours
+                        installation_id = event_data.get("installation_id", "")
+                        conversation_config_json = json.dumps(
+                            conversation_config.model_dump()
+                        )
+                        # Build the full human-readable URL (base + path)
+                        owner, _, repo_name = repo.partition("/")
+                        full_session_url = build_session_url(
+                            session_proxy_url,
+                            owner,
+                            repo_name,
+                            thread_type,
+                            issue_number or 0,
+                            workflow_name,
+                        )
+                        await streaming_store.create_session(
+                            token=session_token,
+                            repo=repo,
+                            issue_number=issue_number or 0,
+                            workflow=workflow_name,
+                            session_proxy_url=full_session_url,
+                            ttl_seconds=ttl_hours * 3600,
+                            installation_id=installation_id,
+                            initial_query=user_query,
+                            thread_type=thread_type,
+                            ref=final_ref,
+                            user=user,
+                            conversation_config=conversation_config_json,
+                        )
+                        logger.info(
+                            f"[Streaming] Created session {session_token[:8]}... "
+                            f"for {repo}#{issue_number}"
+                        )
+
+                    # Publish initial user query to the session history
+                    if user_query and session_token:
+                        try:
+                            from shared.session_stream import SessionStreamBridge
+
+                            bridge = SessionStreamBridge(
+                                token=session_token,
+                                redis=self.job_queue.redis,
+                            )
+                            await bridge.publish_user_message(user_query)
+                        except Exception as e:
+                            logger.warning(
+                                f"[Streaming] Failed to publish initial query: {e}"
+                            )
+
+                    streaming_enabled = True
+
+                except Exception as e:
+                    logger.warning(
+                        f"[Streaming] Failed to create streaming session: {e}. "
+                        "Continuing without streaming."
+                    )
+                    session_token = None
+                    streaming_enabled = False
+            else:
+                logger.warning(
+                    "[Streaming] SESSION_PROXY_URL not configured, "
+                    "streaming disabled for this job"
+                )
+
         # Create job in queue
         logger.info(f"Creating job with ref: {final_ref}")
-        job_id = await self.job_queue.create_job(
+        job_id: str = await self.job_queue.create_job(
             {
                 "repo": repo,
                 "issue_number": issue_number,
@@ -271,6 +459,22 @@ class RequestProcessor:
                 "event_data": event_data,
                 "parent_span_id": parent_span_id,  # For Langfuse trace linking
                 "context_profile": context_profile,  # Structural context config
+                # Session persistence fields
+                "session_mode": session_mode,
+                "session_id": session_id,
+                "thread_type": thread_type,
+                "thread_id": str(issue_number) if issue_number else "0",
+                "conversation_config": {
+                    "persist": conversation_config.persist,
+                    "ttl_hours": conversation_config.ttl_hours,
+                    "max_turns": conversation_config.max_turns,
+                    "auto_continue": conversation_config.auto_continue,
+                    "summary_fallback": conversation_config.summary_fallback,
+                },
+                "conversation_summary": conversation_summary,
+                # Streaming session fields (remote control)
+                "streaming_enabled": streaming_enabled,
+                "session_token": session_token,
             }
         )
 

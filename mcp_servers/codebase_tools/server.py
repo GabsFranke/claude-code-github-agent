@@ -146,7 +146,7 @@ async def handle_request(request: dict[str, Any]) -> dict[str, Any]:
         return {
             "protocolVersion": params.get("protocolVersion", "2024-11-05"),
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": "codebase-tools", "version": "1.0.0"},
+            "serverInfo": {"name": "codebase_tools", "version": "1.0.0"},
         }
 
     if method == "tools/list":
@@ -158,38 +158,62 @@ async def handle_request(request: dict[str, Any]) -> dict[str, Any]:
 
         try:
             if tool_name == "find_definitions":
-                result = find_definitions(
-                    symbol_name=arguments["symbol_name"],
-                )
                 return {
-                    "content": [{"type": "text", "text": json.dumps(result, indent=2)}]
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": json.dumps(
+                                find_definitions(symbol_name=arguments["symbol_name"]),
+                                indent=2,
+                            ),
+                        }
+                    ]
                 }
 
             if tool_name == "find_references":
-                result = find_references(
-                    symbol_name=arguments["symbol_name"],
-                )
                 return {
-                    "content": [{"type": "text", "text": json.dumps(result, indent=2)}]
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": json.dumps(
+                                find_references(symbol_name=arguments["symbol_name"]),
+                                indent=2,
+                            ),
+                        }
+                    ]
                 }
 
             if tool_name == "search_codebase":
-                result = search_codebase(
-                    pattern=arguments["pattern"],
-                    file_type=arguments.get("file_type"),
-                    max_results=arguments.get("max_results", 20),
-                )
                 return {
-                    "content": [{"type": "text", "text": json.dumps(result, indent=2)}]
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": json.dumps(
+                                search_codebase(
+                                    pattern=arguments["pattern"],
+                                    file_type=arguments.get("file_type"),
+                                    max_results=arguments.get("max_results", 20),
+                                ),
+                                indent=2,
+                            ),
+                        }
+                    ]
                 }
 
             if tool_name == "read_file_summary":
-                result = read_file_summary(
-                    file_path=arguments["file_path"],
-                    max_lines=arguments.get("max_lines", 80),
-                )
                 return {
-                    "content": [{"type": "text", "text": json.dumps(result, indent=2)}]
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": json.dumps(
+                                read_file_summary(
+                                    file_path=arguments["file_path"],
+                                    max_lines=arguments.get("max_lines", 80),
+                                ),
+                                indent=2,
+                            ),
+                        }
+                    ]
                 }
 
             return {"error": {"code": -32601, "message": f"Unknown tool: {tool_name}"}}
@@ -224,7 +248,7 @@ async def main():
     else:
         logger.warning("REPO_PATH not set, tools will be unavailable")
 
-    await run_server("codebase-tools", handle_request)
+    await run_server("codebase_tools", handle_request)
 
 
 if __name__ == "__main__":

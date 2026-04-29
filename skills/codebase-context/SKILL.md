@@ -32,7 +32,7 @@ The repomap is personalized toward files relevant to your task (e.g., changed fi
 
 ## Layer 2: Code Tools MCP (always available)
 
-The `codebase-tools` MCP server provides four tools for structured code exploration. These are more token-efficient than raw Bash grep because they return structured, minimal results.
+The `codebase_tools` MCP server provides four tools for structured code exploration. These are more token-efficient than raw Bash grep because they return structured, minimal results.
 
 ### `find_definitions(symbol_name)`
 
@@ -96,7 +96,7 @@ read_file_summary(file_path="shared/chunker.py")
 
 ## Layer 3: Semantic Search (conditional)
 
-The `semantic-search` MCP server provides embedding-based code search. It understands natural language queries and finds semantically similar code, even when exact keywords don't match.
+The `semantic_search` MCP server provides embedding-based code search. It understands natural language queries and finds semantically similar code, even when exact keywords don't match.
 
 **Only available when the indexing worker has indexed the repository** (requires `INDEXING_ENABLED=true` + `GEMINI_API_KEY`). If calls return empty results, the repo hasn't been indexed yet — fall back to Layers 1 and 2.
 

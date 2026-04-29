@@ -6,6 +6,12 @@ import logging
 import uuid
 from typing import Any
 
+from .constants import (
+    JOB_DATA_PREFIX,
+    JOB_STATUS_PREFIX,
+    JOB_TTL_SECONDS,
+    PENDING_JOB_QUEUE,
+)
 from .exceptions import QueueError
 
 logger = logging.getLogger(__name__)
@@ -25,7 +31,7 @@ class JobQueue:
         self,
         redis_url: str,
         password: str | None = None,
-        job_ttl: int = 3600,
+        job_ttl: int = JOB_TTL_SECONDS,
     ):
         """Initialize job queue.
 
@@ -40,12 +46,20 @@ class JobQueue:
         self.redis: Any = None
 
         # Redis keys
-        self.pending_queue = "agent:jobs:pending"
+        self.pending_queue = PENDING_JOB_QUEUE
         self.processing_set = "agent:jobs:processing"
-        self.job_data_prefix = "agent:job:data:"
+        self.job_data_prefix = JOB_DATA_PREFIX
         self.job_result_prefix = "agent:job:result:"
-        self.job_status_prefix = "agent:job:status:"
+        self.job_status_prefix = JOB_STATUS_PREFIX
         self.dead_letter_queue = "agent:jobs:dead_letter"
+
+    async def ensure_connected(self) -> None:
+        """Ensure the Redis connection is established.
+
+        Call this before accessing ``self.redis`` directly, e.g. when
+        passing it to other stores that need a live connection.
+        """
+        await self._connect()
 
     async def _connect(self) -> None:
         """Connect to Redis if not already connected."""
@@ -213,8 +227,11 @@ class JobQueue:
                         }
                     ),
                 )
-            except Exception:
-                pass  # Don't fail if dead letter queue fails
+            except Exception as dlq_err:
+                logger.error(
+                    f"CRITICAL: Failed to write to dead letter queue for job {job_id}: {dlq_err}",
+                    exc_info=True,
+                )
             return None
         except OSError as e:
             logger.error(f"Redis error getting next job: {e}", exc_info=True)

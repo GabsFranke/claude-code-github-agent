@@ -147,7 +147,14 @@ Review agents have access to efficient search tools for code exploration (docume
 
    **Option B: Full Review with Inline Comments**
    - Create pending review: `pull_request_review_write(method="create")`
-   - **Validate line numbers before posting**: Fetch the PR diff with `pull_request_read(method="get_diff")` and verify that each file:line you plan to comment on exists in the diff. Subagent findings use line numbers from local file reads, which may not match the PR diff — especially for large PRs with many additions/deletions.
+   - **Validate line numbers before posting**: GitHub only allows inline comments on lines that appear in the PR diff context (changed lines ± a few context lines). Subagent findings use line numbers from local file reads which often include unchanged lines not present in the diff.
+
+     **How to get valid line numbers:**
+     1. Run `git diff main -- <file>` for each file you want to comment on
+     2. Extract line numbers from the `+` (added) lines in the diff output — these are always valid comment targets
+     3. Do NOT use `grep -n` on working tree files to find line numbers for inline comments — `grep` returns every matching line in the file, but most of those lines won't be in the diff
+     4. For each subagent finding, match it to the nearest `+` line in the diff. If a finding's exact line isn't in the diff, find the closest changed line above it (e.g., if a function at line 540 has an issue but line 540 isn't in the diff, use the `def` line or a nearby changed line)
+     5. Verify by checking that your chosen line number appears as a `+` line or context line in the `git diff` output before calling `add_comment_to_pending_review`
    - Add comments (parallel is fine): `add_comment_to_pending_review()` for top 15-20 issues
    - Submit review: `pull_request_review_write(method="submit_pending", event="COMMENT"/"REQUEST_CHANGES"/"APPROVE")`
    - **Fallback for failed comments**: If any `add_comment_to_pending_review` calls fail (line not in diff), include those findings in a follow-up `add_issue_comment` on the PR with file path and description.

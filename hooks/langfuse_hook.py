@@ -17,8 +17,16 @@ from typing import Any
 # --- Langfuse import (fail-open) ---
 try:
     from langfuse import Langfuse, propagate_attributes
-except Exception:
+except ImportError:
+    # Langfuse not installed — observability will not be collected.
+    # Exit cleanly (not an error) since this is optional.
     sys.exit(0)
+except Exception as e:
+    # Unexpected import error (e.g., dependency conflict) — log and exit with error
+    import sys as _sys
+
+    print(f"ERROR: langfuse_hook failed to import: {e}", file=_sys.stderr)
+    _sys.exit(1)
 
 # --- Paths ---
 STATE_DIR = Path.home() / ".claude" / "state"

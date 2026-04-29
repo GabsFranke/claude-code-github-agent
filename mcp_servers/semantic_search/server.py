@@ -37,7 +37,7 @@ async def handle_request(request: dict[str, Any]) -> dict[str, Any]:
         return {
             "protocolVersion": params.get("protocolVersion", "2024-11-05"),
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": "semantic-search", "version": "1.0.0"},
+            "serverInfo": {"name": "semantic_search", "version": "1.0.0"},
         }
 
     if method == "tools/list":
@@ -126,7 +126,7 @@ async def main():
     from mcp_servers.base import run_server
 
     init_config()
-    await run_server("semantic-search", handle_request, cleanup_fn=cleanup)
+    await run_server("semantic_search", handle_request, cleanup_fn=cleanup)
 
 
 if __name__ == "__main__":
