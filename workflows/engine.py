@@ -271,7 +271,7 @@ class WorkflowEngine:
         self._validate_workflow_names()
 
         # Build lookup tables for fast routing
-        self._event_map: dict[str, str] = {}
+        self._event_map: dict[str, list[str]] = {}
         self._command_map: dict[str, str] = {}
         self._event_filters: dict[tuple[str, str], dict[str, Any]] = {}
 
@@ -282,7 +282,7 @@ class WorkflowEngine:
                     trigger = EventTrigger(event=entry)
                 else:
                     trigger = entry
-                self._event_map[trigger.event] = workflow_name
+                self._event_map.setdefault(trigger.event, []).append(workflow_name)
                 if trigger.filters:
                     self._event_filters[(workflow_name, trigger.event)] = (
                         trigger.filters
@@ -312,27 +312,27 @@ class WorkflowEngine:
 
     def get_workflow_for_event(
         self, event_type: str, action: str | None = None
-    ) -> str | None:
-        """Get workflow name for a GitHub event.
+    ) -> list[str]:
+        """Get candidate workflow names for a GitHub event.
 
         Args:
             event_type: GitHub event type (e.g., "pull_request")
             action: Event action (e.g., "opened")
 
         Returns:
-            Workflow name or None if no workflow handles this event
+            List of workflow names that handle this event. Empty if none.
         """
         # Try with action first (e.g., "pull_request.opened")
         if action:
             key = f"{event_type}.{action}"
             if key in self._event_map:
-                return self._event_map[key]
+                return list(self._event_map[key])
 
         # Try without action (e.g., "pull_request")
         if event_type in self._event_map:
-            return self._event_map[event_type]
+            return list(self._event_map[event_type])
 
-        return None
+        return []
 
     def should_skip_self(
         self, workflow_name: str, event_actor: str, bot_username: str
@@ -410,17 +410,12 @@ class WorkflowEngine:
             actual = resolve_path(payload, dot_path)
             expected_list = expected if isinstance(expected, list) else [expected]
             if actual not in expected_list:
-                logger.info(
-                    "Filter '%s' mismatch: got %r, expected one of %s",
+                logger.debug(
+                    "Filter '%s' mismatch for '%s': got %r, expected one of %s",
                     dot_path,
+                    workflow_name,
                     actual,
                     expected_list,
-                )
-                logger.debug(
-                    "Full filter context: workflow=%s event_key=%s payload_keys=%s",
-                    workflow_name,
-                    event_key,
-                    list(payload.keys()),
                 )
                 return False
 
