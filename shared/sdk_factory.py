@@ -108,6 +108,9 @@ class SDKOptionsBuilder:
         self._include_partial_messages: bool = False  # Enable StreamEvent output
         self._streaming_bridge = None  # SessionStreamBridge (not passed to SDK)
         self._session_signature: str | None = None  # Session URL for comment signature
+        self._max_buffer_size: int = int(
+            os.getenv("SDK_MAX_BUFFER_SIZE", "4194304")
+        )  # 4MB default (was 1MB)
 
     # Model selection methods
 
@@ -143,6 +146,18 @@ class SDKOptionsBuilder:
         self._model = os.getenv(
             "ANTHROPIC_DEFAULT_HAIKU_MODEL", "claude-haiku-4-5-20251001"
         )
+        return self
+
+    def with_max_buffer_size(self, size: int) -> "SDKOptionsBuilder":
+        """Override the default SDK max buffer size.
+
+        Args:
+            size: Max buffer size in bytes
+
+        Returns:
+            Self for method chaining
+        """
+        self._max_buffer_size = size
         return self
 
     # MCP server methods (à la carte)
@@ -771,6 +786,7 @@ class SDKOptionsBuilder:
             continue_conversation=self._continue_conversation,
             fork_session=self._fork_session,
             include_partial_messages=self._include_partial_messages,
+            max_buffer_size=self._max_buffer_size,
         )
 
     def _assemble_system_prompt(self) -> str | None:
