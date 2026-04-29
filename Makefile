@@ -75,8 +75,10 @@ test-integration: ## Run integration tests only
 
 # --- Ngrok ---
 
+NGROK_OPTS ?=
+
 ngrok: ## Start ngrok tunnel to webhook on port 10000
-	ngrok http 10000
+	ngrok http 10000 $(NGROK_OPTS)
 
 # --- Dev workflows ---
 

@@ -23,6 +23,8 @@ app = FastAPI(title="MCP HTTP Proxy")
 # Map of session_id -> asyncio.subprocess.Process
 sessions: dict[str, asyncio.subprocess.Process] = {}
 
+MAX_MCP_SESSIONS = 50
+
 MCP_SERVERS_DIR = os.getenv("MCP_SERVERS_DIR", "/app/mcp_servers")
 
 # Security: allowed prefixes for query parameters injected as env vars.
@@ -43,6 +45,26 @@ def _get_allowed_env_prefixes() -> tuple[str, ...]:
         else:
             _ALLOWED_ENV_PREFIXES = DEFAULT_ALLOWED_ENV_PREFIXES
     return _ALLOWED_ENV_PREFIXES
+
+
+# Safe base environment for subprocesses
+_SAFE_ENV_VARS = {"PATH", "HOME", "LANG", "TERM", "PWD", "SHELL", "USER"}
+
+
+def _build_subprocess_env() -> dict[str, str]:
+    """Build a minimal environment for MCP server subprocesses.
+
+    Only includes safe system vars and whitelisted prefixes.
+    Sensitive vars like ANTHROPIC_API_KEY, REDIS_PASSWORD, etc. are excluded.
+    """
+    env: dict[str, str] = {}
+    allowed_prefixes = _get_allowed_env_prefixes()
+    for key, value in os.environ.items():
+        if key in _SAFE_ENV_VARS:
+            env[key] = value
+        elif any(key.startswith(prefix) for prefix in allowed_prefixes):
+            env[key] = value
+    return env
 
 
 def _is_safe_server_name(name: str) -> bool:
@@ -88,6 +110,11 @@ def _resolve_and_validate_server_script(server_name: str) -> str:
     return resolved_script
 
 
+@app.get("/health")
+async def health():
+    return {"status": "ok", "active_sessions": len(sessions)}
+
+
 @app.get("/mcp/{server_name}/sse")
 async def mcp_sse(server_name: str, request: Request):
     """Establish an SSE connection to an MCP server.
@@ -96,6 +123,9 @@ async def mcp_sse(server_name: str, request: Request):
     Query parameters are passed to the subprocess as environment variables
     (only those matching the allowed prefix whitelist).
     """
+    if len(sessions) >= MAX_MCP_SESSIONS:
+        raise HTTPException(status_code=429, detail="Too many MCP sessions active")
+
     if not _is_safe_server_name(server_name):
         raise HTTPException(
             status_code=400,
@@ -106,7 +136,7 @@ async def mcp_sse(server_name: str, request: Request):
 
     # Read query parameters to pass as environment variables.
     # Security: only inject params whose uppercased key matches an allowed prefix.
-    env = os.environ.copy()
+    env = _build_subprocess_env()
     allowed_prefixes = _get_allowed_env_prefixes()
     for k, v in request.query_params.items():
         key_upper = k.upper()

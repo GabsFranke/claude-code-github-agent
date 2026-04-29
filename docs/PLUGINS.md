@@ -34,30 +34,27 @@ Plugins are auto-discovered at runtime — no code changes needed.
 PR review workflow with specialized agents.
 
 - **Commands**: `/review-pr`
-- **Agents**: code-reviewer, code-simplifier, comment-analyzer, pr-test-analyzer, silent-failure-hunter, type-design-analyzer
+- **Agents**: code-reviewer, code-architecture-reviewer, code-simplifier, comment-analyzer, pr-test-analyzer, silent-failure-hunter, type-design-analyzer
 - **Triggered by**: `pull_request.opened`, `/review`, `/pr-review`, `/review-pr`
+
+### pr-fix
+
+Implements fixes based on PR review feedback. Reads all review comments, deduplicates findings, and delegates implementation to subagents.
+
+- **Commands**: `/fix-review`
+- **Workflow**: `fix-review`
+- **Key files**: `plugins/pr-fix/commands/fix-review.md`
+- **Agents**: — (orchestrator pattern, delegates to Task tool agents)
+- **Triggered by**: `pull_request.labeled` (label: `fix-review`, `fix-it`, `pr-fix`), `/fix-it`
 
 ### ci-failure-toolkit
 
-CI failure analysis and auto-fix.
+CI failure analysis and auto-fix with specialized agents for different failure types.
 
-- **Commands**: `/fix-ci`
-- **Agents**: CI failure analysis agents
+- **Commands**: `/fix-ci`, `/fix-build`, `/fix-tests`
+- **Agents**: `build-failure-analyzer`, `deploy-failure-analyzer`, `lint-failure-analyzer`, `test-failure-analyzer`
 - **MCP Server**: GitHub Actions (stdio) — `get_job_logs`, `list_workflow_runs`, `get_workflow_run`, `get_workflow_run_jobs`
 - **Triggered by**: `workflow_job.completed` (failure only), `/fix-ci`, `/fix-build`, `/fix-tests`
-
-### retrospector
-
-Self-improvement — analyzes past sessions and proposes instruction improvements via PRs.
-
-- **Triggered by**: post-processing pipeline after each session (when `RETROSPECTOR_ENABLED=true`)
-
-### test-toolkit
-
-Generic task handler for testing tool/skill inheritance.
-
-- **Commands**: `/test`
-- **Triggered by**: `/test`
 
 ## Creating a Custom Plugin
 

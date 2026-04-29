@@ -204,6 +204,7 @@ class ControlChannel:
         self._task: asyncio.Task | None = None
         self._stopped = False
         self._interrupt_event = interrupt_event
+        self._pubsub: Any | None = None
 
     async def start(self) -> None:
         """Start background listener task."""
@@ -215,6 +216,7 @@ class ControlChannel:
         """Background task: subscribe and dispatch control messages."""
         try:
             pubsub = self._redis.pubsub()
+            self._pubsub = pubsub
             await pubsub.subscribe(self._channel)
             logger.info(f"[ControlChannel] Subscribed to {self._channel}")
 
@@ -276,3 +278,10 @@ class ControlChannel:
                 await self._task
             except asyncio.CancelledError:
                 pass
+        if self._pubsub:
+            try:
+                await self._pubsub.unsubscribe(self._channel)
+                await self._pubsub.aclose()
+            except Exception:
+                pass
+            self._pubsub = None

@@ -35,15 +35,16 @@ logger = logging.getLogger(__name__)
 # Lua scripts for atomic subscriber count operations
 _INCR_SUBSCRIBERS_LUA = """
 local count = redis.call('INCR', KEYS[1])
-redis.call('EXPIRE', KEYS[1], ARGV[1])
+if count == 1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
 return count
 """
 
 _DECR_SUBSCRIBERS_LUA = """
 local count = redis.call('DECR', KEYS[1])
-if count < 0 then
-    redis.call('SET', KEYS[1], 0)
-    count = 0
+if count <= 0 then
+    redis.call('DEL', KEYS[1])
 end
 return count
 """
@@ -56,7 +57,7 @@ def _session_key(token: str) -> str:
 def _lookup_key(
     repo: str, thread_id: str | int, workflow: str, thread_type: str = ""
 ) -> str:
-    safe_repo = repo.replace("/", ":")
+    safe_repo = repo.replace("/", "--")
     if thread_type:
         return SESSION_LOOKUP_KEY.format(
             f"{safe_repo}:{thread_type}:{thread_id}:{workflow}"
@@ -142,11 +143,13 @@ class StreamingSessionStore:
             "transcript_path": "",
             "run_count": "1",
         }
-        await self._redis.hset(key, mapping=data)
-        await self._redis.expire(key, ttl_seconds)
+        pipeline = self._redis.pipeline()
+        pipeline.hset(key, mapping=data)
+        pipeline.expire(key, ttl_seconds)
         # Register lookup so the token can be found by repo/issue/workflow
         lk = _lookup_key(repo, str(issue_number), workflow, thread_type=thread_type)
-        await self._redis.set(lk, token, ex=ttl_seconds)
+        pipeline.setex(lk, ttl_seconds, token)
+        await pipeline.execute()
         logger.info(
             f"[StreamingSessionStore] Created session {token[:8]}... "
             f"for {repo}#{issue_number} (ttl={ttl_seconds}s)"
@@ -403,7 +406,7 @@ class StreamingSessionStore:
             logger.error(
                 f"[StreamingSessionStore] Failed to drain inbox for {token}: {e}"
             )
-            raw_items = []
+            raise  # Don't silently drop messages
 
         messages: list[str] = []
         for raw in raw_items or []:

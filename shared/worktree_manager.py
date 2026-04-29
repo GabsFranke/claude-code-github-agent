@@ -5,12 +5,14 @@ the same conversation always lands in the same path.  This lets the SDK
 find its session files on disk and resume conversations seamlessly.
 """
 
+import asyncio
 import logging
 import shutil
 from pathlib import Path
 from typing import Any
 
 from shared import execute_git_command
+from shared.constants import sanitize_repo_key
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +37,7 @@ def get_worktree_path(
     Returns:
         Absolute :class:`~pathlib.Path` for the worktree.
     """
-    safe_repo = repo.replace("/", "--")
+    safe_repo = sanitize_repo_key(repo)
     return WORKTREE_BASE / safe_repo / f"{thread_type}-{thread_id}" / workflow
 
 
@@ -64,8 +66,7 @@ async def reuse_or_create_worktree(
     # Remove stale worktree if it exists (from a previous failed run)
     if worktree_path.exists():
         logger.warning(f"Removing stale worktree at {worktree_path}")
-        shutil.rmtree(worktree_path, ignore_errors=True)
-        # Also clean up from bare repo tracking
+        # Deregister from git FIRST, then remove files
         try:
             await execute_git_command(
                 [
@@ -78,7 +79,9 @@ async def reuse_or_create_worktree(
                 ]
             )
         except Exception as e:
-            logger.debug(f"Worktree remove failed (may not exist): {e}")
+            logger.debug(f"Git worktree remove failed (may not be registered): {e}")
+        # Fallback: remove any remaining files
+        await asyncio.to_thread(shutil.rmtree, worktree_path, ignore_errors=True)
 
     # Prune any stale worktree registrations (directory missing but registered)
     try:
@@ -169,8 +172,12 @@ async def _detect_default_branch(bare_repo: str) -> str:
 
 
 def get_project_dir_for_worktree(worktree_path: Path) -> Path:
-    """Return the SDK project directory for a given worktree path."""
-    safe_cwd = str(worktree_path).replace("/", "-").replace("\\", "-")
+    """Return the SDK project directory for a given worktree path.
+
+    Uses double-dash replacement to avoid collisions (e.g. owner--repo
+    and owner-repo would collide with single-dash).
+    """
+    safe_cwd = str(worktree_path).replace("/", "--").replace("\\", "--")
     return Path.home() / ".claude" / "projects" / safe_cwd
 
 
@@ -180,7 +187,7 @@ async def cleanup_worktrees(
     thread_id: str,
 ) -> None:
     """Remove all worktrees for a specific thread (PR close, issue close, etc.)."""
-    safe_repo = repo.replace("/", "--")
+    safe_repo = sanitize_repo_key(repo)
     thread_dir = WORKTREE_BASE / safe_repo / f"{thread_type}-{thread_id}"
 
     if not thread_dir.exists():
@@ -189,10 +196,12 @@ async def cleanup_worktrees(
     for workflow_dir in thread_dir.iterdir():
         if workflow_dir.is_dir():
             try:
-                shutil.rmtree(workflow_dir, ignore_errors=True)
+                await asyncio.to_thread(shutil.rmtree, workflow_dir, ignore_errors=True)
                 project_dir = get_project_dir_for_worktree(workflow_dir)
                 if project_dir.exists():
-                    shutil.rmtree(project_dir, ignore_errors=True)
+                    await asyncio.to_thread(
+                        shutil.rmtree, project_dir, ignore_errors=True
+                    )
                 logger.info(f"Cleaned up worktree and project dir: {workflow_dir}")
             except Exception as e:
                 logger.warning(f"Failed to clean up {workflow_dir}: {e}")
@@ -206,7 +215,7 @@ async def cleanup_worktrees(
 
 async def cleanup_worktrees_by_branch(repo: str, branch: str) -> None:
     """Remove worktrees tracking a specific branch (branch deleted event)."""
-    safe_repo = repo.replace("/", "--")
+    safe_repo = sanitize_repo_key(repo)
     repo_dir = WORKTREE_BASE / safe_repo
     if not repo_dir.exists():
         return
@@ -229,10 +238,14 @@ async def cleanup_worktrees_by_branch(repo: str, branch: str) -> None:
                     ]
                 )
                 if code == 0 and branch in (out or ""):
-                    shutil.rmtree(workflow_dir, ignore_errors=True)
+                    await asyncio.to_thread(
+                        shutil.rmtree, workflow_dir, ignore_errors=True
+                    )
                     project_dir = get_project_dir_for_worktree(workflow_dir)
                     if project_dir.exists():
-                        shutil.rmtree(project_dir, ignore_errors=True)
+                        await asyncio.to_thread(
+                            shutil.rmtree, project_dir, ignore_errors=True
+                        )
                     logger.info(
                         f"Cleaned up worktree and project dir for deleted branch: {workflow_dir}"
                     )

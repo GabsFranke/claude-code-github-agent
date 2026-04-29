@@ -1,10 +1,10 @@
 """Tests for shared/session_store.py — SessionStore and resolve_thread_type."""
 
-import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from shared.constants import DEFAULT_SESSION_TTL_HOURS
 from shared.session_store import SessionStore, _session_key, resolve_thread_type
 
 
@@ -18,6 +18,11 @@ def _make_redis():
     redis.exists = AsyncMock(return_value=1)
     redis.eval = AsyncMock(return_value=1)
     redis.scan = AsyncMock(return_value=(0, []))
+    redis.hset = AsyncMock(return_value=1)
+    redis.hsetnx = AsyncMock(return_value=1)
+    redis.hincrby = AsyncMock(return_value=1)
+    redis.hgetall = AsyncMock(return_value={})
+    redis.hget = AsyncMock(return_value=None)
     return redis
 
 
@@ -52,7 +57,7 @@ class TestResolveThreadType:
 
 class TestSessionStoreSaveSession:
     @pytest.mark.asyncio
-    async def test_new_session_calls_setex(self):
+    async def test_new_session_sets_fields(self):
         redis = _make_redis()
         store = SessionStore(redis_client=redis)
 
@@ -66,35 +71,18 @@ class TestSessionStoreSaveSession:
             ref="main",
         )
 
-        assert redis.setex.call_count == 1
-        key, ttl, value = redis.setex.call_args[0]
-        assert key == _session_key("owner/repo", "issue", "42", "review-pr")
-        assert ttl == 168 * 3600
-        data = json.loads(value)
-        assert data["session_id"] == "sess-123"
-        assert data["repo"] == "owner/repo"
-        assert data["turn_count"] == 0
-        assert data["status"] == "active"
+        assert redis.hset.call_count == 9
+        assert redis.hsetnx.call_count == 1
+        _, field, _ = redis.hsetnx.call_args[0]
+        assert field == "created_at"
+        assert redis.hincrby.call_count == 0
+        assert redis.expire.call_count == 1
+        _, ttl = redis.expire.call_args[0]
+        assert ttl == DEFAULT_SESSION_TTL_HOURS * 3600
 
     @pytest.mark.asyncio
     async def test_preserves_created_at(self):
         redis = _make_redis()
-        redis.get = AsyncMock(
-            return_value=json.dumps(
-                {
-                    "session_id": "old-sess",
-                    "repo": "owner/repo",
-                    "thread_type": "issue",
-                    "thread_id": "42",
-                    "workflow_name": "review-pr",
-                    "ref": "main",
-                    "worktree_path": "/tmp/old",
-                    "created_at": "2025-01-01T00:00:00Z",
-                    "last_run": "2025-01-01T00:00:00Z",
-                    "turn_count": 5,
-                }
-            )
-        )
         store = SessionStore(redis_client=redis)
 
         await store.save_session(
@@ -107,29 +95,13 @@ class TestSessionStoreSaveSession:
             ref="main",
         )
 
-        key, ttl, value = redis.setex.call_args[0]
-        data = json.loads(value)
-        assert data["created_at"] == "2025-01-01T00:00:00Z"
+        assert redis.hsetnx.call_count == 1
+        _, field, _ = redis.hsetnx.call_args[0]
+        assert field == "created_at"
 
     @pytest.mark.asyncio
     async def test_accumulates_turn_count(self):
         redis = _make_redis()
-        redis.get = AsyncMock(
-            return_value=json.dumps(
-                {
-                    "session_id": "old-sess",
-                    "repo": "owner/repo",
-                    "thread_type": "issue",
-                    "thread_id": "42",
-                    "workflow_name": "review-pr",
-                    "ref": "main",
-                    "worktree_path": "/tmp/old",
-                    "created_at": "2025-01-01T00:00:00Z",
-                    "last_run": "2025-01-01T00:00:00Z",
-                    "turn_count": 5,
-                }
-            )
-        )
         store = SessionStore(redis_client=redis)
 
         await store.save_session(
@@ -143,30 +115,14 @@ class TestSessionStoreSaveSession:
             turn_count=3,
         )
 
-        key, ttl, value = redis.setex.call_args[0]
-        data = json.loads(value)
-        assert data["turn_count"] == 8
+        assert redis.hincrby.call_count == 1
+        _, field, value = redis.hincrby.call_args[0]
+        assert field == "turn_count"
+        assert value == 3
 
     @pytest.mark.asyncio
     async def test_preserves_summary(self):
         redis = _make_redis()
-        redis.get = AsyncMock(
-            return_value=json.dumps(
-                {
-                    "session_id": "old-sess",
-                    "repo": "owner/repo",
-                    "thread_type": "issue",
-                    "thread_id": "42",
-                    "workflow_name": "review-pr",
-                    "ref": "main",
-                    "worktree_path": "/tmp/old",
-                    "created_at": "2025-01-01T00:00:00Z",
-                    "last_run": "2025-01-01T00:00:00Z",
-                    "turn_count": 0,
-                    "summary": "Existing summary",
-                }
-            )
-        )
         store = SessionStore(redis_client=redis)
 
         await store.save_session(
@@ -179,30 +135,16 @@ class TestSessionStoreSaveSession:
             ref="main",
         )
 
-        key, ttl, value = redis.setex.call_args[0]
-        data = json.loads(value)
-        assert data["summary"] == "Existing summary"
+        summary_calls = [
+            call
+            for call in redis.hset.call_args_list
+            if len(call[0]) >= 2 and call[0][1] == "summary"
+        ]
+        assert len(summary_calls) == 0
 
     @pytest.mark.asyncio
     async def test_preserves_streaming_token(self):
         redis = _make_redis()
-        redis.get = AsyncMock(
-            return_value=json.dumps(
-                {
-                    "session_id": "old-sess",
-                    "repo": "owner/repo",
-                    "thread_type": "issue",
-                    "thread_id": "42",
-                    "workflow_name": "review-pr",
-                    "ref": "main",
-                    "worktree_path": "/tmp/old",
-                    "created_at": "2025-01-01T00:00:00Z",
-                    "last_run": "2025-01-01T00:00:00Z",
-                    "turn_count": 0,
-                    "streaming_token": "stream-123",
-                }
-            )
-        )
         store = SessionStore(redis_client=redis)
 
         await store.save_session(
@@ -215,9 +157,12 @@ class TestSessionStoreSaveSession:
             ref="main",
         )
 
-        key, ttl, value = redis.setex.call_args[0]
-        data = json.loads(value)
-        assert data["streaming_token"] == "stream-123"
+        token_calls = [
+            call
+            for call in redis.hset.call_args_list
+            if len(call[0]) >= 2 and call[0][1] == "streaming_token"
+        ]
+        assert len(token_calls) == 0
 
     @pytest.mark.asyncio
     async def test_ttl_calculation(self):
@@ -235,7 +180,8 @@ class TestSessionStoreSaveSession:
             ttl_hours=24,
         )
 
-        key, ttl, value = redis.setex.call_args[0]
+        assert redis.expire.call_count == 1
+        _, ttl = redis.expire.call_args[0]
         assert ttl == 24 * 3600
 
 
@@ -243,21 +189,19 @@ class TestSessionStoreGetSession:
     @pytest.mark.asyncio
     async def test_returns_session_info(self):
         redis = _make_redis()
-        redis.get = AsyncMock(
-            return_value=json.dumps(
-                {
-                    "session_id": "sess-123",
-                    "repo": "owner/repo",
-                    "thread_type": "issue",
-                    "thread_id": "42",
-                    "workflow_name": "review-pr",
-                    "ref": "main",
-                    "worktree_path": "/tmp/wt",
-                    "created_at": "2025-01-01T00:00:00Z",
-                    "last_run": "2025-01-01T00:00:00Z",
-                    "turn_count": 0,
-                }
-            )
+        redis.hgetall = AsyncMock(
+            return_value={
+                b"session_id": b"sess-123",
+                b"repo": b"owner/repo",
+                b"thread_type": b"issue",
+                b"thread_id": b"42",
+                b"workflow_name": b"review-pr",
+                b"ref": b"main",
+                b"worktree_path": b"/tmp/wt",
+                b"created_at": b"2025-01-01T00:00:00Z",
+                b"last_run": b"2025-01-01T00:00:00Z",
+                b"turn_count": b"0",
+            }
         )
         store = SessionStore(redis_client=redis)
 
@@ -275,9 +219,9 @@ class TestSessionStoreGetSession:
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_returns_none_for_corrupt_json(self):
+    async def test_returns_none_for_corrupt_data(self):
         redis = _make_redis()
-        redis.get = AsyncMock(return_value="bad json{")
+        redis.hgetall = AsyncMock(return_value={b"bad": b"data"})
         store = SessionStore(redis_client=redis)
 
         result = await store.get_session("owner/repo", "issue", "42", "review-pr")
@@ -296,22 +240,20 @@ class TestSessionStoreCloseSession:
     @pytest.mark.asyncio
     async def test_cleans_up_streaming(self):
         redis = _make_redis()
-        redis.get = AsyncMock(
-            return_value=json.dumps(
-                {
-                    "session_id": "sess-123",
-                    "repo": "owner/repo",
-                    "thread_type": "issue",
-                    "thread_id": "42",
-                    "workflow_name": "review-pr",
-                    "ref": "main",
-                    "worktree_path": "/tmp/wt",
-                    "created_at": "2025-01-01T00:00:00Z",
-                    "last_run": "2025-01-01T00:00:00Z",
-                    "turn_count": 0,
-                    "streaming_token": "stream-123",
-                }
-            )
+        redis.hgetall = AsyncMock(
+            return_value={
+                b"session_id": b"sess-123",
+                b"repo": b"owner/repo",
+                b"thread_type": b"issue",
+                b"thread_id": b"42",
+                b"workflow_name": b"review-pr",
+                b"ref": b"main",
+                b"worktree_path": b"/tmp/wt",
+                b"created_at": b"2025-01-01T00:00:00Z",
+                b"last_run": b"2025-01-01T00:00:00Z",
+                b"turn_count": b"0",
+                b"streaming_token": b"stream-123",
+            }
         )
         store = SessionStore(redis_client=redis)
 
@@ -321,21 +263,19 @@ class TestSessionStoreCloseSession:
     @pytest.mark.asyncio
     async def test_no_streaming_cleanup_without_token(self):
         redis = _make_redis()
-        redis.get = AsyncMock(
-            return_value=json.dumps(
-                {
-                    "session_id": "sess-123",
-                    "repo": "owner/repo",
-                    "thread_type": "issue",
-                    "thread_id": "42",
-                    "workflow_name": "review-pr",
-                    "ref": "main",
-                    "worktree_path": "/tmp/wt",
-                    "created_at": "2025-01-01T00:00:00Z",
-                    "last_run": "2025-01-01T00:00:00Z",
-                    "turn_count": 0,
-                }
-            )
+        redis.hgetall = AsyncMock(
+            return_value={
+                b"session_id": b"sess-123",
+                b"repo": b"owner/repo",
+                b"thread_type": b"issue",
+                b"thread_id": b"42",
+                b"workflow_name": b"review-pr",
+                b"ref": b"main",
+                b"worktree_path": b"/tmp/wt",
+                b"created_at": b"2025-01-01T00:00:00Z",
+                b"last_run": b"2025-01-01T00:00:00Z",
+                b"turn_count": b"0",
+            }
         )
         store = SessionStore(redis_client=redis)
 
@@ -345,7 +285,7 @@ class TestSessionStoreCloseSession:
     @pytest.mark.asyncio
     async def test_still_deletes_on_corrupt_data(self):
         redis = _make_redis()
-        redis.get = AsyncMock(return_value="bad json{")
+        redis.hgetall = AsyncMock(return_value={b"bad": b"data"})
         store = SessionStore(redis_client=redis)
 
         await store.close_session("owner/repo", "issue", "42", "review-pr")
@@ -356,41 +296,40 @@ class TestSessionStoreExpireSession:
     @pytest.mark.asyncio
     async def test_sets_ttl_when_exists(self):
         redis = _make_redis()
+        redis.expire = AsyncMock(return_value=1)
         store = SessionStore(redis_client=redis)
 
         await store.expire_session("owner/repo", "issue", "42", "review-pr")
         assert redis.expire.call_count == 1
-        key, ttl = redis.expire.call_args[0]
+        _, ttl = redis.expire.call_args[0]
         assert ttl == 72 * 3600
 
     @pytest.mark.asyncio
     async def test_no_expire_when_not_found(self):
         redis = _make_redis()
-        redis.exists = AsyncMock(return_value=0)
+        redis.expire = AsyncMock(return_value=0)
         store = SessionStore(redis_client=redis)
 
         await store.expire_session("owner/repo", "issue", "42", "review-pr")
-        assert redis.expire.call_count == 0
+        assert redis.expire.call_count == 1
 
     @pytest.mark.asyncio
     async def test_propagates_to_streaming(self):
         redis = _make_redis()
-        redis.get = AsyncMock(
-            return_value=json.dumps(
-                {
-                    "session_id": "sess-123",
-                    "repo": "owner/repo",
-                    "thread_type": "issue",
-                    "thread_id": "42",
-                    "workflow_name": "review-pr",
-                    "ref": "main",
-                    "worktree_path": "/tmp/wt",
-                    "created_at": "2025-01-01T00:00:00Z",
-                    "last_run": "2025-01-01T00:00:00Z",
-                    "turn_count": 0,
-                    "streaming_token": "stream-123",
-                }
-            )
+        redis.hgetall = AsyncMock(
+            return_value={
+                b"session_id": b"sess-123",
+                b"repo": b"owner/repo",
+                b"thread_type": b"issue",
+                b"thread_id": b"42",
+                b"workflow_name": b"review-pr",
+                b"ref": b"main",
+                b"worktree_path": b"/tmp/wt",
+                b"created_at": b"2025-01-01T00:00:00Z",
+                b"last_run": b"2025-01-01T00:00:00Z",
+                b"turn_count": b"0",
+                b"streaming_token": b"stream-123",
+            }
         )
         store = SessionStore(redis_client=redis)
 
@@ -400,7 +339,7 @@ class TestSessionStoreExpireSession:
 
 class TestSessionStoreUpdateSummary:
     @pytest.mark.asyncio
-    async def test_calls_eval(self):
+    async def test_calls_hset(self):
         redis = _make_redis()
         store = SessionStore(redis_client=redis)
 
@@ -408,15 +347,15 @@ class TestSessionStoreUpdateSummary:
             "owner/repo", "issue", "42", "review-pr", "New summary"
         )
 
-        assert redis.eval.call_count == 1
-        lua_script = redis.eval.call_args[0][0]
-        assert "cjson.decode" in lua_script
-        assert "cjson.encode" in lua_script
+        assert redis.hset.call_count == 1
+        _, field, value = redis.hset.call_args[0]
+        assert field == "summary"
+        assert value == "New summary"
 
     @pytest.mark.asyncio
-    async def test_handles_eval_error(self):
+    async def test_handles_hset_error(self):
         redis = _make_redis()
-        redis.eval = AsyncMock(side_effect=RuntimeError("redis error"))
+        redis.hset = AsyncMock(side_effect=RuntimeError("redis error"))
         store = SessionStore(redis_client=redis)
 
         await store.update_summary(
@@ -426,7 +365,7 @@ class TestSessionStoreUpdateSummary:
 
 class TestSessionStoreIncrementTurnCount:
     @pytest.mark.asyncio
-    async def test_calls_eval(self):
+    async def test_calls_hincrby(self):
         redis = _make_redis()
         store = SessionStore(redis_client=redis)
 
@@ -434,14 +373,18 @@ class TestSessionStoreIncrementTurnCount:
             "owner/repo", "issue", "42", "review-pr", additional_turns=3
         )
 
-        assert redis.eval.call_count == 1
-        lua_script = redis.eval.call_args[0][0]
-        assert "turn_count" in lua_script
+        assert redis.hincrby.call_count == 1
+        _, field, value = redis.hincrby.call_args[0]
+        assert field == "turn_count"
+        assert value == 3
+        assert redis.hset.call_count == 1
+        _, field2, _ = redis.hset.call_args[0]
+        assert field2 == "last_run"
 
     @pytest.mark.asyncio
-    async def test_handles_eval_error(self):
+    async def test_handles_hincrby_error(self):
         redis = _make_redis()
-        redis.eval = AsyncMock(side_effect=RuntimeError("redis error"))
+        redis.hincrby = AsyncMock(side_effect=RuntimeError("redis error"))
         store = SessionStore(redis_client=redis)
 
         await store.increment_turn_count(
@@ -461,21 +404,19 @@ class TestSessionStoreListSessions:
                 ],
             )
         )
-        redis.get = AsyncMock(
-            return_value=json.dumps(
-                {
-                    "session_id": "sess-123",
-                    "repo": "owner/repo",
-                    "thread_type": "issue",
-                    "thread_id": "42",
-                    "workflow_name": "review-pr",
-                    "ref": "main",
-                    "worktree_path": "/tmp/wt",
-                    "created_at": "2025-01-01T00:00:00Z",
-                    "last_run": "2025-01-01T00:00:00Z",
-                    "turn_count": 0,
-                }
-            )
+        redis.hgetall = AsyncMock(
+            return_value={
+                b"session_id": b"sess-123",
+                b"repo": b"owner/repo",
+                b"thread_type": b"issue",
+                b"thread_id": b"42",
+                b"workflow_name": b"review-pr",
+                b"ref": b"main",
+                b"worktree_path": b"/tmp/wt",
+                b"created_at": b"2025-01-01T00:00:00Z",
+                b"last_run": b"2025-01-01T00:00:00Z",
+                b"turn_count": b"0",
+            }
         )
         store = SessionStore(redis_client=redis)
 
@@ -503,23 +444,21 @@ class TestSessionStoreListSessions:
                 ],
             )
         )
-        redis.get = AsyncMock(
+        redis.hgetall = AsyncMock(
             side_effect=[
-                "bad json{",
-                json.dumps(
-                    {
-                        "session_id": "sess-456",
-                        "repo": "owner/repo",
-                        "thread_type": "issue",
-                        "thread_id": "43",
-                        "workflow_name": "review-pr",
-                        "ref": "main",
-                        "worktree_path": "/tmp/wt",
-                        "created_at": "2025-01-01T00:00:00Z",
-                        "last_run": "2025-01-01T00:00:00Z",
-                        "turn_count": 0,
-                    }
-                ),
+                {b"bad": b"data"},
+                {
+                    b"session_id": b"sess-456",
+                    b"repo": b"owner/repo",
+                    b"thread_type": b"issue",
+                    b"thread_id": b"43",
+                    b"workflow_name": b"review-pr",
+                    b"ref": b"main",
+                    b"worktree_path": b"/tmp/wt",
+                    b"created_at": b"2025-01-01T00:00:00Z",
+                    b"last_run": b"2025-01-01T00:00:00Z",
+                    b"turn_count": b"0",
+                },
             ]
         )
         store = SessionStore(redis_client=redis)

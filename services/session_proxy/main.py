@@ -56,6 +56,14 @@ from shared.utils import build_session_url, url_segment_to_thread_type
 setup_logging(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 
+_SENSITIVE_SESSION_FIELDS = {"installation_id"}
+
+
+def _sanitize_session(session: dict) -> dict:
+    """Remove sensitive fields from session data before exposing to clients."""
+    return {k: v for k, v in session.items() if k not in _SENSITIVE_SESSION_FIELDS}
+
+
 # ---------------------------------------------------------------------------
 # Redis connection
 # ---------------------------------------------------------------------------
@@ -109,6 +117,42 @@ async def _create_job(job_data: dict) -> str:
     return job_id
 
 
+def _build_job_data(
+    session: dict,
+    content: str,
+    conversation_config: dict,
+    token: str,
+) -> dict:
+    """Build a job_data dict for session resume/rehydration."""
+    repo = session.get("repo", "")
+    issue_number_str = str(session.get("issue_number", "0"))
+    issue_number = int(issue_number_str) if issue_number_str.isdigit() else 0
+    workflow = session.get("workflow", "generic")
+    session_id = session.get("session_id", "")
+    thread_type = session.get("thread_type", "issue")
+    ref = session.get("ref", "main")
+    user = session.get("user", "remote-control")
+    installation_id = session.get("installation_id", "")
+    return {
+        "repo": repo,
+        "issue_number": issue_number,
+        "prompt": content,
+        "user": user,
+        "workflow_name": workflow,
+        "ref": ref,
+        "session_mode": "resume" if session_id else "new",
+        "session_id": session_id or None,
+        "session_token": token,
+        "streaming_enabled": True,
+        "installation_id": installation_id,
+        "thread_type": thread_type,
+        "thread_id": str(issue_number),
+        "conversation_config": conversation_config,
+        "user_query": content,
+        "event_data": {"event_type": "remote_control"},
+    }
+
+
 # ---------------------------------------------------------------------------
 # Resolve endpoint — returns session metadata for human-readable URLs
 # ---------------------------------------------------------------------------
@@ -158,10 +202,16 @@ async def _handle_resume_message(token: str, content: str, session: dict) -> Non
     if conversation_config_json:
         try:
             conversation_config = json.loads(conversation_config_json)
-        except Exception:
+        except (json.JSONDecodeError, TypeError, ValueError) as e:
+            logger.warning(
+                f"Invalid conversation_config for {token}: {e}. "
+                f"Falling back to defaults."
+            )
             conversation_config = {
                 "persist": True,
                 "ttl_hours": DEFAULT_SESSION_TTL_HOURS,
+                "max_turns": 20,
+                "auto_continue": False,
             }
 
     # Ensure persist is True for resumed sessions
@@ -193,35 +243,7 @@ async def _handle_resume_message(token: str, content: str, session: dict) -> Non
     # run_start when it starts processing the job, which avoids a duplicate
     # event if both session_proxy and sandbox_worker emit it.
 
-    # Build job data from session metadata
-    repo = session.get("repo", "")
-    issue_number = int(session.get("issue_number", "0"))
-    workflow = session.get("workflow", "generic")
-    session_id = session.get("session_id", "")
-    thread_type = session.get("thread_type", "issue")
-    ref = session.get("ref", "main")
-    user = session.get("user", "remote-control")
-    installation_id = session.get("installation_id", "")
-
-    job_data = {
-        "repo": repo,
-        "issue_number": issue_number,
-        "prompt": content,
-        "user": user,
-        "workflow_name": workflow,
-        "ref": ref,
-        "session_mode": "resume" if session_id else "new",
-        "session_id": session_id or None,
-        "session_token": token,
-        "streaming_enabled": True,
-        "installation_id": installation_id,
-        "thread_type": thread_type,
-        "thread_id": str(issue_number),
-        "conversation_config": conversation_config,
-        "user_query": content,
-        "event_data": {"event_type": "remote_control"},
-    }
-
+    job_data = _build_job_data(session, content, conversation_config, token)
     job_id = await _create_job(job_data)
     logger.info(
         f"[Resume] Created job {job_id} for session {token[:8]}... "
@@ -300,12 +322,10 @@ async def resolve_session(
         owner, repo, thread_type_segment, number, workflow
     )
     if token is not None and session is not None:
-        # Filter sensitive fields from session data before sending to browser
-        safe_session = {k: v for k, v in session.items() if k != "installation_id"}
         return {
             "status": "found",
             "token": token,
-            "session": safe_session,
+            "session": _sanitize_session(session),
         }
 
     # Fallback: search transcript files for a matching session
@@ -313,8 +333,6 @@ async def resolve_session(
     if transcript_path is not None:
         # Merge sidecar metadata (installation_id, ref, etc.) for re-invoke
         meta = load_transcript_meta(transcript_path)
-        # Filter installation_id from data sent to browser
-        safe_meta = {k: v for k, v in meta.items() if k != "installation_id"}
         session_proxy_url = os.getenv("SESSION_PROXY_URL", "").strip()
         full_url = build_session_url(
             session_proxy_url, owner, repo, thread_type, issue_number, workflow
@@ -330,7 +348,7 @@ async def resolve_session(
                 "thread_type": thread_type,
                 "status": "completed",
                 "session_proxy_url": full_url,
-                **safe_meta,
+                **_sanitize_session(meta),
             },
         }
 
@@ -423,8 +441,6 @@ async def _resolve_token_from_path(
     if transcript_path is not None:
         t_token = f"transcript:{transcript_path.stem}"
         meta = load_transcript_meta(transcript_path)
-        # Filter installation_id from data sent to browser
-        safe_meta = {k: v for k, v in meta.items() if k != "installation_id"}
         session_proxy_url = os.getenv("SESSION_PROXY_URL", "").strip()
         full_url = build_session_url(
             session_proxy_url, owner, repo, thread_type, issue_number, workflow
@@ -437,7 +453,7 @@ async def _resolve_token_from_path(
             "thread_type": thread_type,
             "status": "completed",
             "session_proxy_url": full_url,
-            **safe_meta,
+            **_sanitize_session(meta),
         }
 
     return None, None
@@ -516,11 +532,14 @@ async def websocket_session(
                 f"completed session {session_id[:8]}..."
             )
 
-        # Send session metadata + completion signals
-        # Filter installation_id from data sent to browser
-        safe_session = {k: v for k, v in session.items() if k != "installation_id"}
         await websocket.send_text(
-            json.dumps({"type": "session_meta", "data": safe_session, "ts": _now_iso()})
+            json.dumps(
+                {
+                    "type": "session_meta",
+                    "data": _sanitize_session(session),
+                    "ts": _now_iso(),
+                }
+            )
         )
         await websocket.send_text(
             json.dumps(
@@ -558,11 +577,14 @@ async def websocket_session(
             await websocket.close(code=4500, reason="Session creation failed")
             return
 
-        # Send updated session_meta so browser knows we're now live
-        # Filter installation_id from data sent to browser
-        safe_session = {k: v for k, v in session.items() if k != "installation_id"}
         await websocket.send_text(
-            json.dumps({"type": "session_meta", "data": safe_session, "ts": _now_iso()})
+            json.dumps(
+                {
+                    "type": "session_meta",
+                    "data": _sanitize_session(session),
+                    "ts": _now_iso(),
+                }
+            )
         )
         history_sent = True
 
@@ -580,10 +602,14 @@ async def websocket_session(
                     break
             logger.info(f"[WS] Sent {len(history)} history messages to new client")
 
-        # Filter installation_id from data sent to browser
-        safe_session = {k: v for k, v in session.items() if k != "installation_id"}
         await websocket.send_text(
-            json.dumps({"type": "session_meta", "data": safe_session, "ts": _now_iso()})
+            json.dumps(
+                {
+                    "type": "session_meta",
+                    "data": _sanitize_session(session),
+                    "ts": _now_iso(),
+                }
+            )
         )
 
     logger.info(
@@ -694,30 +720,13 @@ async def _rehydrate_transcript_session(
                 raw = session.get("conversation_config", "")
                 if raw:
                     conversation_config = json.loads(raw)
-            except Exception as e:
+            except (json.JSONDecodeError, TypeError, ValueError) as e:
                 logger.warning(
                     f"[WS] Failed to parse conversation_config for rehydration: {e}"
                 )
             conversation_config.setdefault("persist", True)
 
-            job_data = {
-                "repo": repo,
-                "issue_number": issue_number,
-                "prompt": content,
-                "user": session.get("user", "remote-control"),
-                "workflow_name": workflow,
-                "ref": session.get("ref", "main"),
-                "session_mode": "resume" if session_id else "new",
-                "session_id": session_id or None,
-                "session_token": new_token,
-                "streaming_enabled": True,
-                "installation_id": session.get("installation_id", ""),
-                "thread_type": session.get("thread_type", "issue"),
-                "thread_id": str(issue_number),
-                "conversation_config": conversation_config,
-                "user_query": content,
-                "event_data": {"event_type": "remote_control"},
-            }
+            job_data = _build_job_data(session, content, conversation_config, new_token)
 
             job_id = await _create_job(job_data)
             await store.set_running(new_token)

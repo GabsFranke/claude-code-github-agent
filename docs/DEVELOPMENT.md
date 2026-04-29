@@ -90,7 +90,12 @@ claude-code-github-agent/
 │   ├── repo_sync/            # Bare repository cache management
 │   ├── memory_worker/        # Memory extraction from session transcripts
 │   ├── retrospector_worker/  # Self-improvement: analyzes sessions, opens PRs
-│   └── indexing_worker/      # Semantic code indexing (Gemini + Qdrant)
+│   ├── indexing_worker/      # Semantic code indexing (Gemini + Qdrant)
+│   └── session_proxy/        # WebSocket streaming bridge for browser sessions
+│       ├── main.py            # FastAPI app with WebSocket + REST endpoints
+│       ├── transcript_loader.py  # SDK transcript file loading for history replay
+│       ├── client/            # React TypeScript SPA for live session viewing
+│       └── Dockerfile
 ├── shared/                   # Shared utilities and infrastructure
 │   ├── config.py             # Pydantic Settings models
 │   ├── sdk_factory.py        # SDKOptionsBuilder (composable SDK config)
@@ -107,6 +112,14 @@ claude-code-github-agent/
 │   ├── ts_languages.py       # 10-language tree-sitter registry
 │   ├── file_tree.py          # File tree generation + Qdrant collection naming
 │   ├── transcript_parser.py  # JSONL transcript parsing
+│   ├── session_store.py      # SessionStore — Redis-backed persistent sessions with TTL
+│   ├── streaming_session.py   # StreamingSessionStore — streaming session metadata
+│   ├── session_stream.py     # SessionStreamBridge + ControlChannel — Redis pub/sub bridge
+│   ├── worktree_manager.py   # Deterministic worktree paths and persistence logic
+│   ├── worktree_lock.py      # WorktreeLock — distributed locking with interrupt-continue
+│   ├── thread_history.py     # ThreadHistoryConfig + fetch_and_format_thread_history
+│   ├── constants.py          # Centralized TTLs, Redis key prefixes, queue/channel names
+│   ├── mcp_json_writer.py    # Generates .mcp.json for worktree MCP server discovery
 │   ├── health.py             # Health checker
 │   ├── exceptions.py         # Custom exception hierarchy (15 classes)
 │   └── ...                   # retry, signals, git_utils, http_client, etc.
@@ -119,6 +132,7 @@ claude-code-github-agent/
 │   ├── pr-review-toolkit/    # PR review workflow (7 agents, review-pr command)
 │   ├── ci-failure-toolkit/   # CI failure analysis (4 agents, GitHub Actions MCP)
 │   ├── test-toolkit/         # Generic task testing
+│   ├── pr-fix/               # PR review feedback fixes (fix-review command)
 │   └── retrospector/         # Self-improvement analysis
 ├── subagents/                # Core subagent definitions
 │   ├── architecture_reviewer.py
@@ -135,7 +149,7 @@ claude-code-github-agent/
 ├── repo_setup/               # Repository setup engine + config
 ├── workflows.yaml            # Workflow definitions (single source of truth)
 ├── repo-setup.yaml           # Repository setup commands
-├── tests/                    # Test suite (~550+ tests across 45 files)
+├── tests/                    # Test suite (~650+ tests across 52 files)
 └── docs/                     # Documentation
 ```
 
@@ -214,6 +228,11 @@ tests/
 │   ├── test_rate_limiter.py             # Token bucket rate limiting
 │   ├── test_repomap.py                  # Tag extraction + PageRank ranking
 │   ├── test_ts_languages.py             # 10-language registry
+│   ├── test_session_store.py            # Session persistence (save, get, close, expire)
+│   ├── test_streaming_session.py        # Streaming session metadata
+│   ├── test_session_stream.py           # Redis pub/sub bridge
+│   ├── test_thread_history.py           # GitHub comment history fetching
+│   ├── test_worktree_lock.py            # Distributed worktree locking
 │   └── ...                              # chunker, file_tree, retry, health, etc.
 ├── unit/                                # Cross-cutting unit tests
 │   ├── test_sdk_executor.py             # SDK execution + retry
@@ -301,6 +320,7 @@ Volumes: Minimal + langfuse-db-data, langfuse-clickhouse-data, langfuse-clickhou
 | worker              | python:3.12-slim | Healthcheck                                                        |
 | sandbox_worker      | python:3.12-slim | Non-root `bot` user, OS tools (git, jq, ripgrep), plugins + skills |
 | mcp_proxy           | python:3.12-slim | SSE proxy for stdio MCP servers (port 18000)                       |
+| session_proxy       | python:3.12-slim | FastAPI + WebSocket bridge for real-time session streaming (port 10001) |
 | repo_sync           | python:3.12-slim | Non-root `bot` user, git                                           |
 | memory_worker       | python:3.12-slim | Non-root `bot` user                                                |
 | retrospector_worker | python:3.12-slim | Non-root `bot` user, git                                           |
@@ -314,7 +334,7 @@ Each sandbox worker processes one job at a time. Scale based on your expected ac
 # Using Make (recommended)
 make up SANDBOX=10                     # Scale sandbox workers
 make up SANDBOX=10 MEMORY=2            # Scale multiple worker types
-make start SANDBOX=10                  # Build, scale, and start ngrok
+make start SANDBOX=10                  # Build, start services, and open ngrok tunnel (equivalent to `make build up ngrok`)
 
 # Using docker-compose directly
 docker-compose up --scale sandbox_worker=10 -d

@@ -5,7 +5,6 @@ users reply in the same thread.  Sessions are scoped by repo + thread type +
 thread ID + workflow, and expire after a configurable TTL.
 """
 
-import json
 import logging
 from datetime import UTC, datetime
 from typing import Any
@@ -95,13 +94,13 @@ def resolve_thread_type(event_data: dict) -> str:
 
 def _session_key(repo: str, thread_type: str, thread_id: str, workflow: str) -> str:
     """Build the Redis key for a session mapping."""
-    safe_repo = repo.replace("/", ":")
+    safe_repo = repo.replace("/", "--")
     return f"session:map:{safe_repo}:{thread_type}:{thread_id}:{workflow}"
 
 
 def _session_pattern(repo: str) -> str:
     """Build a Redis SCAN pattern for all sessions of a repo."""
-    safe_repo = repo.replace("/", ":")
+    safe_repo = repo.replace("/", "--")
     return f"session:map:{safe_repo}:*"
 
 
@@ -117,6 +116,7 @@ class SessionStore:
 
     def __init__(self, redis_client: RedisClient):
         self.redis = redis_client
+        self._streaming_store: Any | None = None
 
     async def save_session(
         self,
@@ -129,47 +129,43 @@ class SessionStore:
         ref: str,
         turn_count: int = 0,
         summary: str | None = None,
-        ttl_hours: int = 168,
+        ttl_hours: int = DEFAULT_SESSION_TTL_HOURS,
         streaming_token: str | None = None,
     ) -> None:
         """Create or update a session mapping in Redis."""
         key = _session_key(repo, thread_type, thread_id, workflow)
         now = datetime.now(UTC).isoformat()
 
-        existing_raw = await self.redis.get(key)
-        if existing_raw:
-            existing = json.loads(existing_raw)
-            created_at = existing.get("created_at", now)
-            turn_count = existing.get("turn_count", 0) + turn_count
-            if summary is None:
-                summary = existing.get("summary")
-            if streaming_token is None:
-                streaming_token = existing.get("streaming_token")
-        else:
-            created_at = now
-
-        info = SessionInfo(
-            session_id=session_id,
-            repo=repo,
-            thread_type=thread_type,
-            thread_id=str(thread_id),
-            workflow_name=workflow,
-            ref=ref,
-            worktree_path=str(worktree_path),
-            created_at=created_at,
-            last_run=now,
-            turn_count=turn_count,
-            status="active",
-            summary=summary,
-            streaming_token=streaming_token,
-        )
-
-        ttl_seconds = ttl_hours * 3600
-        await self.redis.setex(key, ttl_seconds, info.model_dump_json())
+        # Atomic: set fields individually (no read-modify-write race)
+        session_data = {
+            "session_id": session_id,
+            "repo": repo,
+            "thread_type": thread_type,
+            "thread_id": str(thread_id),
+            "workflow_name": workflow,
+            "ref": ref,
+            "worktree_path": str(worktree_path),
+            "last_run": now,
+            "status": "active",
+        }
+        redis: Any = self.redis
+        for field, value in session_data.items():
+            await redis.hset(key, field, str(value))
+        # Preserve created_at if it exists, otherwise set it
+        await redis.hsetnx(key, "created_at", now)
+        # Accumulate turn_count atomically
+        if turn_count:
+            await redis.hincrby(key, "turn_count", turn_count)
+        # Only update summary and streaming_token if explicitly provided
+        if summary is not None:
+            await redis.hset(key, "summary", summary)
+        if streaming_token is not None:
+            await redis.hset(key, "streaming_token", streaming_token)
+        await redis.expire(key, ttl_hours * 3600)
         logger.info(
             f"Saved session {session_id[:8]}... for "
             f"{repo}/{thread_type}/{thread_id}/{workflow} "
-            f"(turns={info.turn_count}, ttl={ttl_hours}h)"
+            f"(ttl={ttl_hours}h)"
         )
 
     async def get_session(
@@ -177,11 +173,17 @@ class SessionStore:
     ) -> SessionInfo | None:
         """Look up an active session, returning None if absent or expired."""
         key = _session_key(repo, thread_type, thread_id, workflow)
-        raw = await self.redis.get(key)
-        if not raw:
+        redis: Any = self.redis
+        data = await redis.hgetall(key)
+        if not data:
             return None
+        decoded: dict[str, Any] = {}
+        for k, v in data.items():
+            dk = k.decode() if isinstance(k, bytes) else k
+            dv = v.decode() if isinstance(v, bytes) else v
+            decoded[dk] = dv
         try:
-            return SessionInfo.model_validate_json(raw)  # type: ignore[no-any-return]
+            return SessionInfo.model_validate(decoded)  # type: ignore[no-any-return]
         except Exception as e:
             logger.warning(f"Corrupt session data at {key}: {e}")
             return None
@@ -194,16 +196,15 @@ class SessionStore:
         Also cleans up the associated streaming session and lookup key.
         """
         key = _session_key(repo, thread_type, thread_id, workflow)
-        raw = await self.redis.get(key)
-        if raw:
-            try:
-                info = SessionInfo.model_validate_json(raw)
-                if info.streaming_token:
+        info = await self.get_session(repo, thread_type, thread_id, workflow)
+        if info:
+            if info.streaming_token:
+                try:
                     await self._cleanup_streaming(
                         info.streaming_token, repo, thread_id, workflow, thread_type
                     )
-            except Exception as e:
-                logger.warning(f"Failed to clean up streaming for {key}: {e}")
+                except Exception as e:
+                    logger.warning(f"Failed to clean up streaming for {key}: {e}")
         await self.redis.delete(key)
         logger.info(f"Closed session for {repo}/{thread_type}/{thread_id}/{workflow}")
 
@@ -217,10 +218,16 @@ class SessionStore:
                 cursor=cursor, match=pattern, count=100
             )
             for key in keys:
-                raw = await self.redis.get(key)
-                if raw:
+                redis: Any = self.redis
+                data = await redis.hgetall(key)
+                if data:
                     try:
-                        sessions.append(SessionInfo.model_validate_json(raw))
+                        decoded: dict[str, Any] = {}
+                        for k, v in data.items():
+                            dk = k.decode() if isinstance(k, bytes) else k
+                            dv = v.decode() if isinstance(v, bytes) else v
+                            decoded[dk] = dv
+                        sessions.append(SessionInfo.model_validate(decoded))
                     except Exception as e:
                         logger.warning(f"Skipping corrupt session at {key}: {e}")
             if cursor == 0:
@@ -240,27 +247,28 @@ class SessionStore:
         Also propagates TTL to the associated streaming session.
         """
         key = _session_key(repo, thread_type, thread_id, workflow)
-        if await self.redis.exists(key):
-            await self.redis.expire(key, ttl_hours * 3600)
-            # Propagate TTL to streaming session
-            raw = await self.redis.get(key)
-            if raw:
-                try:
-                    info = SessionInfo.model_validate_json(raw)
-                    if info.streaming_token:
-                        await self._propagate_streaming_ttl(
-                            info.streaming_token,
-                            repo,
-                            thread_id,
-                            workflow,
-                            ttl_hours,
-                            thread_type,
-                        )
-                except Exception as e:
-                    logger.warning(f"Failed to propagate streaming TTL for {key}: {e}")
-            logger.info(
-                f"Set TTL to {ttl_hours}h for session {repo}/{thread_type}/{thread_id}/{workflow}"
-            )
+        result = await self.redis.expire(key, ttl_hours * 3600)
+        if not result:
+            logger.debug(f"Session key {key} does not exist, skipping TTL propagation")
+            return
+        # Propagate TTL to streaming session
+        info = await self.get_session(repo, thread_type, thread_id, workflow)
+        if info:
+            try:
+                if info.streaming_token:
+                    await self._propagate_streaming_ttl(
+                        info.streaming_token,
+                        repo,
+                        thread_id,
+                        workflow,
+                        ttl_hours,
+                        thread_type,
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to propagate streaming TTL for {key}: {e}")
+        logger.info(
+            f"Set TTL to {ttl_hours}h for session {repo}/{thread_type}/{thread_id}/{workflow}"
+        )
 
     async def update_summary(
         self,
@@ -270,25 +278,11 @@ class SessionStore:
         workflow: str,
         summary: str,
     ) -> None:
-        """Update the conversation summary for a session (atomic via Lua)."""
+        """Update the conversation summary for a session."""
         key = _session_key(repo, thread_type, thread_id, workflow)
-
-        lua_update_summary = """
-        local val = redis.call('GET', KEYS[1])
-        if not val then return 0 end
-        local data = cjson.decode(val)
-        data['summary'] = ARGV[1]
-        local ttl = redis.call('TTL', KEYS[1])
-        local new_val = cjson.encode(data)
-        if ttl > 0 then
-            redis.call('SETEX', KEYS[1], ttl, new_val)
-        else
-            redis.call('SET', KEYS[1], new_val)
-        end
-        return 1
-        """
+        redis: Any = self.redis
         try:
-            await self.redis.eval(lua_update_summary, 1, key, summary)  # type: ignore[misc]
+            await redis.hset(key, "summary", summary)
         except Exception as e:
             logger.warning(f"Failed to update summary for {key}: {e}")
 
@@ -300,29 +294,13 @@ class SessionStore:
         workflow: str,
         additional_turns: int,
     ) -> None:
-        """Add to the cumulative turn count after a continuation (atomic via Lua)."""
+        """Add to the cumulative turn count after a continuation."""
         key = _session_key(repo, thread_type, thread_id, workflow)
         last_run = datetime.now(UTC).isoformat()
-
-        lua_increment_turns = """
-        local val = redis.call('GET', KEYS[1])
-        if not val then return 0 end
-        local data = cjson.decode(val)
-        data['turn_count'] = (data['turn_count'] or 0) + tonumber(ARGV[1])
-        data['last_run'] = ARGV[2]
-        local ttl = redis.call('TTL', KEYS[1])
-        local new_val = cjson.encode(data)
-        if ttl > 0 then
-            redis.call('SETEX', KEYS[1], ttl, new_val)
-        else
-            redis.call('SET', KEYS[1], new_val)
-        end
-        return 1
-        """
+        redis: Any = self.redis
         try:
-            await self.redis.eval(
-                lua_increment_turns, 1, key, str(additional_turns), last_run  # type: ignore[misc]
-            )
+            await redis.hincrby(key, "turn_count", additional_turns)
+            await redis.hset(key, "last_run", last_run)
         except Exception as e:
             logger.warning(f"Failed to increment turn count for {key}: {e}")
 
@@ -363,11 +341,13 @@ class SessionStore:
         thread_type: str = "",
     ) -> None:
         """Propagate session TTL to streaming session and all sub-keys."""
-        from shared.streaming_session import StreamingSessionStore
+        if self._streaming_store is None:
+            from shared.streaming_session import StreamingSessionStore
+
+            self._streaming_store = StreamingSessionStore(self.redis)
 
         ttl_seconds = ttl_hours * 3600
-        store = StreamingSessionStore(self.redis)
-        await store.set_ttl(token, ttl_seconds)
+        await self._streaming_store.set_ttl(token, ttl_seconds)
         # Also propagate to the lookup key
         lookup_key = _streaming_lookup_key(
             repo, thread_id, workflow, thread_type=thread_type
@@ -390,7 +370,7 @@ def _streaming_lookup_key(
     Includes thread_type when provided to match the key format used by
     StreamingSessionStore._lookup_key().
     """
-    safe_repo = repo.replace("/", ":")
+    safe_repo = repo.replace("/", "--")
     if thread_type:
         return f"session:stream:lookup:{safe_repo}:{thread_type}:{thread_id}:{workflow}"
     return f"session:stream:lookup:{safe_repo}:{thread_id}:{workflow}"

@@ -1,15 +1,19 @@
 """Sandbox worker that pulls jobs from queue and executes them in isolated workspaces."""
 
 import asyncio
+import json
 import logging
 import os
 import re
 import shutil
 import sys
 import tempfile
+import time
 import uuid
 from pathlib import Path
 from typing import Any
+
+import httpx
 
 from repo_setup import RepoSetupEngine  # noqa: E402
 from shared import (  # noqa: E402
@@ -73,7 +77,6 @@ def _write_transcript_meta(transcript_path: str, meta: dict) -> None:
     Persists session metadata (installation_id, ref, etc.) so that
     re-invoke works even after the Redis session expires.
     """
-    import json
     from pathlib import Path
 
     try:
@@ -92,8 +95,12 @@ def _find_transcript_path(session_id: str, cwd: str) -> str | None:
 
     If the exact path doesn't exist, scans all project dirs for the session_id.
     """
-    import re
     from pathlib import Path
+
+    # Validate session_id to prevent path traversal
+    if not re.match(r"^[a-zA-Z0-9_-]+$", session_id):
+        logger.warning(f"Invalid session_id format: {session_id}")  # type: ignore[unreachable]
+        return None  # type: ignore[unreachable]
 
     claude_home = Path.home() / ".claude"
     projects_dir = claude_home / "projects"
@@ -101,15 +108,20 @@ def _find_transcript_path(session_id: str, cwd: str) -> str | None:
     if not projects_dir.exists():
         return None
 
-    # Try direct path from sanitized cwd
+    # Try direct path from sanitized cwd first
     if cwd:
         sanitized = re.sub(r"[^a-zA-Z0-9]", "-", cwd)
         direct = projects_dir / sanitized / f"{session_id}.jsonl"
         if direct.exists():
             return str(direct)
 
-    # Fallback: scan project directories for the session file
+    # Fallback: limited directory scan (max 200 dirs to avoid DoS)
+    count = 0
     for project_dir in projects_dir.iterdir():
+        if count >= 200:
+            logger.warning(f"Transcript scan exceeded limit for {session_id}")
+            break
+        count += 1
         if not project_dir.is_dir():
             continue
         candidate = project_dir / f"{session_id}.jsonl"
@@ -117,6 +129,39 @@ def _find_transcript_path(session_id: str, cwd: str) -> str | None:
             return str(candidate)
 
     return None
+
+
+def _configure_builder(
+    builder: SDKOptionsBuilder,
+    *,
+    repo: str,
+    workflow_name: str,
+    ref: str,
+    parent_span_id: str | None,
+    system_context: str | None,
+    claude_md: str | None,
+    memory_index: str | None,
+    thread_history_text: str,
+    file_tree_text: str,
+    repomap_text: str,
+) -> SDKOptionsBuilder:
+    """Apply common sandbox-specific configuration to an SDKOptionsBuilder.
+
+    Called both for the initial SDK invocation and for auto-continue
+    rebuilds, ensuring both paths stay in sync.
+    """
+    return (
+        builder.with_auto_discovered_plugins()
+        .with_full_toolset()
+        .with_agents(AGENTS)
+        .with_langfuse_hooks(parent_span_id=parent_span_id)
+        .with_transcript_staging(repo, workflow_name, ref=ref)
+        .with_writable_dir(str(Path.home() / ".claude" / "memory" / repo / "memory"))
+        .with_system_prompt(system_context)
+        .with_repository_context(claude_md=claude_md, memory_index=memory_index)
+        .with_thread_history(thread_history_text)
+        .with_structural_context(file_tree=file_tree_text, repomap=repomap_text)
+    )
 
 
 async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
@@ -482,7 +527,6 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
                 github_token = job_data.get("github_token")
                 if issue_number and github_token:
                     try:
-                        import httpx
 
                         async with httpx.AsyncClient() as client:
                             url = f"https://api.github.com/repos/{repo}/pulls/{issue_number}/files"
@@ -600,23 +644,18 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
         parent_span_id = job_data.get("parent_span_id")
 
         # Build final options with all sandbox-specific features
-        builder = (
-            builder.with_auto_discovered_plugins()
-            .with_full_toolset()
-            .with_agents(AGENTS)
-            .with_langfuse_hooks(parent_span_id=parent_span_id)
-            .with_transcript_staging(repo, workflow_name, ref=ref)
-            .with_writable_dir(
-                str(Path.home() / ".claude" / "memory" / repo / "memory")
-            )
-            .with_system_prompt(system_context)  # Workflow-specific system context
-            .with_repository_context(
-                claude_md=claude_md, memory_index=memory_index
-            )  # Repository context (prepended to system prompt)
-            .with_thread_history(thread_history_text)  # Issue/PR comment history
-            .with_structural_context(
-                file_tree=file_tree_text, repomap=repomap_text
-            )  # Structural context (file tree + repomap)
+        builder = _configure_builder(
+            builder,
+            repo=repo,
+            workflow_name=workflow_name,
+            ref=ref,
+            parent_span_id=parent_span_id,
+            system_context=system_context,
+            claude_md=claude_md,
+            memory_index=memory_index,
+            thread_history_text=thread_history_text,
+            file_tree_text=file_tree_text,
+            repomap_text=repomap_text,
         )
 
         # Apply session resume/fork if applicable
@@ -737,23 +776,18 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
             # Rebuild builder for continuation (resume mode after first run)
             if continue_count > 0:
                 builder = SDKOptionsBuilder(cwd=workspace).with_model(model)
-                builder = (
-                    builder.with_auto_discovered_plugins()
-                    .with_full_toolset()
-                    .with_agents(AGENTS)
-                    .with_langfuse_hooks(parent_span_id=parent_span_id)
-                    .with_transcript_staging(repo, workflow_name, ref=ref)
-                    .with_writable_dir(
-                        str(Path.home() / ".claude" / "memory" / repo / "memory")
-                    )
-                    .with_system_prompt(system_context)
-                    .with_repository_context(
-                        claude_md=claude_md, memory_index=memory_index
-                    )
-                    .with_thread_history(thread_history_text)
-                    .with_structural_context(
-                        file_tree=file_tree_text, repomap=repomap_text
-                    )
+                builder = _configure_builder(
+                    builder,
+                    repo=repo,
+                    workflow_name=workflow_name,
+                    ref=ref,
+                    parent_span_id=parent_span_id,
+                    system_context=system_context,
+                    claude_md=claude_md,
+                    memory_index=memory_index,
+                    thread_history_text=thread_history_text,
+                    file_tree_text=file_tree_text,
+                    repomap_text=repomap_text,
                 )
                 if current_session_id:
                     builder = builder.with_session_resume(current_session_id)
@@ -1041,8 +1075,6 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
         logger.info(f"Job {job_id} completed successfully")
 
     except Exception as e:
-        import time
-
         # Flush buffered jobs even on failure — partial sessions can
         # still produce useful retrospection data.
         try:
@@ -1118,9 +1150,13 @@ async def process_job(job_queue: JobQueue, job_id: str, job_data: dict) -> None:
                 logger.warning(f"Failed to release worktree lock: {e}")
 
         # CRITICAL: Clean up GITHUB_TOKEN from environment
-        if "GITHUB_TOKEN" in os.environ:
-            del os.environ["GITHUB_TOKEN"]
-            logger.debug("Cleaned up GITHUB_TOKEN from environment")
+        # Only delete if we set it (avoid deleting another job's token)
+        try:
+            if os.environ.get("GITHUB_TOKEN") == github_token:
+                del os.environ["GITHUB_TOKEN"]
+                logger.debug("Cleaned up GITHUB_TOKEN from environment")
+        except KeyError:
+            pass
 
         # Cleanup per-job credentials file
         try:
@@ -1181,15 +1217,13 @@ async def _process_cleanup_requests(redis: Any) -> None:
     if redis is None:
         return
 
-    import json as _json
-
     while True:
         raw = await redis.lpop(WORKTREE_CLEANUP_QUEUE)
         if not raw:
             break
 
         try:
-            msg = _json.loads(raw)
+            msg = json.loads(raw)
             action = msg.get("action")
             repo = msg.get("repo", "")
 

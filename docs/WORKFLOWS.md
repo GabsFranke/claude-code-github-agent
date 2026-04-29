@@ -307,6 +307,8 @@ workflows:
       system_context: "my-context.md"
     context:
       repomap_budget: 2048
+    streaming:
+      enabled: true
 ```
 
 ### 2. (Optional) Create system context

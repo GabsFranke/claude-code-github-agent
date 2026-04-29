@@ -19,9 +19,12 @@ import json
 import logging
 import os
 import signal
+import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
+
+from shared.constants import sanitize_repo_key
 
 try:
     import redis.asyncio as aioredis
@@ -48,7 +51,7 @@ class WorktreeKey:
     workflow: str
 
     def __str__(self) -> str:
-        safe_repo = self.repo.replace("/", "--")
+        safe_repo = sanitize_repo_key(self.repo)
         return f"{safe_repo}:{self.thread_type}-{self.thread_id}:{self.workflow}"
 
     @property
@@ -116,6 +119,7 @@ class WorktreeLock:
         self.redis = redis
         self.key = key
         self._lock_acquired = False
+        self._job_id: str | None = None
         self._cancel_event = asyncio.Event()
 
     async def acquire(
@@ -152,6 +156,7 @@ class WorktreeLock:
 
         if acquired:
             self._lock_acquired = True
+            self._job_id = job_id
             logger.info(f"Acquired lock for {self.key}")
             return True
 
@@ -160,17 +165,40 @@ class WorktreeLock:
             logger.info(f"Lock held for {self.key}, waiting up to {timeout}s...")
             await self.wait_for_release(timeout=timeout)
             # Try again after wait
-            return await self.acquire(job_id, timeout=0, ttl=ttl)
+            acquired = await self.acquire(job_id, timeout=0, ttl=ttl)
+            if not acquired:
+                # Lock still held after waiting, set pending prompt
+                logger.info(f"Lock still held for {self.key}, setting pending prompt")
+                await self.set_pending_prompt(job_id, "")
+            return acquired
 
         logger.info(f"Lock held for {self.key}, setting pending prompt")
         return False
 
     async def release(self) -> None:
         """Release the worktree lock."""
-        if self._lock_acquired:
-            await self.redis.delete(self.key.lock_key)
+        if not self._lock_acquired:
+            return
+
+        lua_script = """
+        local val = redis.call('GET', KEYS[1])
+        if not val then return 0 end
+        local data = cjson.decode(val)
+        if data['job_id'] == ARGV[1] then
+            redis.call('DEL', KEYS[1])
+            return 1
+        end
+        return 0
+        """
+        if self._job_id is None:
+            logger.warning(f"No job_id stored for lock {self.key}, skipping release")
             self._lock_acquired = False
-            logger.info(f"Released lock for {self.key}")
+            return
+        result = await self.redis.eval(lua_script, 1, self.key.lock_key, self._job_id)  # type: ignore[misc]
+        if not result:
+            logger.warning(f"Lock for {self.key} was not owned by us, skipping release")
+        self._lock_acquired = False
+        logger.info(f"Released lock for {self.key}")
 
     async def set_session_id(self, session_id: str) -> None:
         """Update the lock with the current session ID (atomic via Lua).
@@ -260,20 +288,21 @@ class WorktreeLock:
         logger.info(f"Set pending prompt for {self.key}")
 
     async def get_pending_prompt(self) -> PendingPrompt | None:
-        """Get and clear the pending prompt."""
-        raw = await self.redis.get(self.key.pending_key)
+        """Get and clear the pending prompt atomically."""
+        lua_script = """
+        local val = redis.call('GET', KEYS[1])
+        if not val then return nil end
+        redis.call('DEL', KEYS[1])
+        return val
+        """
+        raw = await self.redis.eval(lua_script, 1, self.key.pending_key)  # type: ignore[misc]
         if not raw:
             return None
-
         try:
             data = json.loads(raw)
-            # Clear it
-            await self.redis.delete(self.key.pending_key)
             return PendingPrompt(**data)
         except Exception as e:
             logger.error(f"Corrupt pending prompt at {self.key.pending_key}: {e}")
-            # Still clean up the corrupt data
-            await self.redis.delete(self.key.pending_key)
             return None
 
     async def send_cancel_signal(self) -> None:
@@ -381,6 +410,11 @@ async def interrupt_sdk_process(pid: int | None) -> bool:
     The SDK handles SIGINT by finishing the current turn and saving
     the session file, allowing clean continuation.
 
+    SECURITY NOTE: This uses os.kill(pid, SIGINT). If the original process
+    has exited and the PID has been recycled, this signal may go to an
+    unrelated process. On Linux, consider validating via /proc/{pid}/cmdline.
+    On Windows, this uses CTRL_C_EVENT which is process-group specific.
+
     Args:
         pid: Process ID of the worker running the SDK
 
@@ -392,12 +426,16 @@ async def interrupt_sdk_process(pid: int | None) -> bool:
         return False
 
     try:
-        os.kill(pid, signal.SIGINT)
-        logger.info(f"Sent SIGINT to process {pid}")
+        if sys.platform == "win32":
+            # Windows: use CTRL_C_EVENT for the process, or SIGTERM as fallback
+            os.kill(pid, signal.CTRL_C_EVENT)
+        else:
+            os.kill(pid, signal.SIGINT)
+        logger.info(f"Sent interrupt signal to process {pid}")
         return True
-    except ProcessLookupError:
+    except OSError:
         logger.warning(f"Process {pid} not found")
         return False
     except Exception as e:
-        logger.error(f"Failed to send SIGINT to {pid}: {e}")
+        logger.error(f"Failed to send interrupt signal to {pid}: {e}")
         return False

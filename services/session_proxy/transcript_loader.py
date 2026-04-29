@@ -16,6 +16,7 @@ Each line is a JSON object with:
 import json
 import logging
 import os
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,15 @@ logger = logging.getLogger(__name__)
 
 CLAUDE_HOME = Path(os.getenv("CLAUDE_HOME", str(Path.home() / ".claude")))
 PROJECTS_DIR = CLAUDE_HOME / "projects"
+
+# Session ID validation to prevent path traversal
+_SESSION_ID_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+
+def _validate_session_id(session_id: str) -> None:
+    """Validate session_id to prevent path traversal."""
+    if not _SESSION_ID_RE.match(session_id):
+        raise ValueError(f"Invalid session_id format: {session_id!r}")
 
 
 def _now_iso() -> str:
@@ -36,6 +46,8 @@ def find_transcript(session_id: str) -> Path | None:
     Tries the direct path first (if we know the workspace),
     then falls back to scanning all project directories.
     """
+    _validate_session_id(session_id)
+
     if not PROJECTS_DIR.exists():
         return None
 
@@ -132,6 +144,7 @@ def find_all_transcripts(session_ids: list[str]) -> list[Path]:
     """Find transcript files for multiple session IDs (for multi-run history)."""
     found = []
     for sid in session_ids:
+        _validate_session_id(sid)
         path = find_transcript(sid)
         if path:
             found.append(path)

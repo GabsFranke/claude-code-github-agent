@@ -12,9 +12,13 @@ the CLI interpolates at load time — no Python-side resolution needed.
 import json
 import logging
 import os
+import re
 from typing import Any
+from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
+
+_PARAM_KEY_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
 # Default application root inside the Docker container
 _APP_ROOT = "/app"
@@ -72,8 +76,10 @@ def generate_mcp_json(
             params = [
                 f"repo_path={worktree_path}",
                 f"github_repository={repo}",
-                "github_token=${GITHUB_TOKEN}",
             ]
+            # SECURITY: github_token is passed via environment variable
+            # (ALLOWED_ENV_PREFIXES whitelists GITHUB_*), NOT in the URL
+            # query string where it could be logged.
 
             # Check for mcp.json to handle conditions and extra params
             mcp_json_path = os.path.join(server_dir, "mcp.json")
@@ -94,7 +100,10 @@ def generate_mcp_json(
                     # Add extra params
                     extra_params = config.get("extra_params", {})
                     for k, v in extra_params.items():
-                        params.append(f"{k}={v}")
+                        if not _PARAM_KEY_RE.match(k):
+                            logger.warning(f"Skipping invalid extra_param key: {k!r}")  # type: ignore[unreachable]
+                            continue
+                        params.append(f"{k}={quote(str(v))}")
 
                 except Exception as e:
                     logger.warning(f"Failed to parse {mcp_json_path}: {e}")

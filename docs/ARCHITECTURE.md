@@ -22,6 +22,7 @@ Complete system architecture for the Claude Code GitHub Agent.
   - [11. Codebase Context System](#11-codebase-context-system)
   - [12. Plugin System](#12-plugin-system)
   - [13. MCP Proxy Service](#13-mcp-proxy-service)
+  - [14. Session Proxy Service](#14-session-proxy-service)
 - [Shared Module Infrastructure](#shared-module-infrastructure)
 - [Data Flow](#data-flow)
 - [Job Queue Architecture](#job-queue-architecture)
@@ -678,6 +679,41 @@ It also bridges host services into the Docker network:
 
 When `ALLOW_HOST_MCP=true`, MCP server definitions from the host's `~/.claude.json` are also available through the proxy, so any server installed with `claude mcp add --scope user` works inside Docker without extra configuration.
 
+### 14. Session Proxy Service
+
+**Technology**: FastAPI + WebSocket (Python)
+**Port**: 10001 (mapped from internal 8080)
+**Purpose**: Bridges real-time session streaming between Redis pub/sub and browser clients
+
+**Responsibilities**:
+
+- Serves a React frontend for browser-based session viewing at `/session/{owner}/{repo}/{type}/{number}/{workflow}`
+- Validates sessions exist in Redis via `StreamingSessionStore`
+- Opens WebSocket connections at `/ws/{owner}/{repo}/{type}/{number}/{workflow}`
+- Subscribes to Redis pub/sub channels (`session:msg:{token}`) and forwards messages to connected browsers
+- Sends full message history on connect (from transcript file or Redis fallback)
+- Forwards browser messages back to the sandbox worker via Redis inbox (`session:inbox:{token}`)
+- Creates resume jobs when a user sends a message to a completed session
+- Manages subscriber counts for browser connections
+- Serves static React SPA for the session viewer UI
+
+**Key Files**:
+
+- `services/session_proxy/main.py` — FastAPI application with WebSocket handling
+- `services/session_proxy/transcript_loader.py` — Transcript file loading and history parsing
+- `shared/session_stream.py` — `SessionStreamBridge` and `ControlChannel` for Redis pub/sub
+- `shared/streaming_session.py` — `StreamingSessionStore` for session metadata
+- `shared/session_store.py` — `SessionStore` for persistent session state
+
+**Session Resolution Flow**:
+
+1. Browser connects to `/ws/{owner}/{repo}/{type}/{number}/{workflow}`
+2. Session proxy resolves the token via `StreamingSessionStore.find_session()`
+3. If session exists, proxy subscribes to `session:msg:{token}` and `session:ctl:{token}`
+4. Full history is sent from transcript file (primary) or Redis history (fallback)
+5. Live SDK messages are forwarded to browser in real-time
+6. User messages from browser are pushed to `session:inbox:{token}`
+
 ## Shared Module Infrastructure
 
 **Location**: `shared/`
@@ -688,6 +724,19 @@ When `ALLOW_HOST_MCP=true`, MCP server definitions from the host's `~/.claude.js
 | Module | Purpose |
 |--------|---------|
 | `config.py` | Pydantic Settings models: `WebhookConfig`, `WorkerConfig`, `AnthropicConfig`, `LangfuseConfig`, `QueueConfig`, `IndexingConfig`, `GitHubConfig` |
+
+### Session Persistence
+
+| Module | Purpose |
+|--------|---------|
+| `session_store.py` | `SessionStore` — Redis-backed persistent sessions with TTL, scoped by repo + thread + workflow. Supports save, get, close, expire, summary update, and turn count tracking |
+| `streaming_session.py` | `StreamingSessionStore` — Streaming session metadata (status, subscriber count, inbox). Bridges sandbox worker and session proxy |
+| `session_stream.py` | `SessionStreamBridge` + `ControlChannel` — Publishes SDK messages to Redis pub/sub; subscribes to control messages (cancel, inject) |
+| `worktree_manager.py` | Deterministic worktree paths, reuse/create logic for conversation persistence, and orphan cleanup |
+| `thread_history.py` | `ThreadHistoryConfig` + `fetch_and_format_thread_history()` — Fetches GitHub issue/PR/discussion comments and injects them into agent context |
+| `constants.py` | Centralized TTLs, Redis key prefixes, queue names, and channel names used across all services |
+| `worktree_lock.py` | `WorktreeLock` — Redis-based distributed locking for concurrent worktree access with interrupt-and-continue |
+| `mcp_json_writer.py` | MCP server configuration writer for SDK discovery |
 
 ### SDK Infrastructure
 
@@ -731,13 +780,15 @@ When `ALLOW_HOST_MCP=true`, MCP server definitions from the host's `~/.claude.js
 | `signals.py` | Graceful shutdown signal handlers |
 | `logging_utils.py` | Logging configuration with noisy logger silencing |
 | `models.py` | `AgentRequest` / `AgentResponse` Pydantic models |
-| `utils.py` | General utilities (dot-path dict resolution) |
+| `utils.py` | General utilities (dot-path dict resolution, URL building) |
+| `worktree_lock.py` | `WorktreeLock` — Redis-based distributed locking with interrupt-and-continue semantics for safe concurrent worktree access |
 
 ### MCP Server Base
 
 | Module | Purpose |
 |--------|---------|
 | `mcp_servers/base.py` | Shared stdio JSON-RPC 2.0 server loop for all custom MCP servers |
+| `mcp_json_writer.py` | Generates `.mcp.json` for worktrees so the Claude Code CLI loads MCP servers automatically |
 
 ## Data Flow
 
@@ -861,6 +912,26 @@ When `ALLOW_HOST_MCP=true`, MCP server definitions from the host's `~/.claude.js
 
 - `rate_limit:{name}` - Sorted set for sliding window rate limiting
 
+**Session Streaming**:
+
+- `session:stream:{token}` - Hash: streaming session metadata (repo, issue_number, workflow, status, etc.)
+- `session:stream:lookup:{repo}:{thread_type}:{thread_id}:{workflow}` - String: token lookup by thread (maps thread to streaming token)
+- `session:history:{token}` - List: message history for replay (short-lived TTL, fallback before transcript)
+- `session:inbox:{token}` - List: user messages from browser (drained by sandbox worker)
+- `session:subscribers:{token}` - Integer: active WebSocket connection count
+- `session:msg:{token}` - Pub/sub channel: SDK messages from sandbox worker to browsers
+- `session:ctl:{token}` - Pub/sub channel: control messages from browser to sandbox worker
+
+**Session Persistence**:
+
+- `session:map:{owner:repo}:{thread_type}:{thread_id}:{workflow}` - String: JSON `SessionInfo` for conversation continuity
+
+**Worktree Locking**:
+
+- `lock:worktree:{owner--repo}:{thread_type}-{thread_id}:{workflow}` - String: JSON `LockInfo` (job_id, session_id, status, pid)
+- `pending:{owner--repo}:{thread_type}-{thread_id}:{workflow}` - String: JSON `PendingPrompt` for interrupt-and-continue
+- `cancel:{owner--repo}:{thread_type}-{thread_id}:{workflow}` - Pub/sub channel: cancel signals for interrupt-and-continue
+
 ### Benefits
 
 1. **Workspace Isolation**: Each job in clean temporary directory
@@ -916,7 +987,7 @@ When `ALLOW_HOST_MCP=true`, MCP server definitions from the host's `~/.claude.js
 **Plugin Agents** (in `plugins/*/agents/`):
 
 - `code-reviewer`, `code-architecture-reviewer`, `code-simplifier`, `comment-analyzer`, `pr-test-analyzer`, `silent-failure-hunter`, `type-design-analyzer` — PR review agents in `pr-review-toolkit`
-- `deploy-failure-analyzer`, `test-failure-analyzer`, `build-failure-analyzer`, `lint-failure-analyzer` — CI failure agents in `ci-failure-toolkit`
+- `build-failure-analyzer`, `deploy-failure-analyzer`, `lint-failure-analyzer`, `test-failure-analyzer` — CI failure agents in `ci-failure-toolkit`
 - `generic-worker` — Generic task agent in `test-toolkit`
 
 See [SUBAGENTS.md](SUBAGENTS.md) for details.

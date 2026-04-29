@@ -24,6 +24,25 @@ MAX_TOTAL_COMMENTS = 500
 
 GITHUB_GRAPHQL_URL = "https://api.github.com/graphql"
 
+_http_client: httpx.AsyncClient | None = None
+
+
+async def _get_http_client() -> httpx.AsyncClient:
+    """Get a shared async HTTP client, creating one if needed."""
+    global _http_client
+    if _http_client is None or _http_client.is_closed:
+        _http_client = httpx.AsyncClient(timeout=30.0)
+    return _http_client
+
+
+async def close_http_client() -> None:
+    """Close the shared HTTP client (call on shutdown)."""
+    global _http_client
+    if _http_client and not _http_client.is_closed:
+        await _http_client.aclose()
+        _http_client = None
+
+
 _DISCUSSION_QUERY = """
 query($owner: String!, $name: String!, $number: Int!, $first: Int!, $after: String) {
   repository(owner: $owner, name: $name) {
@@ -147,16 +166,16 @@ async def _fetch_comments(
                         "body": c.get("body", "") or "",
                     }
                 )
-            if len(comments) >= max_comments:
-                comments = comments[:max_comments]
-                break
             if len(comments) >= MAX_TOTAL_COMMENTS:
+                comments = comments[:MAX_TOTAL_COMMENTS]
+                break
+            if len(page_comments) < 100:
                 break
         except Exception as e:
             logger.warning(f"Error fetching comments page {page + 1}: {e}")
             break
 
-    return comments
+    return comments[:max_comments]
 
 
 async def _fetch_pr_review_comments(
@@ -198,16 +217,16 @@ async def _fetch_pr_review_comments(
                 if c.get("path"):
                     comment["context"] = f"{c['path']}:{c.get('original_line', '?')}"
                 comments.append(comment)
-            if len(comments) >= max_comments:
-                comments = comments[:max_comments]
-                break
             if len(comments) >= MAX_TOTAL_COMMENTS:
+                comments = comments[:MAX_TOTAL_COMMENTS]
+                break
+            if len(page_comments) < 100:
                 break
         except Exception as e:
             logger.warning(f"Error fetching review comments page {page + 1}: {e}")
             break
 
-    return comments
+    return comments[:max_comments]
 
 
 async def _fetch_discussion(
@@ -303,8 +322,8 @@ async def _fetch_discussion(
                 break
             cursor = page_info.get("endCursor")
 
-            if len(all_comments) >= max_comments:
-                all_comments = all_comments[:max_comments]
+            if len(all_comments) >= MAX_TOTAL_COMMENTS:
+                all_comments = all_comments[:MAX_TOTAL_COMMENTS]
                 break
         except Exception as e:
             logger.warning(
@@ -312,7 +331,7 @@ async def _fetch_discussion(
             )
             break
 
-    return discussion_body, all_comments
+    return discussion_body, all_comments[:max_comments]
 
 
 def _format_thread_history(
@@ -421,34 +440,34 @@ async def fetch_and_format_thread_history(
     is_discussion = thread_type == "discussion"
 
     try:
-        async with httpx.AsyncClient() as client:
-            if is_discussion:
-                # Discussions require GraphQL API
-                issue_body, comments = await _fetch_discussion(
-                    repo, issue_number, token, client, max_comments=config.max_comments
-                )
-                review_comments = None
-            else:
-                # Issues and PRs use REST API
-                issue_body = None
-                if config.include_issue_body:
-                    issue_body = await _fetch_issue_body(
-                        repo, issue_number, token, client, is_pr=is_pr
-                    )
-
-                comments = await _fetch_comments(
-                    repo, issue_number, token, client, max_comments=config.max_comments
+        client = await _get_http_client()
+        if is_discussion:
+            # Discussions require GraphQL API
+            issue_body, comments = await _fetch_discussion(
+                repo, issue_number, token, client, max_comments=config.max_comments
+            )
+            review_comments = None
+        else:
+            # Issues and PRs use REST API
+            issue_body = None
+            if config.include_issue_body:
+                issue_body = await _fetch_issue_body(
+                    repo, issue_number, token, client, is_pr=is_pr
                 )
 
-                review_comments = None
-                if is_pr and config.include_pr_reviews:
-                    review_comments = await _fetch_pr_review_comments(
-                        repo,
-                        issue_number,
-                        token,
-                        client,
-                        max_comments=config.max_comments,
-                    )
+            comments = await _fetch_comments(
+                repo, issue_number, token, client, max_comments=config.max_comments
+            )
+
+            review_comments = None
+            if is_pr and config.include_pr_reviews:
+                review_comments = await _fetch_pr_review_comments(
+                    repo,
+                    issue_number,
+                    token,
+                    client,
+                    max_comments=config.max_comments,
+                )
     except Exception as e:
         logger.warning(f"Thread history fetch failed for {repo}#{issue_number}: {e}")
         return ""

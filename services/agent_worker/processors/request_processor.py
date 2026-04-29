@@ -25,32 +25,24 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _SESSION_FLAG_RE = re.compile(
-    r"^\s*/\S+\s+(-c|-f|--continue|--fork|--new)?\s*(.*)",
+    r"^\s*/\S+(?:\s+(-c|-f|--continue|--fork|--new))?(?:\s+(.*))?$"
 )
 
 
-def _parse_session_flag(user_query: str) -> str:
-    """Extract session continuation flag from user query.
-
-    Returns:
-        ``"resume"`` for ``-c`` / ``--continue``,
-        ``"fork"`` for ``-f`` / ``--fork``,
-        ``"new"`` for ``--new``,
-        ``""`` if no flag found.
-    """
-    if not user_query:
-        return ""
+def _parse_session_flag(user_query: str) -> tuple[str, str]:
+    """Extract session flag and remaining query from a slash command."""
     m = _SESSION_FLAG_RE.match(user_query)
     if not m:
-        return ""  # type: ignore[unreachable]
+        return "", user_query  # type: ignore[unreachable]
     flag = (m.group(1) or "").strip()
+    rest = (m.group(2) or "").strip()
     if flag in ("-c", "--continue"):
-        return "resume"
+        return "resume", rest
     if flag in ("-f", "--fork"):
-        return "fork"
+        return "fork", rest
     if flag == "--new":
-        return "new"
-    return ""
+        return "new", rest
+    return "", rest
 
 
 # Type alias for process return value
@@ -270,7 +262,7 @@ class RequestProcessor:
                 )
                 if existing_session:
                     # Check if user explicitly requested continuation
-                    session_flag = _parse_session_flag(user_query)
+                    session_flag, _ = _parse_session_flag(user_query)
                     if session_flag == "resume":
                         session_mode = "resume"
                         session_id = existing_session.session_id

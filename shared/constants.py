@@ -84,3 +84,12 @@ CTL_CHANNEL = "session:ctl:{}"
 def _now_iso() -> str:
     """Return the current UTC time as an ISO 8601 string."""
     return datetime.now(UTC).isoformat()
+
+
+def sanitize_repo_key(repo: str) -> str:
+    """Return a Redis-safe key fragment for a repository name.
+
+    Uses double-dash to avoid collisions (e.g. ``owner/repo``
+    and ``owner-repo`` would collide with single-dash).
+    """
+    return repo.replace("/", "--")

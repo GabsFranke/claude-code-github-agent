@@ -90,5 +90,5 @@ Uses Haiku (`ANTHROPIC_DEFAULT_HAIKU_MODEL`) for cost efficiency. Tools restrict
 
 ## See Also
 
-- [Plugins](PLUGINS.md) - Plugin agents (12 built in across 4 plugins)
+- [Plugins](PLUGINS.md) - Plugin agents (12 built in across 5 plugins)
 - [Architecture](ARCHITECTURE.md) - System design
