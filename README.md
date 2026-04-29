@@ -210,7 +210,11 @@ See [WORKFLOWS.md](docs/WORKFLOWS.md) for the full reference, and [CONFIGURATION
 
 ### Add a Plugin
 
-Drop a `.claude-plugin/` directory into `plugins/` — agents, commands, and MCP servers are auto-discovered at runtime. See [PLUGINS.md](docs/PLUGINS.md) for details.
+You can extend the agent with plugins in two ways:
+
+**App-specific plugins** — Create a plugin directory under the repo's `plugins/` folder with a `.claude-plugin/plugin.json` manifest. Agents, commands, and MCP servers are auto-discovered at runtime. See [PLUGINS.md](docs/PLUGINS.md) for details.
+
+**User-installed plugins** — Install with `/plugin` in the Claude Code CLI (choose `user` scope). Plugins are saved to `~/.claude/plugins/` and automatically picked up by the SDK inside the sandbox. See the [Anthropic plugin docs](https://docs.anthropic.com/en/docs/claude-code/plugins) for more.
 
 ### Per-Repository Instructions
 

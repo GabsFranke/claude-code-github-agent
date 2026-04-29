@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # ─── Stage 1: Build React client ─────────────────────────────────────────────
-FROM node:20-slim AS client-builder
+FROM node:22-slim AS client-builder
 
 WORKDIR /build/client
 COPY services/session_proxy/client/package*.json ./

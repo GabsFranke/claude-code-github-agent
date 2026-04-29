@@ -393,6 +393,25 @@ a:hover {
   cursor: not-allowed;
 }
 
+.btn-stop {
+  padding: 8px 18px;
+  border-radius: var(--radius);
+  border: none;
+  background: var(--red);
+  color: #fff;
+  font-weight: 600;
+  font-size: 13px;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+.btn-stop:hover:not(:disabled) {
+  opacity: 0.85;
+}
+.btn-stop:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
 /* ─── Run boundary (divider between agent runs) ─────────────────────────── */
 .run-boundary {
   display: flex;

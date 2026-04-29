@@ -266,6 +266,13 @@ class ControlChannel:
             if self._interrupt_event:
                 self._interrupt_event.set()
 
+        elif msg_type == "stop_agent":
+            logger.info(
+                f"[ControlChannel] Received stop_agent command for {self._token[:8]}..."
+            )
+            if self._interrupt_event:
+                self._interrupt_event.set()
+
         else:
             logger.debug(f"[ControlChannel] Unknown control message type: {msg_type}")
 

@@ -89,7 +89,10 @@ class JobProcessor:
 
             if result:
                 await self._save_session(result)
-                await self._mark_success(result)
+                if result.get("is_cancelled"):
+                    await self._mark_cancelled(result)
+                else:
+                    await self._mark_success(result)
 
         except Exception as e:
             await self._handle_error(e)
@@ -707,6 +710,16 @@ class JobProcessor:
                     )
                     continue
 
+            if interrupted and self.user_interrupt_event.is_set() and not result:
+                logger.info(f"Job {self.job_id} stopped by user via stop_agent command")
+                result = {
+                    "is_error": False,
+                    "session_id": current_session_id,
+                    "num_turns": 0,
+                    "response": "Stopped by user",
+                    "is_cancelled": True,
+                }
+
             break
 
         if self.streaming_bridge is not None:
@@ -814,7 +827,7 @@ class JobProcessor:
                 logger.warning(f"Failed to update streaming session metadata: {e}")
 
     async def _mark_success(self, result):
-        response = result["response"]
+        response = result.get("response", "")
         new_session_id = result.get("session_id")
         await self.job_queue.complete_job(
             self.job_id,
@@ -828,6 +841,22 @@ class JobProcessor:
             status="success",
         )
         logger.info(f"Job {self.job_id} completed successfully")
+
+    async def _mark_cancelled(self, result):
+        response = result.get("response", "Cancelled")
+        new_session_id = result.get("session_id")
+        await self.job_queue.complete_job(
+            self.job_id,
+            {
+                "status": "cancelled",
+                "response": response,
+                "repo": self.repo,
+                "issue_number": self.issue_number,
+                "session_id": new_session_id,
+            },
+            status="cancelled",
+        )
+        logger.info(f"Job {self.job_id} completed as cancelled")
 
     async def _handle_error(self, e: Exception):
         try:

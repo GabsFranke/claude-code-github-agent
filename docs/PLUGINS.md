@@ -56,6 +56,16 @@ CI failure analysis and auto-fix with specialized agents for different failure t
 - **MCP Server**: GitHub Actions (stdio) — `get_job_logs`, `list_workflow_runs`, `get_workflow_run`, `get_workflow_run_jobs`
 - **Triggered by**: `workflow_job.completed` (failure only), `/fix-ci`, `/fix-build`, `/fix-tests`
 
+## Installing Plugins
+
+The easiest way to add a plugin is via the Claude Code CLI:
+
+```bash
+/plugin install owner/repo --scope user
+```
+
+Plugins installed with `--scope user` are saved to `~/.claude/plugins/` and automatically discovered by the SDK at runtime. See the [Anthropic plugin docs](https://docs.anthropic.com/en/docs/claude-code/plugins) and [plugins reference](https://docs.anthropic.com/en/docs/claude-code/plugins-reference) for more.
+
 ## Creating a Custom Plugin
 
 ### 1. Create the directory

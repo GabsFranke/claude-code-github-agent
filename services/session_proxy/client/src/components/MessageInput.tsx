@@ -3,6 +3,7 @@ import type { SessionStatus } from '../types/messages'
 
 interface Props {
   onSend: (content: string) => void
+  onStop?: () => void
   disabled: boolean
   status: SessionStatus
 }
@@ -14,7 +15,7 @@ const PLACEHOLDER: Record<SessionStatus, string> = {
   unknown: 'Connecting…',
 }
 
-export function MessageInput({ onSend, disabled, status }: Props) {
+export function MessageInput({ onSend, onStop, disabled, status }: Props) {
   const [text, setText] = useState('')
 
   function submit() {
@@ -46,9 +47,18 @@ export function MessageInput({ onSend, disabled, status }: Props) {
         className="btn-send"
         onClick={submit}
         disabled={disabled || !text.trim()}
-      >
+        >
         Send
       </button>
+        {onStop && (
+          <button
+            className="btn-stop"
+            onClick={onStop}
+            title="Stop the agent immediately"
+            disabled={status !== 'running'}
+          >
+          </button>
+        )}
     </div>
   )
 }

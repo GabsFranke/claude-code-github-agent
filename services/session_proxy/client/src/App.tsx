@@ -377,7 +377,12 @@ export function App() {
         })}
         <div ref={bottomRef} />
       </main>
-      <MessageInput onSend={handleSendMessage} disabled={!canSend} status={status} />
+      <MessageInput
+        onSend={handleSendMessage}
+        onStop={handleStopAgent}
+        disabled={!canSend}
+        status={status}
+      />
     </div>
   )
 
@@ -386,5 +391,9 @@ export function App() {
     // Optimistically show the user's message immediately so it's visible
     // even if the server doesn't echo it back (e.g. stuck session, no worker)
     setLog((l) => [...l, { id: uid(), kind: 'user' as const, text: content }])
+  }
+
+  function handleStopAgent() {
+    send({ type: 'stop_agent', content: '' })
   }
 }
