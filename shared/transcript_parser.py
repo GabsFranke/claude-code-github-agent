@@ -97,10 +97,13 @@ def extract_retrospector_summary(transcript_path: str) -> str | None:
     Returns a structured text summary instead of the raw JSONL to avoid hitting
     the SDK's 1MB JSON buffer limit when passing large transcripts.
 
-    Returns None if parsing fails.
+    Returns None if parsing fails or the file does not exist.
 
     Used by retrospector_worker for instruction improvement analysis.
     """
+    if not Path(transcript_path).exists():
+        return None
+
     lines: list[str] = []
     turn_count = 0
     error_count = 0

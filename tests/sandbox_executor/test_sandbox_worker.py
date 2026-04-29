@@ -63,17 +63,17 @@ class TestProcessJob:
         with (
             patch.dict(os.environ, _SAFE_ENV_OVERRIDES),
             patch(
-                "services.sandbox_executor.sandbox_worker.wait_for_repo_sync",
+                "services.sandbox_executor.processor.wait_for_repo_sync",
                 new_callable=AsyncMock,
                 return_value="/var/cache/repos/owner/repo.git",
             ),
             patch(
-                "services.sandbox_executor.sandbox_worker.execute_git_command",
+                "services.sandbox_executor.processor.execute_git_command",
                 new_callable=AsyncMock,
                 return_value=(0, "", ""),
             ),
             patch(
-                "services.sandbox_executor.sandbox_worker.execute_sdk",
+                "services.sandbox_executor.processor.execute_sdk",
                 new_callable=AsyncMock,
                 return_value={
                     "response": "Test response",
@@ -84,29 +84,30 @@ class TestProcessJob:
                 },
             ),
             patch(
-                "services.sandbox_executor.sandbox_worker.tempfile.mkdtemp"
+                "services.sandbox_executor.processor.tempfile.mkdtemp"
             ) as mock_mkdtemp,
-            patch("services.sandbox_executor.sandbox_worker.os.rmdir"),
-            patch("services.sandbox_executor.sandbox_worker.os.chdir"),
+            patch("services.sandbox_executor.processor.os.rmdir"),
+            patch("services.sandbox_executor.processor.os.chdir", create=True),
             patch(
-                "services.sandbox_executor.sandbox_worker.os.getcwd",
+                "services.sandbox_executor.processor.os.getcwd",
                 return_value="/original",
+                create=True,
             ),
-            patch("services.sandbox_executor.sandbox_worker.os.makedirs"),
-            patch("services.sandbox_executor.sandbox_worker.os.open"),
-            patch("services.sandbox_executor.sandbox_worker.os.write"),
-            patch("services.sandbox_executor.sandbox_worker.os.close"),
-            patch("services.sandbox_executor.sandbox_worker.os.remove"),
+            patch("services.sandbox_executor.processor.os.makedirs", create=True),
+            patch("services.sandbox_executor.processor.os.open"),
+            patch("services.sandbox_executor.processor.os.write"),
+            patch("services.sandbox_executor.processor.os.close"),
+            patch("services.sandbox_executor.processor.os.remove"),
             patch(
-                "services.sandbox_executor.sandbox_worker.os.path.exists",
+                "services.sandbox_executor.processor.os.path.exists",
                 return_value=False,
             ),
             patch(
-                "services.sandbox_executor.sandbox_worker.RepoSetupEngine"
+                "services.sandbox_executor.processor.RepoSetupEngine"
             ) as mock_engine_class,
             patch("shared.mcp_json_writer.write_mcp_json"),
             patch(
-                "services.sandbox_executor.sandbox_worker.generate_structural_context",
+                "services.sandbox_executor.processor.generate_structural_context",
                 new_callable=AsyncMock,
                 return_value=("", ""),
             ),
@@ -150,44 +151,45 @@ class TestProcessJob:
         with (
             patch.dict(os.environ, _SAFE_ENV_OVERRIDES),
             patch(
-                "services.sandbox_executor.sandbox_worker.wait_for_repo_sync",
+                "services.sandbox_executor.processor.wait_for_repo_sync",
                 new_callable=AsyncMock,
                 return_value="/var/cache/repos/owner/repo.git",
             ),
             patch(
-                "services.sandbox_executor.sandbox_worker.execute_git_command",
+                "services.sandbox_executor.processor.execute_git_command",
                 new_callable=AsyncMock,
                 return_value=(0, "", ""),
             ),
             patch(
-                "services.sandbox_executor.sandbox_worker.execute_sdk",
+                "services.sandbox_executor.processor.execute_sdk",
                 new_callable=AsyncMock,
                 side_effect=Exception("Execution failed"),
             ),
             patch(
-                "services.sandbox_executor.sandbox_worker.tempfile.mkdtemp"
+                "services.sandbox_executor.processor.tempfile.mkdtemp"
             ) as mock_mkdtemp,
-            patch("services.sandbox_executor.sandbox_worker.os.rmdir"),
-            patch("services.sandbox_executor.sandbox_worker.os.chdir"),
+            patch("services.sandbox_executor.processor.os.rmdir"),
+            patch("services.sandbox_executor.processor.os.chdir", create=True),
             patch(
-                "services.sandbox_executor.sandbox_worker.os.getcwd",
+                "services.sandbox_executor.processor.os.getcwd",
                 return_value="/original",
+                create=True,
             ),
-            patch("services.sandbox_executor.sandbox_worker.os.makedirs"),
-            patch("services.sandbox_executor.sandbox_worker.os.open"),
-            patch("services.sandbox_executor.sandbox_worker.os.write"),
-            patch("services.sandbox_executor.sandbox_worker.os.close"),
-            patch("services.sandbox_executor.sandbox_worker.os.remove"),
+            patch("services.sandbox_executor.processor.os.makedirs", create=True),
+            patch("services.sandbox_executor.processor.os.open"),
+            patch("services.sandbox_executor.processor.os.write"),
+            patch("services.sandbox_executor.processor.os.close"),
+            patch("services.sandbox_executor.processor.os.remove"),
             patch(
-                "services.sandbox_executor.sandbox_worker.os.path.exists",
+                "services.sandbox_executor.processor.os.path.exists",
                 return_value=False,
             ),
             patch(
-                "services.sandbox_executor.sandbox_worker.RepoSetupEngine"
+                "services.sandbox_executor.processor.RepoSetupEngine"
             ) as mock_engine_class,
             patch("shared.mcp_json_writer.write_mcp_json"),
             patch(
-                "services.sandbox_executor.sandbox_worker.generate_structural_context",
+                "services.sandbox_executor.processor.generate_structural_context",
                 new_callable=AsyncMock,
                 return_value=("", ""),
             ),

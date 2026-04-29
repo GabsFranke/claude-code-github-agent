@@ -11,6 +11,9 @@ from shared.streaming_session import StreamingSessionStore
 def _make_redis():
     """Create a mock Redis client with explicit async methods."""
     redis = MagicMock()
+    pipeline = MagicMock()
+    pipeline.execute = AsyncMock(return_value=[])
+    redis.pipeline = MagicMock(return_value=pipeline)
     redis.hset = AsyncMock(return_value=None)
     redis.expire = AsyncMock(return_value=True)
     redis.set = AsyncMock(return_value=True)
@@ -37,17 +40,18 @@ class TestCreateSession:
             workflow="review-pr",
         )
 
-        assert redis.hset.call_count == 1
-        key, kwargs = redis.hset.call_args
-        assert key[0] == "session:stream:test-token"
-        mapping = kwargs.get("mapping") or key[1]
+        pipeline = redis.pipeline.return_value
+        assert pipeline.hset.call_count == 1
+        args, kwargs = pipeline.hset.call_args
+        assert args[0] == "session:stream:test-token"
+        mapping = kwargs.get("mapping")
         assert mapping["status"] == "running"
         assert mapping["repo"] == "owner/repo"
         assert mapping["issue_number"] == "42"
         assert mapping["workflow"] == "review-pr"
 
-        assert redis.expire.call_count == 1
-        assert redis.set.call_count == 1
+        assert pipeline.expire.call_count == 1
+        assert pipeline.setex.call_count == 1
 
     @pytest.mark.asyncio
     async def test_custom_ttl(self):
@@ -62,7 +66,8 @@ class TestCreateSession:
             ttl_seconds=600,
         )
 
-        assert redis.expire.call_args[0][1] == 600
+        pipeline = redis.pipeline.return_value
+        assert pipeline.expire.call_args[0][1] == 600
 
 
 class TestFindSession:
@@ -388,8 +393,8 @@ class TestInbox:
         redis.eval = AsyncMock(side_effect=RuntimeError("redis error"))
         store = StreamingSessionStore(redis=redis)
 
-        result = await store.pop_inbox_messages("test-token")
-        assert result == []
+        with pytest.raises(RuntimeError, match="redis error"):
+            await store.pop_inbox_messages("test-token")
 
     @pytest.mark.asyncio
     async def test_pop_filters_non_user_messages(self):

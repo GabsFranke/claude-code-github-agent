@@ -3,6 +3,7 @@
 import json
 import os
 import signal
+import sys
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -108,7 +109,7 @@ class TestRelease:
     async def test_release_deletes_key(self):
         redis = MagicMock()
         redis.set = AsyncMock(return_value=True)
-        redis.delete = AsyncMock(return_value=1)
+        redis.eval = AsyncMock(return_value=1)
         key = WorktreeKey(
             repo="owner/repo", thread_type="pr", thread_id="42", workflow="review"
         )
@@ -116,13 +117,13 @@ class TestRelease:
         await lock.acquire(job_id="job-123")
         await lock.release()
 
-        redis.delete.assert_called_once_with(key.lock_key)
+        redis.eval.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_release_resets_lock_acquired(self):
         redis = MagicMock()
         redis.set = AsyncMock(return_value=True)
-        redis.delete = AsyncMock(return_value=1)
+        redis.eval = AsyncMock(return_value=1)
         key = WorktreeKey(
             repo="owner/repo", thread_type="pr", thread_id="42", workflow="review"
         )
@@ -135,13 +136,13 @@ class TestRelease:
     @pytest.mark.asyncio
     async def test_release_without_acquire_no_delete(self):
         redis = MagicMock()
-        redis.delete = AsyncMock(return_value=1)
+        redis.eval = AsyncMock(return_value=1)
         key = WorktreeKey(
             repo="owner/repo", thread_type="pr", thread_id="42", workflow="review"
         )
         lock = WorktreeLock(redis, key)
         await lock.release()
-        redis.delete.assert_not_called()
+        redis.eval.assert_not_called()
 
 
 class TestSetSessionId:
@@ -275,8 +276,7 @@ class TestPendingPrompt:
             "prompt": "hello",
             "timestamp": datetime.now(UTC).isoformat(),
         }
-        redis.get = AsyncMock(return_value=json.dumps(data))
-        redis.delete = AsyncMock(return_value=1)
+        redis.eval = AsyncMock(return_value=json.dumps(data))
         key = WorktreeKey(
             repo="owner/repo", thread_type="pr", thread_id="42", workflow="review"
         )
@@ -286,12 +286,12 @@ class TestPendingPrompt:
         assert pending is not None
         assert pending.job_id == "job-123"
         assert pending.prompt == "hello"
-        redis.delete.assert_called_once_with(key.pending_key)
+        redis.eval.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_pending_prompt_not_found(self):
         redis = MagicMock()
-        redis.get = AsyncMock(return_value=None)
+        redis.eval = AsyncMock(return_value=None)
         key = WorktreeKey(
             repo="owner/repo", thread_type="pr", thread_id="42", workflow="review"
         )
@@ -302,8 +302,7 @@ class TestPendingPrompt:
     @pytest.mark.asyncio
     async def test_get_pending_prompt_corrupt_clears(self):
         redis = MagicMock()
-        redis.get = AsyncMock(return_value="not-json{{{")
-        redis.delete = AsyncMock(return_value=1)
+        redis.eval = AsyncMock(return_value="not-json{{{")
         key = WorktreeKey(
             repo="owner/repo", thread_type="pr", thread_id="42", workflow="review"
         )
@@ -311,7 +310,7 @@ class TestPendingPrompt:
         pending = await lock.get_pending_prompt()
 
         assert pending is None
-        redis.delete.assert_called_once_with(key.pending_key)
+        redis.eval.assert_called_once()
 
 
 class TestCancelSignal:
@@ -369,7 +368,10 @@ class TestInterruptSdkProcess:
             result = await interrupt_sdk_process(1234)
 
         assert result is True
-        mock_kill.assert_called_once_with(1234, signal.SIGINT)
+        expected_signal = (
+            signal.CTRL_C_EVENT if sys.platform == "win32" else signal.SIGINT
+        )
+        mock_kill.assert_called_once_with(1234, expected_signal)
 
     @pytest.mark.asyncio
     async def test_none_pid_returns_false(self):
