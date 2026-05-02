@@ -109,7 +109,7 @@ class TestProcessJob:
             patch(
                 "services.sandbox_executor.processor.generate_structural_context",
                 new_callable=AsyncMock,
-                return_value=("", ""),
+                return_value="",
             ),
         ):
             # Mock workspace path
@@ -191,7 +191,7 @@ class TestProcessJob:
             patch(
                 "services.sandbox_executor.processor.generate_structural_context",
                 new_callable=AsyncMock,
-                return_value=("", ""),
+                return_value="",
             ),
         ):
             # Mock workspace path
