@@ -102,9 +102,13 @@ class SymbolIndex:
 
         # Upsert symbols
         _upsert_symbols(db, tags)
+        logger.debug("Upserted %d symbols to SurrealDB", len(tags))
 
         # Extract and upsert relationships as graph edges
         relationships = self._extract_relationships()
+        logger.debug(
+            "Extracted %d relationships, upserting to SurrealDB", len(relationships)
+        )
         _upsert_relationships(db, relationships)
 
         # Mark commit as indexed
