@@ -214,6 +214,11 @@ async def main():
     try:
         while not shutdown_event.is_set():
             try:
+                # Reclaim stale jobs from crashed workers
+                reclaimed = await job_queue.reclaim_stale_jobs()
+                if reclaimed:
+                    logger.info(f"Reclaimed {reclaimed} stale job(s)")
+
                 # Process pending worktree cleanup requests
                 await _process_cleanup_requests(job_queue.redis)
 

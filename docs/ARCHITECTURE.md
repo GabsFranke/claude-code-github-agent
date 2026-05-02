@@ -59,7 +59,6 @@ flowchart LR
     AGENT --> |SSE| MCPPROXY[MCP Proxy<br/>:18000]
     MCPPROXY --> LOCAL_MCP[Local MCP<br/>Servers]
     MCPPROXY --> |host ~/.claude.json| HOST_MCP[Host MCP<br/>Servers]
-    AGENT -.->|semantic search| QDRANT
 
     PP --> MEMQ[(Memory<br/>Queue)]
     PP --> RETROQ[(Retrospector<br/>Queue)]
@@ -74,7 +73,7 @@ flowchart LR
 
     RS --> |sync complete| IDX[Indexing<br/>Worker]
     IDXQ --> IDX
-    IDX --> |embeddings| QDRANT[(Qdrant<br/>Vector DB)]
+    IDX --> |"embeddings<br/>+ graph edges"| SURREAL[(SurrealDB<br/>Multi-Model)]
 
     MCP --> GH
 
@@ -95,7 +94,7 @@ flowchart LR
     style RETROQ fill:#ffe0b2
     style PP fill:#f3e5f5
     style IDX fill:#e8eaf6
-    style QDRANT fill:#e8eaf6
+    style SURREAL fill:#e8eaf6
     style IDXQ fill:#e8eaf6
     style LOCAL_MCP fill:#e0f2f1
 ```
@@ -108,12 +107,12 @@ flowchart LR
 4. **Repo Sync** → Maintains cached bare repositories (proactive on push)
 5. **Sandbox Workers** → Create isolated worktrees from cached bare repos
 6. **Pre-Processing** → Run repo setup commands (`repo-setup.yaml`) + generate structural context (file tree + repomap)
-7. **Claude SDK** → Executes with 5 MCP servers (GitHub, GitHub Actions, Memory, Codebase Tools, Semantic Search)
+7. **Claude SDK** → Executes with 4 MCP servers (GitHub, GitHub Actions, Memory, Codebase Tools)
 8. **Results** → Posted back to GitHub via MCP
 9. **Post-Processing** → Transcript staging, enqueues memory/retrospector/indexing jobs
 10. **Memory Worker** → Extracts knowledge from session transcripts via `@memory-extractor` subagent
 11. **Retrospector Worker** → Analyzes sessions, opens improvement PRs on the bot's own repo
-12. **Indexing Worker** → Chunks repos, generates embeddings, stores in Qdrant for semantic search
+12. **Indexing Worker** → Chunks repos, generates embeddings, stores in SurrealDB for semantic search and code intelligence queries
 
 ## Workflow System
 
@@ -397,7 +396,6 @@ options = (builder.with_model(model)
     .with_github_mcp(github_token)
     .with_memory_mcp(repo)
     .with_codebase_tools(workspace)
-    .with_semantic_search(repo)
     .with_auto_discovered_plugins()
     .with_full_toolset()
     .with_structural_context(file_tree, repomap)
@@ -417,8 +415,7 @@ git --git-dir={repo_dir} worktree remove --force {workspace}
 | GitHub MCP | HTTP (`api.githubcopilot.com/mcp`) | PR/issue/comment operations |
 | GitHub Actions MCP | SSE (via mcp_proxy) | CI/CD workflow analysis |
 | Memory MCP | stdio | Repository memory read/write |
-| Codebase Tools MCP | SSE (via mcp_proxy) | AST-based code search and file summaries |
-| Semantic Search MCP | SSE (via mcp_proxy) | Embedding-based code search via Qdrant |
+| Codebase Tools MCP | SSE (via mcp_proxy) | AST-based code search, semantic/hybrid search, and file summaries |
 
 **Sync Coordination**:
 
@@ -440,8 +437,7 @@ git --git-dir={repo_dir} worktree remove --force {workspace}
 - Creates branches and commits via GitHub MCP
 - Opens pull requests via GitHub MCP
 - Posts comments and reviews via GitHub MCP
-- Searches codebase structurally via Codebase Tools MCP
-- Searches code semantically via Semantic Search MCP
+- Searches codebase structurally and semantically (text/vector/hybrid) via Codebase Tools MCP
 - Accesses repository memory via Memory MCP
 
 **Configuration**: Composable via `SDKOptionsBuilder` in `shared/sdk_factory.py`
@@ -455,8 +451,7 @@ git --git-dir={repo_dir} worktree remove --force {workspace}
 - `mcp__github__*` — All GitHub MCP tools
 - `mcp__github_actions__*` — CI/CD workflow tools
 - `mcp__memory__*` — Repository memory tools
-- `mcp__codebase_tools__*` — AST-based code analysis
-- `mcp__semantic_search__*` — Embedding-based code search
+- `mcp__codebase_tools__*` — AST-based code analysis and semantic/hybrid search
 
 **Local vs Remote Operations**:
 
@@ -568,15 +563,17 @@ Both tools validate paths to prevent directory traversal attacks.
 
 ### 10. Indexing Worker
 
-**Technology**: Python + Gemini Embedding API + Qdrant
-**Purpose**: Background worker that chunks repos, generates embeddings, and stores in Qdrant for semantic code search
+**Technology**: Python + Gemini Embedding API + SurrealDB
+**Purpose**: Background worker that chunks repos, generates embeddings, and stores in SurrealDB for semantic code search and code intelligence
 
 **Responsibilities**:
 
 - Dual trigger: subscribes to `agent:sync:events` pub/sub (auto-trigger on sync) + processes `agent:indexing:requests` list
 - Chunks source files into semantic units (functions, classes, methods) using tree-sitter
 - Generates embeddings via Google Gemini (`gemini-embedding-001`, 1024 dimensions)
-- Stores vectors in Qdrant with metadata (filepath, name, kind, language, line numbers, commit hash)
+- Stores vectors in SurrealDB with metadata (filepath, name, kind, language, line numbers, commit hash)
+- Builds code graph edges (calls, imports, inheritance) via tree-sitter AST traversal
+- Extracts API routes (FastAPI/Flask/Django) and MCP tool definitions
 - Supports incremental indexing via git diff — only re-embeds changed files
 - Caches embeddings in Redis to avoid re-embedding unchanged content
 - Cleans up stale points from previous commits
@@ -587,6 +584,8 @@ Both tools validate paths to prevent directory traversal attacks.
 - `services/indexing_worker/indexing_worker.py` — Main worker loop and indexing pipeline
 - `shared/chunker.py` — Tree-sitter-based semantic code chunker (10 languages)
 - `shared/ts_languages.py` — Language registry with dynamic loading
+- `shared/code_graph.py` — Symbol index and code graph traversal
+- `shared/route_maps.py` — API route and MCP tool extraction
 
 **Supported Languages**:
 
@@ -600,7 +599,7 @@ Python, JavaScript, TypeScript, TSX, Go, Rust, Java, C, C++, Ruby — via per-la
 4. Checks previous commit for incremental diff (or full index if first time)
 5. Chunks changed files via tree-sitter (or regex fallback)
 6. Checks Redis embedding cache — only embeds new/changed chunks via Gemini API
-7. Upserts vectors into per-repo Qdrant collection
+7. Upserts vectors, symbols, and graph edges into SurrealDB
 8. Cleans up stale points from previous commits
 9. Updates indexing metadata in Redis
 
@@ -627,14 +626,15 @@ Python, JavaScript, TypeScript, TSX, Go, Rust, Java, C, C++, Ruby — via per-la
 - Provides `find_references(symbol_name)` to find all references to a symbol
 - Available to agents as registered MCP tools during sandbox execution
 
-**Layer 3 — Semantic Search**:
+**Layer 3 — Semantic/Hybrid Search**:
 
-- `mcp_servers/semantic_search/` — MCP server for embedding-based code search
-- Provides `semantic_search(query, file_filter?, kind_filter?)` for natural language queries against indexed code
-- Connects to Qdrant vector database with Gemini embeddings
-- Supports file and kind filtering (e.g., search only functions in a specific path)
-- Requires prior indexing by the Indexing Worker
-- Conditionally registered: only when `INDEXING_ENABLED=true` + `QDRANT_URL` + `GEMINI_API_KEY`
+- Integrated into `search_codebase` tool via `search_type="semantic"` or `search_type="hybrid"`
+- Embeds queries via Gemini `gemini-embedding-001`, searches SurrealDB HNSW vector index
+- Supports `file_type` and `kind_filter` for narrowing results
+- Hybrid mode combines text + semantic results with deduplication
+- Requires prior indexing by the Indexing Worker and `GEMINI_API_KEY`
+
+**Code Graph Database**: The `symbol`, `calls`, `imports`, `inherits`, `route`, and `tool_def` tables in SurrealDB power code intelligence queries. `shared/code_graph.py` provides `SymbolIndex` for graph traversal (trace_flow, find_callers, find_downstream_flow), and `shared/route_maps.py` extracts HTTP routes and MCP tool definitions.
 
 **Language Support**:
 
@@ -671,11 +671,11 @@ Plugins are auto-discovered from `~/.claude/plugins/` at SDK build time via `SDK
 **Port**: 18000
 **Purpose**: Bridges stdio MCP servers to HTTP/SSE so Docker containers can access them
 
-The MCP proxy wraps each stdio MCP server (codebase_tools, github_actions, semantic_search) as an SSE endpoint at `http://mcp_proxy:18000/mcp/{server_name}/sse`. Workers connect via `socat` port forwarding (`localhost:18000 → mcp_proxy:18000`).
+The MCP proxy wraps each stdio MCP server (codebase_tools, github_actions) as an SSE endpoint at `http://mcp_proxy:18000/mcp/{server_name}/sse`. Workers connect via `socat` port forwarding (`localhost:18000 → mcp_proxy:18000`).
 
 It also bridges host services into the Docker network:
 - `localhost:11434` → host Ollama (via `host.docker.internal:11434`)
-- `localhost:6333` → Qdrant
+- `localhost:8000` → SurrealDB
 
 When `ALLOW_HOST_MCP=true`, MCP server definitions from the host's `~/.claude.json` are also available through the proxy, so any server installed with `claude mcp add --scope user` works inside Docker without extra configuration.
 
@@ -764,7 +764,11 @@ When `ALLOW_HOST_MCP=true`, MCP server definitions from the host's `~/.claude.js
 | `repomap.py` | Aider-style repomap using tree-sitter + PageRank for structural context |
 | `context_builder.py` | Async structural context generation with commit-based caching |
 | `ts_languages.py` | Language registry (10 languages) with dynamic tree-sitter loading |
-| `file_tree.py` | File tree generation with exclusion rules and Qdrant collection naming |
+| `file_tree.py` | File tree generation with exclusion rules and SurrealDB collection naming |
+| `code_graph.py` | Queryable symbol index for code intelligence (trace_flow, find_callers, find_downstream_flow) |
+| `import_resolver.py` | Python/TypeScript import path resolution |
+| `route_maps.py` | API route and MCP tool definition extraction |
+| `surrealdb_client.py` | SurrealDB connection management and schema definition (v3) |
 
 ### Cross-Cutting Concerns
 

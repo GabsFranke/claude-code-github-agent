@@ -105,8 +105,11 @@ ANTHROPIC_VERTEX_REGION=us-central1
 |----------|---------|-------------|
 | `INDEXING_ENABLED` | `false` | Enable the indexing worker. Note: `docker-compose.yml` may override this to `true` for the indexing_worker service |
 | `GEMINI_API_KEY` | — | Required for Gemini embeddings |
-| `QDRANT_URL` | `http://localhost:6333` | Qdrant instance URL |
-| `QDRANT_API_KEY` | — | Qdrant API key (if auth enabled) |
+| `SURREALDB_URL` | `ws://localhost:8000/rpc` | SurrealDB WebSocket URL |
+| `SURREALDB_USER` | `root` | SurrealDB username |
+| `SURREALDB_PASS` | `root` | SurrealDB password |
+| `SURREALDB_NS` | `bot` | SurrealDB namespace |
+| `SURREALDB_DB` | `codebase` | SurrealDB database name |
 | `EMBEDDING_MODEL` | `gemini-embedding-001` | Gemini embedding model |
 | `EMBEDDING_DIMENSION` | `1024` | Output vector dimensionality |
 | `EMBEDDING_BATCH_SIZE` | `20` | Texts per embedding API call |

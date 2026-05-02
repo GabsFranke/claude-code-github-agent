@@ -5,21 +5,40 @@ using a temporary Python repo fixture.
 """
 
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from mcp_servers.codebase_tools.tools import (
     _resolve_and_validate,
+    detect_changes,
     find_definitions,
     find_references,
     init_repo,
     read_file_summary,
     search_codebase,
+    trace_flow,
 )
+from tests.conftest import FakeSurrealDB
 
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _mock_surrealdb():
+    """Mock SurrealDB for all tests — no real connection needed."""
+    fake_db = FakeSurrealDB()
+
+    with (
+        patch("shared.surrealdb_client.is_initialized", return_value=True),
+        patch("shared.surrealdb_client.get_surreal", return_value=fake_db),
+        patch("shared.surrealdb_client.init_surrealdb"),
+        patch("shared.surrealdb_client.apply_schema"),
+        patch("shared.code_graph.is_initialized", return_value=True),
+        patch("shared.code_graph.get_surreal", return_value=fake_db),
+        patch("shared.code_graph.apply_schema"),
+        patch("mcp_servers.codebase_tools.tools.init_surrealdb"),
+        patch("mcp_servers.codebase_tools.tools.get_surreal", return_value=fake_db),
+    ):
+        yield fake_db
 
 
 @pytest.fixture
@@ -116,6 +135,11 @@ def parse_config(path: str) -> dict:
 @pytest.fixture
 def initialized_repo(python_repo: Path):
     """Initialize codebase tools with the test repo."""
+    # Reset module state before init
+    from mcp_servers.codebase_tools import tools
+
+    tools._repo_path = None
+    tools._symbol_index = None
     init_repo(str(python_repo))
     return python_repo
 
@@ -131,21 +155,20 @@ class TestInitRepo:
         from mcp_servers.codebase_tools import tools
 
         assert tools._repo_path == python_repo.resolve()
-        assert len(tools._tags_cache) > 0
+        assert tools._symbol_index is not None
+        assert tools._symbol_index._built
 
     def test_raises_on_invalid_path(self):
         with pytest.raises(ValueError, match="does not exist"):
             init_repo("/nonexistent/path/that/does/not/exist")
 
-    def test_caches_tags(self, python_repo: Path):
+    def test_build_completes_successfully(self, python_repo: Path):
+        """init_repo should build SymbolIndex and mark it as built."""
         init_repo(str(python_repo))
         from mcp_servers.codebase_tools import tools
 
-        # Should have tags from the Python files
-        tag_names = {t.name for t in tools._tags_cache}
-        assert "Application" in tag_names
-        assert "Database" in tag_names
-        assert "helper" in tag_names
+        assert tools._symbol_index is not None
+        assert tools._symbol_index._built
 
 
 # ---------------------------------------------------------------------------
@@ -291,6 +314,224 @@ class TestSearchCodebase:
 
 
 # ---------------------------------------------------------------------------
+# Test: search_codebase — semantic and hybrid modes
+# ---------------------------------------------------------------------------
+
+
+class MockEmbeddingResponse:
+    """Fake Gemini embedding response."""
+
+    embeddings: list = []
+
+
+class MockEmbedding:
+    """Fake embedding values."""
+
+    def __init__(self, values):
+        self.values = values
+
+
+@pytest.fixture
+def _populate_symbols(_mock_surrealdb: FakeSurrealDB):
+    """Populate FakeSurrealDB with symbol records for semantic search tests."""
+    symbols = [
+        {
+            "id": "symbol:1",
+            "name": "Database",
+            "kind": "definition",
+            "filepath": "database.py",
+            "line": 6,
+            "end_line": 17,
+            "language": "python",
+            "content": "class Database:\n    ...",
+            "embedding": [0.1] * 1024,
+        },
+        {
+            "id": "symbol:2",
+            "name": "Application",
+            "kind": "definition",
+            "filepath": "app.py",
+            "line": 7,
+            "end_line": 20,
+            "language": "python",
+            "content": "class Application:\n    ...",
+            "embedding": [0.2] * 1024,
+        },
+        {
+            "id": "symbol:3",
+            "name": "create_pool",
+            "kind": "definition",
+            "filepath": "database.py",
+            "line": 21,
+            "end_line": 23,
+            "language": "python",
+            "content": "def create_pool(size):\n    ...",
+            "embedding": [0.3] * 1024,
+        },
+    ]
+    _mock_surrealdb._ensure_table("symbol").extend(symbols)
+
+
+class TestSemanticSearch:
+    def test_semantic_search_finds_results(
+        self, initialized_repo: Path, _populate_symbols: None, monkeypatch
+    ):
+        """Semantic search should return results from SurrealDB vector search."""
+        monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+        mock_values = [0.15] * 1024
+        mock_embed = MockEmbedding(mock_values)
+        mock_response = MockEmbeddingResponse()
+        mock_response.embeddings = [mock_embed]
+
+        mock_genai_client = MagicMock()
+        mock_genai_client.models.embed_content.return_value = mock_response
+
+        with patch("google.genai.Client", return_value=mock_genai_client):
+            results = search_codebase(
+                "database connection handler",
+                search_type="semantic",
+                max_results=5,
+            )
+            assert isinstance(results, list)
+            assert len(results) >= 1
+            assert results[0]["name"] == "Database"
+            assert results[0]["kind"] == "definition"
+            assert "score" in results[0]
+
+    def test_semantic_search_filters_by_file_type(
+        self, initialized_repo: Path, _populate_symbols: None, monkeypatch
+    ):
+        """When file_type is 'python', results should be Python files only."""
+        monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+        mock_values = [0.15] * 1024
+        mock_embed = MockEmbedding(mock_values)
+        mock_response = MockEmbeddingResponse()
+        mock_response.embeddings = [mock_embed]
+
+        mock_genai_client = MagicMock()
+        mock_genai_client.models.embed_content.return_value = mock_response
+
+        with patch("google.genai.Client", return_value=mock_genai_client):
+            results = search_codebase(
+                "database",
+                file_type="python",
+                search_type="semantic",
+            )
+            for r in results:
+                assert r["file"].endswith(".py")
+
+    def test_semantic_search_filters_by_kind(
+        self, initialized_repo: Path, _populate_symbols: None, monkeypatch
+    ):
+        """When kind_filter is set, only matching symbol kinds are returned."""
+        monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+        mock_values = [0.15] * 1024
+        mock_embed = MockEmbedding(mock_values)
+        mock_response = MockEmbeddingResponse()
+        mock_response.embeddings = [mock_embed]
+
+        mock_genai_client = MagicMock()
+        mock_genai_client.models.embed_content.return_value = mock_response
+
+        with patch("google.genai.Client", return_value=mock_genai_client):
+            results = search_codebase(
+                "database connection",
+                search_type="semantic",
+                kind_filter="class",
+            )
+            for r in results:
+                assert r["kind"] == "class"
+
+    def test_semantic_search_falls_back_on_missing_api_key(
+        self, initialized_repo: Path, monkeypatch
+    ):
+        """When GEMINI_API_KEY is not set, fall back to text search."""
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+        results = search_codebase(
+            "def helper",
+            search_type="semantic",
+        )
+        assert isinstance(results, list)
+
+
+class TestHybridSearch:
+    def test_hybrid_search_returns_merged_results(
+        self, initialized_repo: Path, _populate_symbols: None, monkeypatch
+    ):
+        """Hybrid search should run both modes and merge results."""
+        monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+        mock_values = [0.15] * 1024
+        mock_embed = MockEmbedding(mock_values)
+        mock_response = MockEmbeddingResponse()
+        mock_response.embeddings = [mock_embed]
+
+        mock_genai_client = MagicMock()
+        mock_genai_client.models.embed_content.return_value = mock_response
+
+        with patch("google.genai.Client", return_value=mock_genai_client):
+            results = search_codebase(
+                "Database",
+                search_type="hybrid",
+                max_results=10,
+            )
+            assert isinstance(results, list)
+            # Should have at least the semantic matches
+            assert len(results) >= 1
+            # Each result should have a "source" field
+            for r in results:
+                assert "source" in r
+                assert r["source"] in ("semantic", "text")
+            # At least one semantic result
+            assert any(r["source"] == "semantic" for r in results)
+
+    def test_hybrid_deduplicates_by_file_and_line(
+        self, initialized_repo: Path, _populate_symbols: None, monkeypatch
+    ):
+        """Results with same (file, line) should be deduplicated."""
+        monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+        mock_values = [0.15] * 1024
+        mock_embed = MockEmbedding(mock_values)
+        mock_response = MockEmbeddingResponse()
+        mock_response.embeddings = [mock_embed]
+
+        mock_genai_client = MagicMock()
+        mock_genai_client.models.embed_content.return_value = mock_response
+
+        with patch("google.genai.Client", return_value=mock_genai_client):
+            results = search_codebase(
+                "class Database",
+                search_type="hybrid",
+            )
+            seen: set[tuple[str, int]] = set()
+            for r in results:
+                key = (r["file"], r["line"])
+                assert key not in seen, f"Duplicate result at {key}"
+                seen.add(key)
+
+    def test_hybrid_respects_max_results(
+        self, initialized_repo: Path, _populate_symbols: None, monkeypatch
+    ):
+        """Hybrid search should respect max_results cap."""
+        monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+        mock_values = [0.15] * 1024
+        mock_embed = MockEmbedding(mock_values)
+        mock_response = MockEmbeddingResponse()
+        mock_response.embeddings = [mock_embed]
+
+        mock_genai_client = MagicMock()
+        mock_genai_client.models.embed_content.return_value = mock_response
+
+        with patch("google.genai.Client", return_value=mock_genai_client):
+            results = search_codebase(
+                "import",
+                search_type="hybrid",
+                max_results=3,
+            )
+            assert len(results) <= 3
+
+
+# ---------------------------------------------------------------------------
 # Test: read_file_summary
 # ---------------------------------------------------------------------------
 
@@ -378,3 +619,73 @@ class TestPathValidation:
         result = _resolve_and_validate("some/nested/file.py")
         assert result.name == "file.py"
         assert "nested" in str(result)
+
+
+# ---------------------------------------------------------------------------
+# Test: detect_changes
+# ---------------------------------------------------------------------------
+
+
+class TestDetectChanges:
+    def test_returns_changed_files_structure(self, initialized_repo: Path):
+        import subprocess
+
+        with patch(
+            "subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                args=[], returncode=0, stdout="", stderr=""
+            ),
+        ):
+            result = detect_changes(scope="staged")
+        assert "changed_files" in result
+        assert "summary" in result
+        assert "risk_level" in result
+        assert isinstance(result["changed_files"], list)
+        assert result["risk_level"] in ("low", "medium", "high")
+
+    def test_unstaged_scope(self, initialized_repo: Path):
+        import subprocess
+
+        with patch(
+            "subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                args=[], returncode=0, stdout="", stderr=""
+            ),
+        ):
+            result = detect_changes(scope="unstaged")
+        assert "changed_files" in result
+        assert "summary" in result
+        assert "risk_level" in result
+
+
+# ---------------------------------------------------------------------------
+# Test: trace_flow
+# ---------------------------------------------------------------------------
+
+
+class TestTraceFlow:
+    def test_returns_structure(self, initialized_repo: Path):
+        result = trace_flow("Application")
+        assert "entry_point" in result
+        assert "entry_definition" in result
+        assert "steps" in result
+        assert "call_chain" in result
+        assert "total_steps" in result
+        assert "max_depth_reached" in result
+        assert isinstance(result["steps"], list)
+        assert isinstance(result["call_chain"], dict)
+
+    def test_unknown_entry_point(self, initialized_repo: Path):
+        result = trace_flow("nonexistent_function")
+        assert "error" in result
+
+    def test_with_file_hint(self, initialized_repo: Path):
+        result = trace_flow("Application", file_hint="app.py")
+        assert "error" not in result
+        assert "entry_definition" in result
+
+    def test_respects_max_depth(self, initialized_repo: Path):
+        result = trace_flow("Application", max_depth=1)
+        assert "steps" in result
+        for step in result["steps"]:
+            assert step["depth"] <= 1

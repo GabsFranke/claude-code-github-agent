@@ -65,18 +65,18 @@ class SDKOptionsBuilder:
         """Resolve indexing configuration with env-var fallback.
 
         Returns:
-            Tuple of (is_enabled, qdrant_url, gemini_api_key or None).
+            Tuple of (is_enabled, surrealdb_url, gemini_api_key or None).
         """
         try:
             from shared.config import IndexingConfig
 
             cfg = IndexingConfig()
-            return cfg.is_enabled, cfg.qdrant_url, cfg.gemini_api_key
+            return cfg.is_enabled, cfg.surrealdb_url, cfg.gemini_api_key
         except Exception as e:
             logger.warning("Failed to resolve indexing config: %s", e)
             return (
                 os.getenv("INDEXING_ENABLED", "false").lower() == "true",
-                os.getenv("QDRANT_URL") or "",
+                os.getenv("SURREALDB_URL") or "",
                 os.getenv("GEMINI_API_KEY") or "",
             )
 
@@ -96,7 +96,7 @@ class SDKOptionsBuilder:
         self._system_prompt: str | None = None
         self._agents: dict | None = None
         self._repo_context: dict = {}  # Store context for hooks
-        self._structural_context: str | None = None  # File tree + repomap
+        self._structural_context: str | None = None  # File tree
         self._thread_history: str | None = None  # Issue/PR comment history
         self._pending_post_jobs: list[dict] = (
             []
@@ -267,7 +267,6 @@ class SDKOptionsBuilder:
             "mcp__github_actions__*",
             "mcp__memory__memory_read",
             "mcp__codebase_tools__*",
-            "mcp__semantic_search__*",
         ]
 
         if os.getenv("ALLOW_HOST_MCP", "false").lower() == "true":
@@ -577,36 +576,31 @@ class SDKOptionsBuilder:
         return self
 
     def with_structural_context(
-        self, file_tree: str | None = None, repomap: str | None = None
+        self, file_tree: str | None = None
     ) -> "SDKOptionsBuilder":
         """Inject pre-built structural context into system prompt.
 
-        Structural context (file tree + repomap) is the lowest priority
-        component and will be truncated first if the total system prompt
-        exceeds the budget.
+        Structural context (file tree only — deep structure available via
+        codebase_tools MCP) is the lowest priority component and will be
+        truncated first if the total system prompt exceeds the budget.
 
         Args:
             file_tree: Pre-built file tree text.
-            repomap: Pre-built repomap text.
 
         Returns:
             Self for method chaining
         """
-        parts = []
         if file_tree and file_tree.strip():
-            parts.append(f"<repo_structure>\n{file_tree.strip()}\n</repo_structure>")
-        if repomap and repomap.strip():
-            parts.append(f"<repo_map>\n{repomap.strip()}\n</repo_map>")
-
-        if parts:
-            self._structural_context = "\n\n".join(parts)
+            self._structural_context = (
+                f"<repo_structure>\n{file_tree.strip()}\n</repo_structure>"
+            )
         return self
 
     def with_thread_history(self, history: str | None) -> "SDKOptionsBuilder":
         """Inject issue/PR comment history into system prompt.
 
         Thread history has medium priority — higher than structural context
-        (file tree/repomap) but lower than the workflow prompt. When the
+        (file tree) but lower than the workflow prompt. When the
         budget is exceeded, structural is truncated first, then thread
         history (from the top, dropping oldest comments), then the prompt.
 
@@ -742,7 +736,7 @@ class SDKOptionsBuilder:
         are truncated by priority if the budget is exceeded:
           1. Prompt content (workflow context, CLAUDE.md, memory index
              -- all combined into a single block; truncated last)
-          2. Structural context (file tree + repomap; truncated first)
+          2. Structural context (file tree; truncated first)
 
         Returns:
             Configured ClaudeAgentOptions instance
@@ -761,7 +755,7 @@ class SDKOptionsBuilder:
             logger.debug("=" * 80)
             logger.debug("SYSTEM PROMPT BEING PASSED TO SDK:")
             logger.debug("-" * 80)
-            # Print first 1000 chars to see structural context + repomap
+            # Print first 1000 chars to see structural context
             logger.debug(
                 self._system_prompt[:1000] + "..."
                 if len(self._system_prompt) > 1000
@@ -796,7 +790,7 @@ class SDKOptionsBuilder:
           1. Prompt content (workflow context, CLAUDE.md, memory index
              -- merged into a single block before this method runs)
           2. Thread history (issue/PR comments -- truncated from top/oldest)
-          3. Structural context (file tree + repomap)
+          3. Structural context (file tree)
           4. Session signature (always appended, never truncated)
 
         When the budget is exceeded, structural is truncated first,

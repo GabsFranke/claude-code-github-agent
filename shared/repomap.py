@@ -1,13 +1,8 @@
-"""Aider-style repomap for structural codebase understanding.
+"""Tag extraction for structural codebase understanding.
 
-Generates a compact "table of contents" of a codebase using tree-sitter
-parsing and PageRank ranking. Shows definitions, references, and their
-relationships so agents start every job with structural awareness.
-
-Falls back through three tiers:
-  Tier 1: Full tree-sitter parsing with PageRank
-  Tier 2: Regex-based tag extraction
-  Tier 3: File-tree only (handled by caller)
+Extracts definition and reference tags from source code using tree-sitter
+parsing with regex fallback. Tags are used by the SymbolIndex in
+shared.code_graph for on-demand code intelligence queries.
 """
 
 import logging
@@ -30,6 +25,7 @@ logger = logging.getLogger(__name__)
 # to avoid spamming logs for every file of an unsupported language.
 _warned_ts_failures: set[str] = set()
 
+
 # ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------
@@ -50,56 +46,25 @@ class Tag:
     end_line: int = 0  # For definitions, the last line
 
 
-@dataclass
-class _RankedTag:
-    """Tag with its PageRank score for sorting."""
-
-    tag: Tag
-    score: float = 0.0
-
-
 # ---------------------------------------------------------------------------
 # Regex fallback patterns (Tier 2)
 # ---------------------------------------------------------------------------
 
-_REGEX_PATTERNS: dict[str, list[tuple[str, str]]] = {
+_REGEX_PATTERNS: dict[str, list[tuple[str, re.Pattern]]] = {
     "python": [
-        ("class", r"^(\s*)class\s+(\w+)"),
-        ("function", r"^(\s*)def\s+(\w+)"),
-        ("variable", r"^(\w+)\s*=\s*"),
+        ("class", re.compile(r"^(\s*)class\s+(\w+)")),
+        ("function", re.compile(r"^(\s*)def\s+(\w+)")),
+        ("variable", re.compile(r"^(\w+)\s*=\s*")),
     ],
-    # Generic patterns applied to all languages when no specific match
     "_generic": [
-        ("function", r"^\s*(?:function|func|fn|def|sub)\s+(\w+)"),
-        ("class", r"^\s*(?:class|struct|interface|type|enum)\s+(\w+)"),
-        ("variable", r"^\s*(?:const|let|var|export\s+const|export\s+let)\s+(\w+)"),
+        ("function", re.compile(r"^\s*(?:function|func|fn|def|sub)\s+(\w+)")),
+        ("class", re.compile(r"^\s*(?:class|struct|interface|type|enum)\s+(\w+)")),
+        (
+            "variable",
+            re.compile(r"^\s*(?:const|let|var|export\s+const|export\s+let)\s+(\w+)"),
+        ),
     ],
 }
-
-# ---------------------------------------------------------------------------
-# Token counting (lightweight, no external deps required)
-# ---------------------------------------------------------------------------
-
-_tiktoken: object | None = None
-
-
-def _token_count(text: str) -> int:
-    """Estimate token count. Uses tiktoken if available, else word-based heuristic."""
-    global _tiktoken
-    if _tiktoken is None:
-        try:
-            import tiktoken  # type: ignore[import-untyped]
-
-            _tiktoken = tiktoken.encoding_for_model("claude-sonnet-4-20250514")
-        except Exception:
-            _tiktoken = False  # type: ignore[assignment]
-
-    if _tiktoken:
-        return len(_tiktoken.encode(text))  # type: ignore[union-attr,attr-defined]
-
-    # Heuristic: ~1.3 tokens per word for code
-    return max(1, int(len(text.split()) * 1.3))
-
 
 # ---------------------------------------------------------------------------
 # Core RepoMap class
@@ -107,49 +72,12 @@ def _token_count(text: str) -> int:
 
 
 class RepoMap:
-    """Generate a compact structural map of a codebase."""
+    """Extract definition and reference tags from source code."""
 
     def __init__(self, repo_path: Path):
         self.repo_path = Path(repo_path)
         self._tags: list[Tag] = []
         self._ignore_spec = load_ignore_spec(self.repo_path)
-
-    def get_repo_map(
-        self,
-        mentioned_files: list[str] | None = None,
-        mentioned_idents: list[str] | None = None,
-        token_budget: int = 4096,
-        include_test_files: bool = True,
-    ) -> str:
-        """Generate a ranked repomap within the token budget.
-
-        Args:
-            mentioned_files: Files to bias PageRank toward.
-            mentioned_idents: Identifiers to bias PageRank toward.
-            token_budget: Maximum tokens for the output.
-            include_test_files: Whether to boost test files in ranking (default True).
-
-        Returns:
-            Compact text representation of codebase structure.
-        """
-        mentioned_files = mentioned_files or []
-        mentioned_idents = mentioned_idents or []
-
-        # Extract tags from all source files
-        self._tags = self._extract_all_tags()
-        if not self._tags:
-            return ""
-
-        # Build reference graph and rank
-        ranked = self._rank_tags(
-            self._tags,
-            mentioned_files=mentioned_files,
-            mentioned_idents=mentioned_idents,
-            include_test_files=include_test_files,
-        )
-
-        # Render within budget
-        return self._render_map(ranked, token_budget)
 
     # ------------------------------------------------------------------
     # Tag extraction
@@ -163,11 +91,34 @@ class RepoMap:
         """
         return self._extract_all_tags()
 
-    def _extract_all_tags(self) -> list[Tag]:
-        """Extract tags from all source files in the repo."""
+    def _extract_all_tags(self, priority_files: list[str] | None = None) -> list[Tag]:
+        """Extract tags from source files, processing priority files first.
+
+        Priority files (e.g., mentioned/changed files) are processed in full,
+        then background files are processed.
+        """
+        priority_files = priority_files or []
+        all_files = self._iter_source_files()
+
+        # Split into priority and background files
+        priority_paths: list[Path] = []
+        background_paths: list[Path] = []
+        for filepath in all_files:
+            rel = str(filepath.relative_to(self.repo_path)).replace("\\", "/")
+            if rel in priority_files:
+                priority_paths.append(filepath)
+            else:
+                background_paths.append(filepath)
+
         tags: list[Tag] = []
 
-        for filepath in self._iter_source_files():
+        # Priority pass: process mentioned/changed files in full
+        for filepath in priority_paths:
+            file_tags = self._get_tags(filepath)
+            tags.extend(file_tags)
+
+        # Background pass: process remaining files
+        for filepath in background_paths:
             file_tags = self._get_tags(filepath)
             tags.extend(file_tags)
 
@@ -246,6 +197,25 @@ class RepoMap:
                     logger.debug(f"Query failed for {rel_path}: {e}")
                     continue
 
+            # Deduplicate definitions: overlapping queries (e.g., bare
+            # function_declaration AND export_statement wrapping it) can
+            # produce multiple Tags for the same symbol.  Keep the one
+            # with the widest byte range per (name, category, filepath).
+            deduped: dict[tuple[str, str, str], Tag] = {}
+            for tag in tags:
+                key = (tag.name, tag.category, tag.filepath)
+                existing = deduped.get(key)
+                if existing is None:
+                    deduped[key] = tag
+                else:
+                    tag_span = tag.end_line - tag.line
+                    existing_span = existing.end_line - existing.line
+                    if tag_span > existing_span:
+                        deduped[key] = tag
+            tags = list(deduped.values())
+
+            defn_set = {(t.name, t.line) for t in tags if t.kind == "definition"}
+
             # Extract references using per-language queries from config
             for category, query_str in config.reference_queries:
                 try:
@@ -254,13 +224,7 @@ class RepoMap:
                         name = match.get("name")
                         line = match.get("line")
                         if name and line is not None:
-                            # Skip if already captured as a definition on same line
-                            if any(
-                                t.name == name
-                                and t.line == line
-                                and t.kind == "definition"
-                                for t in tags
-                            ):
+                            if (name, line) in defn_set:
                                 continue
                             tags.append(
                                 Tag(
@@ -303,6 +267,7 @@ class RepoMap:
         Returns list of dicts with keys:
           - 'name': str value of the @name capture
           - 'node' | 'line': tuple (start_line, end_line) for @node, or int line for simple captures
+          - 'target': str value of the @target capture (optional, for relationship queries)
         """
         results: list[dict] = []
         try:
@@ -312,7 +277,7 @@ class RepoMap:
             cursor = QueryCursor(q)
 
             # cursor.captures() returns dict[str, list[Node]]
-            # e.g. {'name': [Node, ...], 'node': [Node, ...]}
+            # e.g. {'name': [Node, ...], 'node': [Node, ...], 'target': [Node, ...]}
             capture_dict = cursor.captures(root_node)
 
             # Type guard: ensure we got a dict back
@@ -321,6 +286,7 @@ class RepoMap:
 
             name_nodes = capture_dict.get("name", [])
             node_nodes = capture_dict.get("node", [])
+            target_nodes = capture_dict.get("target", [])
 
             # Pair each @name capture with its corresponding @node by
             # checking byte-range containment: the name identifier is a
@@ -328,6 +294,7 @@ class RepoMap:
             # inside the node's range.  Index-based pairing is unreliable
             # because tree-sitter may return captures in different orders.
             node_pool = list(node_nodes)  # copy so we can consume
+            target_pool = list(target_nodes)  # copy so we can consume
 
             for name_node in name_nodes:
                 text = source[name_node.start_byte : name_node.end_byte].decode(
@@ -354,6 +321,36 @@ class RepoMap:
                 else:
                     entry["line"] = name_node.start_point[0] + 1
 
+                # Find the @target whose byte range is contained within
+                # the same @node as this @name (or is the @name itself
+                # for simple captures). For relationship queries, @target
+                # identifies the symbol being called/imported/inherited.
+                matched_target = None
+                for k, tcand in enumerate(target_pool):
+                    # @target must be inside the same @node as @name,
+                    # or if there's no @node, inside the @name's byte range
+                    if matched_node is not None:
+                        if (
+                            tcand.start_byte >= matched_node.start_byte
+                            and tcand.end_byte <= matched_node.end_byte
+                        ):
+                            matched_target = tcand
+                            target_pool.pop(k)
+                            break
+                    else:
+                        if (
+                            tcand.start_byte >= name_node.start_byte
+                            and tcand.end_byte <= name_node.end_byte
+                        ):
+                            matched_target = tcand
+                            target_pool.pop(k)
+                            break
+
+                if matched_target is not None:
+                    entry["target"] = source[
+                        matched_target.start_byte : matched_target.end_byte
+                    ].decode("utf-8", errors="replace")
+
                 results.append(entry)
         except Exception as e:
             logger.debug(f"Query execution failed: {e}")
@@ -372,7 +369,7 @@ class RepoMap:
 
         for category, pattern in patterns:
             for i, line in enumerate(text.splitlines(), 1):
-                m = re.match(pattern, line)
+                m = pattern.match(line)
                 if m:
                     # Extract name from regex match
                     name = (
@@ -390,271 +387,3 @@ class RepoMap:
                         )
 
         return tags
-
-    # ------------------------------------------------------------------
-    # Ranking via PageRank (or simple reference counting)
-    # ------------------------------------------------------------------
-
-    def _rank_tags(
-        self,
-        tags: list[Tag],
-        mentioned_files: list[str],
-        mentioned_idents: list[str],
-        include_test_files: bool = True,
-    ) -> list[_RankedTag]:
-        """Rank tags by importance using reference graph analysis."""
-        definitions = [t for t in tags if t.kind == "definition"]
-        if not definitions:
-            return []
-
-        # Build symbol index: name -> list of definition tags
-        def_index: dict[str, list[Tag]] = {}
-        for t in definitions:
-            def_index.setdefault(t.name, []).append(t)
-
-        # Count references per definition name
-        ref_counts: dict[str, int] = {}
-        for t in tags:
-            if t.kind == "reference" and t.name in def_index:
-                ref_counts[t.name] = ref_counts.get(t.name, 0) + 1
-
-        # Try PageRank via networkx
-        ranked_defs = self._pagerank_rank(
-            definitions,
-            ref_counts,
-            mentioned_files,
-            mentioned_idents,
-            include_test_files,
-        )
-
-        if ranked_defs is None:
-            # Fallback to simple scoring
-            ranked_defs = self._simple_rank(
-                definitions,
-                ref_counts,
-                mentioned_files,
-                mentioned_idents,
-                include_test_files,
-            )
-
-        return ranked_defs
-
-    def _pagerank_rank(
-        self,
-        definitions: list[Tag],
-        ref_counts: dict[str, int],
-        mentioned_files: list[str],
-        mentioned_idents: list[str],
-        include_test_files: bool = True,
-    ) -> list[_RankedTag] | None:
-        """Rank definitions using PageRank on reference graph."""
-        try:
-            import networkx as nx  # type: ignore[import-untyped]
-        except ImportError:
-            return None
-
-        G = nx.DiGraph()
-
-        # Add nodes for each definition (unique by filepath:name:line)
-        def_keys: dict[str, Tag] = {}
-        for d in definitions:
-            key = f"{d.filepath}:{d.name}:{d.line}"
-            def_keys[key] = d
-            G.add_node(key)
-
-        # Build edges: for each reference, link to definitions of same name
-        # Weight by identifier specificity (longer names = more specific)
-        for d in definitions:
-            src_key = f"{d.filepath}:{d.name}:{d.line}"
-            # This definition refers to names in the same file
-            # (simplified: cross-file refs via shared names)
-            for other_d in definitions:
-                if other_d.filepath == d.filepath and other_d.name == d.name:
-                    continue
-                if other_d.name in ref_counts:
-                    dst_key = f"{other_d.filepath}:{other_d.name}:{other_d.line}"
-                    # Weight: longer/more specific names get higher weight
-                    weight = 1.0
-                    if len(other_d.name) > 8:
-                        weight = 2.0
-                    if len(other_d.name) > 16:
-                        weight = 4.0
-                    # Penalize very common names
-                    common = {
-                        "get",
-                        "set",
-                        "run",
-                        "do",
-                        "main",
-                        "init",
-                        "setup",
-                        "handle",
-                    }
-                    if other_d.name.lower() in common:
-                        weight *= 0.1
-                    G.add_edge(src_key, dst_key, weight=weight)
-
-        if G.number_of_nodes() == 0:
-            return None
-
-        # Build personalization vector
-        personalization: dict[str, float] = {}
-        for key, d in def_keys.items():
-            score = 1.0
-            if d.filepath in mentioned_files:
-                score += 10.0
-            if d.name in mentioned_idents:
-                score += 5.0
-            # Boost by reference count
-            score += ref_counts.get(d.name, 0) * 0.5
-            # Test file handling
-            if "test" in d.filepath.lower():
-                if include_test_files:
-                    score += 2.0  # Boost test files for review workflows
-                else:
-                    score *= 0.7  # Penalize for non-review workflows
-            personalization[key] = score
-
-        # Normalize personalization
-        total = sum(personalization.values())
-        if total > 0:
-            personalization = {k: v / total for k, v in personalization.items()}
-
-        try:
-            # PageRank with timeout protection
-            scores = nx.pagerank(
-                G, personalization=personalization, max_iter=50, tol=1e-4
-            )
-        except ImportError:
-            logger.info(
-                "scipy not installed — falling back to simple ranking. "
-                "Install scipy for PageRank-based ranking."
-            )
-            return None
-        except Exception as e:
-            logger.debug(f"PageRank failed: {e}")
-            return None
-
-        # Build ranked list
-        ranked = []
-        for key, score in scores.items():
-            if key in def_keys:
-                ranked.append(_RankedTag(tag=def_keys[key], score=score))
-
-        ranked.sort(key=lambda r: -r.score)
-        return ranked
-
-    @staticmethod
-    def _simple_rank(
-        definitions: list[Tag],
-        ref_counts: dict[str, int],
-        mentioned_files: list[str],
-        mentioned_idents: list[str],
-        include_test_files: bool = True,
-    ) -> list[_RankedTag]:
-        """Simple scoring when PageRank is unavailable."""
-        scored: list[_RankedTag] = []
-
-        for d in definitions:
-            score = 1.0
-
-            # Referenced by other code
-            score += ref_counts.get(d.name, 0) * 2.0
-
-            # Personalization
-            if d.filepath in mentioned_files:
-                score += 10.0
-            if d.name in mentioned_idents:
-                score += 5.0
-
-            # Category weighting
-            if d.category == "class":
-                score += 3.0
-            elif d.category == "function":
-                score += 2.0
-            elif d.category == "method":
-                score += 1.5
-
-            # Test file handling
-            if "test" in d.filepath.lower():
-                if include_test_files:
-                    score += 2.0  # Boost test files for review workflows
-                else:
-                    score *= 0.7  # Penalize for non-review workflows
-
-            scored.append(_RankedTag(tag=d, score=score))
-
-        scored.sort(key=lambda r: -r.score)
-        return scored
-
-    # ------------------------------------------------------------------
-    # Rendering
-    # ------------------------------------------------------------------
-
-    def _render_map(self, ranked_tags: list[_RankedTag], token_budget: int) -> str:
-        """Render ranked tags into a compact text within token budget."""
-        if not ranked_tags:
-            return ""
-
-        # Group by file
-        file_entries: dict[str, list[str]] = {}
-        for rt in ranked_tags:
-            fp = rt.tag.filepath
-            if fp not in file_entries:
-                file_entries[fp] = []
-
-            tag = rt.tag
-            if tag.kind == "definition":
-                if tag.end_line and tag.end_line > tag.line:
-                    entry = f"{tag.line}-{tag.end_line}│ {tag.category} {tag.name}"
-                else:
-                    entry = f"{tag.line}│ {tag.category} {tag.name}"
-            else:
-                entry = f"{tag.line}│ {tag.name}"
-
-            if entry not in file_entries[fp]:
-                file_entries[fp].append(entry)
-
-        # Render files in order of highest-scoring tag
-        file_max_score: dict[str, float] = {}
-        for rt in ranked_tags:
-            fp = rt.tag.filepath
-            if fp not in file_max_score or rt.score > file_max_score[fp]:
-                file_max_score[fp] = rt.score
-
-        sorted_files = sorted(
-            file_entries.keys(), key=lambda f: -file_max_score.get(f, 0)
-        )
-
-        # Build output within budget
-        lines: list[str] = []
-        budget_remaining = token_budget
-
-        for filepath in sorted_files:
-            entries = file_entries[filepath]
-            block = f"{filepath}:"
-            for entry in entries:
-                block += f"\n  {entry}"
-
-            block_tokens = _token_count(block)
-            if budget_remaining <= 0:
-                break
-            if block_tokens > budget_remaining:
-                # Try to fit some entries
-                partial = f"{filepath}:"
-                for entry in entries:
-                    candidate = partial + f"\n  {entry}"
-                    if _token_count(candidate) > budget_remaining:
-                        break
-                    partial = candidate
-                if _token_count(partial) > _token_count(f"{filepath}:") + 5:
-                    lines.append(partial)
-                break
-
-            lines.append(block)
-            budget_remaining -= block_tokens
-
-        if not lines:
-            return ""
-
-        return "\n".join(lines)

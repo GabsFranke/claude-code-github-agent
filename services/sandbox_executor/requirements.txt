@@ -24,4 +24,4 @@ tiktoken>=0.12.0
 pathspec>=1.0.4
 # Semantic search MCP dependencies
 google-genai>=1.72.0
-qdrant-client>=1.17.1
+surrealdb>=0.3.0

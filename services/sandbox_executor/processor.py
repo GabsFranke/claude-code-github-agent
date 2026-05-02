@@ -72,7 +72,6 @@ class JobProcessor:
 
         # Context details
         self.file_tree_text = ""
-        self.repomap_text = ""
         self.thread_history_text = ""
         self.parent_span_id = job_data.get("parent_span_id")
 
@@ -381,7 +380,9 @@ class JobProcessor:
 
             context_profile = self.job_data.get("context_profile", {})
             if context_profile:
-                context_budget = context_profile.get("repomap_budget", 4096)
+                context_budget = context_profile.get(
+                    "repomap_budget", 4096
+                )  # noqa: E501 repomap_budget kept for config compat
                 include_test_files = context_profile.get("include_test_files", True)
 
             if context_profile.get("personalized", False):
@@ -401,7 +402,7 @@ class JobProcessor:
                                     f["path"] for f in files if "path" in f
                                 ]
                                 logger.info(
-                                    f"Personalizing repomap toward {len(mentioned_files)} changed files"
+                                    f"Personalizing context toward {len(mentioned_files)} changed files"
                                 )
                     except Exception as e:
                         logger.debug(
@@ -419,7 +420,7 @@ class JobProcessor:
                             f"Added {len(focus_files)} priority focus files for areas: {priority_focus}"
                         )
 
-            self.file_tree_text, self.repomap_text = await generate_structural_context(
+            self.file_tree_text = await generate_structural_context(
                 repo_path=Path(self.workspace),
                 repo=self.repo,
                 mentioned_files=mentioned_files,
@@ -428,7 +429,7 @@ class JobProcessor:
                 cache_dir=Path.home() / ".claude",
             )
             logger.info(
-                f"Generated structural context: file_tree={len(self.file_tree_text)} chars, repomap={len(self.repomap_text)} chars"
+                f"Generated structural context: file_tree={len(self.file_tree_text)} chars"
             )
         except Exception as e:
             logger.warning(
@@ -558,7 +559,6 @@ class JobProcessor:
                 memory_index=memory_index,
                 thread_history_text=self.thread_history_text,
                 file_tree_text=self.file_tree_text,
-                repomap_text=self.repomap_text,
             )
 
             if continue_count == 0:

@@ -157,9 +157,8 @@ All agents are designed to gather context beyond the PR diff using codebase tool
 
 - **`find_definitions`** — Locate where symbols are defined
 - **`find_references`** — Trace how symbols are used across the codebase
-- **`search_codebase`** — Regex search for patterns, utilities, and conventions
+- **`search_codebase`** — Text, semantic, or hybrid search for patterns, utilities, and conventions
 - **`read_file_summary`** — Get file API surfaces without reading full implementations
-- **`semantic_search`** — Conceptual search for related code by meaning
 
 This means agents evaluate your PR against the actual codebase patterns, not just theoretical best practices.
 

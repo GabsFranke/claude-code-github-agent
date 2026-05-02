@@ -1,10 +1,12 @@
 """Codebase search tools for structured code exploration.
 
-Provides find_definitions, find_references, search_codebase, and
-read_file_summary tools that agents can use for targeted lookups
-without burning tokens on raw Bash/Grep exploration.
+Provides find_definitions, find_references, search_codebase,
+read_file_summary, get_context, get_impact, and get_file_overview tools
+that agents can use for targeted lookups without burning tokens on raw
+Bash/Grep exploration.
 
-Reuses Phase 1's tree-sitter infrastructure from shared.repomap.
+Uses SymbolIndex from shared.code_graph for relationship-aware queries
+(call graph, import graph, inheritance).
 """
 
 import logging
@@ -12,11 +14,17 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 from typing import Any
 
+from shared.code_graph import SymbolIndex
 from shared.file_tree import EXCLUDE_DIRS
-from shared.repomap import Tag
+from shared.surrealdb_client import (
+    get_surreal,
+    init_surrealdb,
+    is_initialized as _sdb_is_initialized,
+)
 from shared.ts_languages import EXTENSION_MAP, get_language
 
 logger = logging.getLogger(__name__)
@@ -26,9 +34,10 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _repo_path: Path | None = None
-_tags_cache: list[Tag] = []
+_symbol_index: SymbolIndex | None = None
 _ast_cache: dict[tuple[str, float], tuple[Any, bytes]] = {}
 _AST_CACHE_MAX_SIZE = 500
+_index_ready = threading.Event()
 
 # File type aliases for ripgrep
 _FILE_TYPE_MAP: dict[str, str] = {
@@ -74,22 +83,27 @@ def init_repo(repo_path: str) -> None:
     Args:
         repo_path: Absolute path to the git worktree.
     """
-    global _repo_path, _tags_cache
-
-    from shared.repomap import RepoMap
+    global _repo_path, _symbol_index
 
     _repo_path = Path(repo_path).resolve()
 
     if not _repo_path.is_dir():
         raise ValueError(f"Repo path does not exist: {_repo_path}")
 
-    # Extract and cache all tags for find_definitions / find_references
-    rm = RepoMap(_repo_path)
-    _tags_cache = rm.extract_tags()
-    logger.info(
-        f"Initialized codebase tools for {_repo_path} "
-        f"({len(_tags_cache)} tags cached)"
-    )
+    # Initialize SurrealDB connection (idempotent)
+    surrealdb_url = os.getenv("SURREALDB_URL", "ws://localhost:8000/rpc")
+    init_surrealdb(surrealdb_url)
+
+    # Build the symbol index (SurrealDB-backed, skips if already indexed)
+    _symbol_index = SymbolIndex(repo_path=_repo_path)
+    _symbol_index.build()
+    _index_ready.set()
+    logger.info("Symbol index ready for %s", _repo_path)
+
+
+def is_ready() -> bool:
+    """Check whether the symbol index has finished building."""
+    return _index_ready.is_set()
 
 
 # ---------------------------------------------------------------------------
@@ -186,7 +200,7 @@ def _get_or_parse(filepath: Path) -> tuple[Any, bytes | None]:
 def find_definitions(symbol_name: str) -> list[dict[str, Any]]:
     """Find where a symbol (class, function, method) is defined.
 
-    Uses the cached tag index from Phase 1's RepoMap. Supports
+    Uses the cached tag index from SymbolIndex. Supports
     tree-sitter and regex-extracted tags.
 
     Args:
@@ -195,18 +209,18 @@ def find_definitions(symbol_name: str) -> list[dict[str, Any]]:
     Returns:
         List of dicts with keys: file, line, kind, signature, end_line.
     """
+    if _symbol_index is None:
+        return []
+
+    tags = _symbol_index.find_definitions(symbol_name)
+    seen: set[tuple[str, int, str]] = set()
     results: list[dict[str, Any]] = []
-    seen: set[tuple[str, int]] = set()
 
-    for tag in _tags_cache:
-        if tag.kind != "definition" or tag.name != symbol_name:
-            continue
-
-        key = (tag.filepath, tag.line)
+    for tag in tags:
+        key = (tag.filepath, tag.line, tag.category)
         if key in seen:
             continue
         seen.add(key)
-
         # Read the source line for a signature
         signature = _read_source_line(tag.filepath, tag.line)
 
@@ -231,9 +245,8 @@ def find_definitions(symbol_name: str) -> list[dict[str, Any]]:
 def find_references(symbol_name: str) -> list[dict[str, Any]]:
     """Find all references to a symbol across the codebase.
 
-    Uses text search (ripgrep or Python regex) to find all occurrences
-    of the exact symbol name, then excludes definition lines. This works
-    across all languages regardless of tree-sitter availability.
+    Combines SymbolIndex reference data with text search (ripgrep or
+    Python regex) to find all occurrences, excluding definition lines.
 
     Args:
         symbol_name: Exact name of the symbol.
@@ -243,12 +256,11 @@ def find_references(symbol_name: str) -> list[dict[str, Any]]:
     """
     # Collect definition locations to exclude from results
     definition_lines: set[tuple[str, int]] = set()
-    for tag in _tags_cache:
-        if tag.kind == "definition" and tag.name == symbol_name:
+    if _symbol_index is not None:
+        for tag in _symbol_index.find_definitions(symbol_name):
             definition_lines.add((tag.filepath, tag.line))
 
     # Search for exact word-boundary matches of the symbol name
-    # Use word-boundary regex to match whole identifiers only
     pattern = r"\b" + re.escape(symbol_name) + r"\b"
 
     raw_results = search_codebase(pattern, max_results=50)
@@ -285,23 +297,36 @@ def search_codebase(
     pattern: str,
     file_type: str | None = None,
     max_results: int = 20,
+    search_type: str = "text",
+    kind_filter: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Search codebase with ripgrep (or Python regex fallback).
+    """Search codebase with text, semantic, or hybrid search.
 
     Args:
-        pattern: Regex or literal pattern to search for.
-        file_type: Optional file type alias (e.g., "python").
+        pattern: For text/hybrid: regex pattern. For semantic: natural language query.
+        file_type: Optional file type filter (e.g., "python", "js", "ts").
         max_results: Maximum results to return (capped at 100).
+        search_type: "text" (default), "semantic", or "hybrid".
+        kind_filter: For semantic/hybrid: filter by symbol kind
+            ("function", "class", "method", "variable").
 
     Returns:
-        List of dicts with keys: file, line, match, context.
+        List of result dicts. Format varies by search_type:
+        - text: {file, line, match, context}
+        - semantic: {file, name, kind, line, end_line, content, score}
+        - hybrid: Same as semantic/text with "source" field added.
     """
     max_results = min(max(1, max_results), 100)
 
-    rg_path = shutil.which("rg")
-    if rg_path:
-        return _search_with_rg(rg_path, pattern, file_type, max_results)
-    return _search_with_re(pattern, file_type, max_results)
+    if search_type == "semantic":
+        return _semantic_search(pattern, file_type, max_results, kind_filter)
+    elif search_type == "hybrid":
+        return _hybrid_search(pattern, file_type, max_results, kind_filter)
+    else:
+        rg_path = shutil.which("rg")
+        if rg_path:
+            return _search_with_rg(rg_path, pattern, file_type, max_results)
+        return _search_with_re(pattern, file_type, max_results)
 
 
 def _search_with_rg(
@@ -456,6 +481,200 @@ def _search_with_re(
                     )
 
     return results
+
+
+# File type aliases for language names (used in SurrealDB queries)
+_FILE_TYPE_TO_LANGUAGE: dict[str, str] = {
+    "python": "python",
+    "js": "javascript",
+    "ts": "typescript",
+    "go": "go",
+    "rust": "rust",
+    "java": "java",
+    "ruby": "ruby",
+    "c": "c",
+    "cpp": "cpp",
+}
+
+
+def _semantic_search(
+    query: str,
+    file_type: str | None,
+    max_results: int,
+    kind_filter: str | None = None,
+) -> list[dict[str, Any]]:
+    """Semantic search via Gemini embedding + SurrealDB HNSW vector index.
+
+    Falls back to text search if Gemini or SurrealDB are unavailable.
+    """
+    try:
+        from google import genai
+        from google.genai import types
+    except ImportError:
+        logger.warning("google-genai not installed. Falling back to text search.")
+        return _fallback_text_search(query, file_type, max_results)
+
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        logger.warning("GEMINI_API_KEY not set. Falling back to text search.")
+        return _fallback_text_search(query, file_type, max_results)
+
+    embedding_dim = int(os.getenv("EMBEDDING_DIMENSION", "1024"))
+
+    try:
+        client = genai.Client(api_key=api_key)
+        response = client.models.embed_content(
+            model="gemini-embedding-001",
+            contents=[query],
+            config=types.EmbedContentConfig(
+                output_dimensionality=embedding_dim,
+                task_type="RETRIEVAL_QUERY",
+            ),
+        )
+
+        if not response.embeddings or not response.embeddings[0].values:
+            logger.warning("Gemini returned empty embedding for query: %s", query[:100])
+            return []
+
+        query_embedding = response.embeddings[0].values
+
+        if not _sdb_is_initialized():
+            init_surrealdb()
+        db = get_surreal()
+
+        # Warm up SurrealDB — first query after startup may need to load
+        # HNSW index pages into memory. Without this, the k-NN below can
+        # return 0 rows even though the index has matching embeddings.
+        try:
+            db.query("SELECT count() FROM symbol LIMIT 1")
+        except Exception:
+            pass
+
+        params: dict[str, object] = {
+            "qvec": query_embedding,
+        }
+
+        conditions: list[str] = []
+
+        if file_type:
+            lang = _FILE_TYPE_TO_LANGUAGE.get(file_type)
+            if lang:
+                conditions.append("language = $lang")
+                params["lang"] = lang
+
+        if kind_filter:
+            conditions.append("kind = $kind")
+            params["kind"] = kind_filter
+
+        kind_condition = ""
+        if conditions:
+            kind_condition = "AND " + " AND ".join(conditions)
+
+        result = db.query(
+            f"""SELECT name, kind, filepath, line, end_line, content,
+                       vector::distance::knn() AS score
+                FROM symbol
+                WHERE embedding IS NOT NULL {kind_condition}
+                AND embedding <|{max_results},128|> $qvec
+                ORDER BY score
+                LIMIT {max_results}""",
+            params,
+        )
+
+        rows = _extract_surrealdb_rows(result)
+
+        if not rows:
+            logger.debug(
+                "Semantic search returned 0 rows for query: %s (dim=%d)",
+                query[:100],
+                len(query_embedding),
+            )
+
+        output: list[dict[str, Any]] = []
+        for row in rows:
+            output.append(
+                {
+                    "file": row.get("filepath", ""),
+                    "name": row.get("name", ""),
+                    "kind": row.get("kind", ""),
+                    "line": row.get("line", 0),
+                    "end_line": row.get("end_line", 0),
+                    "content": row.get("content", ""),
+                    "score": row.get("score"),
+                }
+            )
+            if len(output) >= max_results:
+                break
+
+        return output
+
+    except Exception as e:
+        logger.error("Semantic search failed: %s", e, exc_info=True)
+        return _fallback_text_search(query, file_type, max_results)
+
+
+def _hybrid_search(
+    pattern: str,
+    file_type: str | None,
+    max_results: int,
+    kind_filter: str | None = None,
+) -> list[dict[str, Any]]:
+    """Hybrid search combining text + semantic with deduplication.
+
+    Runs both search modes independently and merges results. Semantic results
+    are prioritized since they capture meaning, not just literal matches.
+    Deduplicates by (file, line) key.
+    """
+    text_results = _fallback_text_search(pattern, file_type, max_results)
+    semantic_results = _semantic_search(pattern, file_type, max_results, kind_filter)
+
+    seen: set[tuple[str, int]] = set()
+    merged: list[dict[str, Any]] = []
+
+    # Add semantic results first (ranked by relevance)
+    for r in semantic_results:
+        key = (r["file"], r["line"])
+        if key not in seen:
+            seen.add(key)
+            r["source"] = "semantic"
+            merged.append(r)
+
+    # Add non-overlapping text results
+    for r in text_results:
+        key = (r["file"], r["line"])
+        if key not in seen:
+            seen.add(key)
+            r["source"] = "text"
+            merged.append(r)
+
+    return merged[:max_results]
+
+
+def _fallback_text_search(
+    pattern: str,
+    file_type: str | None,
+    max_results: int,
+) -> list[dict[str, Any]]:
+    """Text search fallback used when semantic search is unavailable."""
+    rg_path = shutil.which("rg")
+    if rg_path:
+        return _search_with_rg(rg_path, pattern, file_type, max_results)
+    return _search_with_re(pattern, file_type, max_results)
+
+
+def _extract_surrealdb_rows(result: object) -> list[dict]:
+    """Extract rows from a SurrealDB query result across known response shapes."""
+    if result is None:
+        return []
+    if isinstance(result, list):
+        items = result
+    elif isinstance(result, dict) and "result" in result:
+        items = result["result"]
+    else:
+        return []
+    if isinstance(items, list):
+        return [r for r in items if isinstance(r, dict)]
+    return []  # type: ignore[unreachable]
 
 
 # ---------------------------------------------------------------------------
@@ -712,6 +931,201 @@ def _read_summary_regex(
         "signatures": signatures,
         "total_lines": total_lines,
     }
+
+
+# ---------------------------------------------------------------------------
+# Tool: get_context
+# ---------------------------------------------------------------------------
+
+
+def get_context(symbol_name: str, file_hint: str | None = None) -> dict[str, Any]:
+    """Get a 360-degree view of a symbol: definition, callers, callees, inheritance.
+
+    If the symbol name is ambiguous (multiple definitions), returns a
+    disambiguation list so the agent can narrow down.
+
+    Args:
+        symbol_name: Exact name of the symbol.
+        file_hint: Optional file path to disambiguate when the symbol exists
+            in multiple files. Example: 'shared/repomap.py'.
+
+    Returns:
+        Dict with definition, scope, calls, called_by, inherits_from, inherited_by.
+    """
+    if _symbol_index is None:
+        return {"symbol": symbol_name, "error": "Symbol index not initialized"}
+
+    return _symbol_index.get_context(symbol_name, file_hint=file_hint)
+
+
+# ---------------------------------------------------------------------------
+# Tool: get_impact
+# ---------------------------------------------------------------------------
+
+
+def get_impact(
+    file_path: str,
+    start_line: int | None = None,
+    end_line: int | None = None,
+    max_depth: int = 3,
+    direction: str = "both",
+) -> dict[str, Any]:
+    """Get the blast radius of changes to a file or line range.
+
+    Uses BFS graph traversal to find upstream (who depends on us) and
+    downstream (what we depend on) impact through the call graph.
+
+    Args:
+        file_path: Path relative to repo root.
+        start_line: Optional start line to narrow the impact range.
+        end_line: Optional end line to narrow the impact range.
+        max_depth: Maximum BFS traversal depth (1-10, default 3).
+        direction: "upstream" (who depends on us), "downstream"
+            (what we depend on), or "both" (default).
+
+    Returns:
+        Dict with symbols_in_range, upstream_impact, downstream_impact,
+        imported_by, risk_level, risk_summary.
+    """
+    if _symbol_index is None:
+        return {"file": file_path, "error": "Symbol index not initialized"}
+
+    # Validate the file path
+    _resolve_and_validate(file_path)
+
+    return _symbol_index.get_impact(
+        file_path,
+        start_line,
+        end_line,
+        max_depth=max_depth,
+        direction=direction,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tool: get_file_overview
+# ---------------------------------------------------------------------------
+
+
+def get_file_overview(file_path: str) -> dict[str, Any]:
+    """Get all symbols, imports, and class structure for a file.
+
+    Args:
+        file_path: Path relative to repo root.
+
+    Returns:
+        Dict with definitions, imports, imported_by, classes.
+    """
+    if _symbol_index is None:
+        return {"file": file_path, "error": "Symbol index not initialized"}
+
+    # Validate the file path
+    _resolve_and_validate(file_path)
+
+    return _symbol_index.get_file_overview(file_path)
+
+
+# ---------------------------------------------------------------------------
+# Tool: detect_changes
+# ---------------------------------------------------------------------------
+
+
+def detect_changes(scope: str = "staged") -> dict[str, Any]:
+    """Detect symbols affected by git changes and analyze impact.
+
+    Parses git diff output to identify which symbols are affected by
+    changes, then runs impact analysis on those symbols.
+
+    Args:
+        scope: "staged" (default) for staged changes or "unstaged" for
+            working tree changes.
+
+    Returns:
+        Dict with changed_files, summary, risk_level.
+    """
+    if _symbol_index is None:
+        return {"changed_files": [], "error": "Symbol index not initialized"}
+
+    return _symbol_index.detect_changes_from_diff(scope=scope)
+
+
+# ---------------------------------------------------------------------------
+# Tool: trace_flow
+# ---------------------------------------------------------------------------
+
+
+def trace_flow(
+    entry_point: str,
+    file_hint: str | None = None,
+    max_depth: int = 20,
+) -> dict[str, Any]:
+    """Trace the execution flow starting from a symbol.
+
+    Uses BFS graph traversal through call edges to build an ordered
+    flow of function/method calls, showing the full call chain.
+
+    Args:
+        entry_point: Name of the symbol to start tracing from.
+            Example: 'handle_request', 'Application.run'.
+        file_hint: Optional file path to disambiguate when the symbol
+            exists in multiple files.
+        max_depth: Maximum traversal depth (1-50, default 20).
+
+    Returns:
+        Dict with entry_point, entry_definition, steps, call_chain,
+        total_steps, max_depth_reached.
+    """
+    if _symbol_index is None:
+        return {"entry_point": entry_point, "error": "Symbol index not initialized"}
+
+    return _symbol_index.trace_flow(
+        entry_point,
+        file_hint=file_hint,
+        max_depth=max_depth,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tool: get_routes_map
+# ---------------------------------------------------------------------------
+
+
+def get_routes_map(framework: str | None = None) -> list[dict[str, Any]]:
+    """Get all API route definitions in the codebase.
+
+    Extracts FastAPI, Flask, and Django route decorators from Python files
+    and caches them in SurrealDB for subsequent queries.
+
+    Args:
+        framework: Optional filter. One of "fastapi", "flask", "django".
+
+    Returns:
+        List of route dicts with path, method, handler, filepath, line,
+        framework, description.
+    """
+    from shared.route_maps import get_routes_map as _get_routes_map
+
+    return _get_routes_map(repo_path=_repo_path, framework=framework)
+
+
+# ---------------------------------------------------------------------------
+# Tool: get_tools_map
+# ---------------------------------------------------------------------------
+
+
+def get_tools_map() -> list[dict[str, Any]]:
+    """Get all MCP tool definitions in the codebase.
+
+    Extracts tool names, descriptions, and parameters from MCP server
+    JSON schema definitions and caches them in SurrealDB.
+
+    Returns:
+        List of tool dicts with name, description, server_file,
+        server_name, required_params.
+    """
+    from shared.route_maps import get_tools_map as _get_tools_map
+
+    return _get_tools_map(repo_path=_repo_path)
 
 
 # ---------------------------------------------------------------------------

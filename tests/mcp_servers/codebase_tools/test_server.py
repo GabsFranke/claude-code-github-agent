@@ -6,8 +6,30 @@ Tests the JSON-RPC protocol handling: initialize, tools/list, tools/call.
 import json
 import os
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
+
+from tests.conftest import FakeSurrealDB
+
+
+@pytest.fixture(autouse=True)
+def _mock_surrealdb():
+    """Mock SurrealDB for all tests — no real connection needed."""
+    fake_db = FakeSurrealDB()
+
+    with (
+        patch("shared.surrealdb_client.is_initialized", return_value=True),
+        patch("shared.surrealdb_client.get_surreal", return_value=fake_db),
+        patch("shared.surrealdb_client.init_surrealdb"),
+        patch("shared.surrealdb_client.apply_schema"),
+        patch("shared.code_graph.is_initialized", return_value=True),
+        patch("shared.code_graph.get_surreal", return_value=fake_db),
+        patch("shared.code_graph.apply_schema"),
+        patch("mcp_servers.codebase_tools.tools.init_surrealdb"),
+    ):
+        yield fake_db
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -90,7 +112,7 @@ async def test_tools_list_returns_four_tools(mock_server):
     response = await mock_server.handle_request(request)
 
     tools = response["tools"]
-    assert len(tools) == 4
+    assert len(tools) == 11
 
     tool_names = {t["name"] for t in tools}
     assert tool_names == {
@@ -98,6 +120,13 @@ async def test_tools_list_returns_four_tools(mock_server):
         "find_references",
         "search_codebase",
         "read_file_summary",
+        "get_context",
+        "get_impact",
+        "get_file_overview",
+        "detect_changes",
+        "trace_flow",
+        "get_routes_map",
+        "get_tools_map",
     }
 
 
