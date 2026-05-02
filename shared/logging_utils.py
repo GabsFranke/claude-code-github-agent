@@ -13,6 +13,7 @@ _NOISY_LOGGERS = (
     "redis",
     "asyncio",
     "filelock",
+    "shared.import_resolver",
 )
 
 

@@ -314,41 +314,37 @@ async def upsert_chunks(
 ) -> int:
     """Upsert chunk embeddings into SurrealDB symbol table.
 
+    Uses UPSERT (insert-or-update) semantics via SurrealDB's UPSERT statement.
+    Previously used DELETE-then-INSERT which could fail with AlreadyExistsError
+    if the DELETE was partial or failed silently.
+
     Args:
         repo: Repository slug (e.g. "owner/name").
         chunks: List of Chunk objects.
         embeddings: Corresponding embedding vectors.
         removed_files: Files to delete from index (incremental mode).
-        full_index: If True, delete all existing repo records before insert.
+        full_index: Ignored; retained for backward compatibility.
     """
     db = get_surreal()
 
-    # For full index: clear all existing records for this repo
-    if full_index:
-        try:
-            db.query("DELETE FROM symbol WHERE repo = $repo", {"repo": repo})
-        except Exception as e:
-            logger.warning("Failed to clear repo data for %s: %s", repo, e)
-
-    # For incremental mode: delete chunks for changed and removed files
-    if not full_index:
-        changed_filepaths = list({c.filepath for c in chunks})
-        all_files = changed_filepaths + (removed_files or [])
-        for filepath in all_files:
+    # Delete symbols for removed files only (UPSERT handles new/changed)
+    if removed_files:
+        for filepath in removed_files:
             try:
                 db.query(
                     "DELETE FROM symbol WHERE repo = $repo AND filepath = $fp",
                     {"repo": repo, "fp": filepath},
                 )
             except Exception as e:
-                logger.warning("Failed to delete symbols for %s: %s", filepath, e)
+                logger.warning(
+                    "Failed to delete symbols for removed file %s: %s", filepath, e
+                )
 
-    # Insert chunks as symbol records with embeddings
+    # Upsert each chunk individually via its deterministic record ID
     count = 0
-    batch: list[dict] = []
     for chunk, embedding in zip(chunks, embeddings):
+        record_id = _symbol_id(chunk.filepath, chunk.start_line, chunk.kind, chunk.name)
         record = {
-            "id": _symbol_id(chunk.filepath, chunk.start_line, chunk.kind, chunk.name),
             "name": chunk.name,
             "kind": "definition",
             "category": chunk.kind,
@@ -360,16 +356,17 @@ async def upsert_chunks(
             "embedding": embedding,
             "content": chunk.content[:2000],
         }
-        batch.append(record)
-
-        if len(batch) >= 100:
-            db.query("INSERT INTO symbol $records", {"records": batch})
-            count += len(batch)
-            batch = []
-
-    if batch:
-        db.query("INSERT INTO symbol $records", {"records": batch})
-        count += len(batch)
+        try:
+            db.query(f"UPSERT symbol:{record_id} CONTENT $record", {"record": record})
+            count += 1
+        except Exception as e:
+            logger.warning(
+                "Failed to upsert symbol %s (%s:%d): %s",
+                record_id,
+                chunk.filepath,
+                chunk.start_line,
+                e,
+            )
 
     logger.info("Upserted %d symbols for repo %s", count, repo)
     return count
