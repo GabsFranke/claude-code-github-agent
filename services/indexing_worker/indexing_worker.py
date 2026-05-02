@@ -302,7 +302,7 @@ async def batch_embed(texts: list[str], redis_client=None) -> list[list[float]]:
 def _symbol_id(filepath: str, start_line: int, kind: str, name: str) -> str:
     """Deterministic UUID v5 record ID for deduplication."""
     raw = f"{filepath}:{start_line}:{kind}:{name}"
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, raw))
+    return uuid.uuid5(uuid.NAMESPACE_URL, raw).hex
 
 
 async def upsert_chunks(
