@@ -72,7 +72,8 @@ def _tool_definitions() -> list[dict[str, Any]]:
             "description": (
                 "Find all references to a symbol across the codebase. "
                 "Returns the file path, line number, and surrounding context for each reference. "
-                "Use this to understand how a symbol is used and what depends on it."
+                "Use this to understand how a symbol is used. "
+                "For dependency analysis, use get_context or get_impact instead."
             ),
             "inputSchema": {
                 "type": "object",

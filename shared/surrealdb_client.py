@@ -160,8 +160,8 @@ def close_surreal() -> None:
     if _surreal is not None:
         try:
             _surreal.close()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Error closing SurrealDB connection: %s", e)
         _surreal = None
     if _async_surreal is not None:
         _async_surreal = None
@@ -250,8 +250,8 @@ def apply_schema(db: Any = None) -> None:
         rows = _raw_result_rows(result)
         if rows and len(rows) > 0 and rows[0].get("version") == SCHEMA_VERSION:
             return
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Schema version check failed, will re-apply schema: %s", e)
 
     # Apply schema statement by statement
     try:
@@ -266,7 +266,7 @@ def apply_schema(db: Any = None) -> None:
         )
         logger.info("Applied schema version %d", SCHEMA_VERSION)
     except Exception as e:
-        logger.warning("Schema application error (may be re-running): %s", e)
+        logger.warning("Schema application failed: %s", e)
 
 
 def reset_schema(db: Any = None) -> None:

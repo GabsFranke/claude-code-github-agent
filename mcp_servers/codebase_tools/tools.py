@@ -21,6 +21,7 @@ from typing import Any
 from shared.code_graph import SymbolIndex
 from shared.file_tree import EXCLUDE_DIRS
 from shared.surrealdb_client import (
+    _raw_result_rows,
     get_surreal,
     init_surrealdb,
     is_initialized as _sdb_is_initialized,
@@ -197,7 +198,7 @@ def _get_or_parse(filepath: Path) -> tuple[Any, bytes | None]:
 # ---------------------------------------------------------------------------
 
 
-def find_definitions(symbol_name: str) -> list[dict[str, Any]]:
+def find_definitions(symbol_name: str) -> dict[str, Any]:
     """Find where a symbol (class, function, method) is defined.
 
     Uses the cached tag index from SymbolIndex. Supports
@@ -207,10 +208,10 @@ def find_definitions(symbol_name: str) -> list[dict[str, Any]]:
         symbol_name: Exact name of the symbol to find.
 
     Returns:
-        List of dicts with keys: file, line, kind, signature, end_line.
+        Dict with keys: results (list of defs), partial (bool), total (int).
     """
     if _symbol_index is None:
-        return []
+        return {"results": [], "partial": False, "total": 0}
 
     MAX_DEFINITIONS = 50
 
@@ -238,13 +239,11 @@ def find_definitions(symbol_name: str) -> list[dict[str, Any]]:
         if len(results) >= MAX_DEFINITIONS:
             break
 
-    if len(results) < len(tags):
-        return {
-            "results": results,
-            "partial": True,
-            "total": len(tags),
-        }
-    return results
+    return {
+        "results": results,
+        "partial": len(results) < len(tags),
+        "total": len(tags),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -253,10 +252,10 @@ def find_definitions(symbol_name: str) -> list[dict[str, Any]]:
 
 
 def find_references(symbol_name: str) -> list[dict[str, Any]]:
-    """Find all references to a symbol across the codebase.
+    """Find all references to a symbol across the codebase using text search.
 
-    Combines SymbolIndex reference data with text search (ripgrep or
-    Python regex) to find all occurrences, excluding definition lines.
+    Uses ripgrep or Python regex for word-boundary matching across the codebase,
+    excluding definition lines. Does NOT use graph-based reference tracking.
 
     Args:
         symbol_name: Exact name of the symbol.
@@ -591,7 +590,7 @@ def _semantic_search(
             params,
         )
 
-        rows = _extract_surrealdb_rows(result)
+        rows = _raw_result_rows(result)
 
         if not rows:
             logger.debug(
@@ -677,21 +676,6 @@ def _fallback_text_search(
     if rg_path:
         return _search_with_rg(rg_path, pattern, file_type, max_results)
     return _search_with_re(pattern, file_type, max_results)
-
-
-def _extract_surrealdb_rows(result: object) -> list[dict]:
-    """Extract rows from a SurrealDB query result across known response shapes."""
-    if result is None:
-        return []
-    if isinstance(result, list):
-        items = result
-    elif isinstance(result, dict) and "result" in result:
-        items = result["result"]
-    else:
-        return []
-    if isinstance(items, list):
-        return [r for r in items if isinstance(r, dict)]
-    return []  # type: ignore[unreachable]
 
 
 # ---------------------------------------------------------------------------
