@@ -179,9 +179,10 @@ class TestInitRepo:
 class TestFindDefinitions:
     def test_finds_class_definition(self, initialized_repo: Path):
         results = find_definitions("Application")
-        assert len(results) >= 1
+        defs = results["results"]
+        assert len(defs) >= 1
 
-        match = results[0]
+        match = defs[0]
         assert match["file"] == "app.py"
         assert match["kind"] == "class"
         assert "class Application" in match["signature"]
@@ -189,26 +190,29 @@ class TestFindDefinitions:
 
     def test_finds_function_definition(self, initialized_repo: Path):
         results = find_definitions("helper")
-        assert len(results) >= 1
+        defs = results["results"]
+        assert len(defs) >= 1
 
-        match = results[0]
+        match = defs[0]
         assert match["file"] == "app.py"
         assert match["kind"] == "function"
         assert "def helper" in match["signature"]
 
     def test_finds_in_multiple_files(self, initialized_repo: Path):
         results = find_definitions("Database")
+        defs = results["results"]
         # Database class is defined in database.py
-        assert any(r["file"] == "database.py" for r in results)
+        assert any(r["file"] == "database.py" for r in defs)
 
     def test_returns_empty_for_unknown_symbol(self, initialized_repo: Path):
         results = find_definitions("NonexistentSymbol")
-        assert results == []
+        assert results["results"] == []
 
     def test_includes_end_line(self, initialized_repo: Path):
         results = find_definitions("Application")
-        assert len(results) >= 1
-        match = results[0]
+        defs = results["results"]
+        assert len(defs) >= 1
+        match = defs[0]
         assert match["end_line"] >= match["line"]
 
 
@@ -230,7 +234,7 @@ class TestFindReferences:
         # Database is defined in database.py — that line should be excluded
         def_lines = {r["line"] for r in results if r["file"] == "database.py"}
         # The class definition line should NOT be in references
-        defs = find_definitions("Database")
+        defs = find_definitions("Database")["results"]
         for d in defs:
             if d["file"] == "database.py":
                 assert d["line"] not in def_lines

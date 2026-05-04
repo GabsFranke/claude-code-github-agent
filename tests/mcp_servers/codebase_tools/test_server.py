@@ -171,10 +171,11 @@ async def test_find_definitions_call(mock_server):
     assert content["type"] == "text"
 
     results = json.loads(content["text"])
-    assert isinstance(results, list)
-    assert len(results) >= 1
+    assert isinstance(results, dict)
+    assert len(results.get("results", [])) >= 1
     assert any(
-        r.get("kind") == "class" and "App" in r.get("signature", "") for r in results
+        r.get("kind") == "class" and "App" in r.get("signature", "")
+        for r in results.get("results", [])
     )
 
 
