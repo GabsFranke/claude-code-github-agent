@@ -37,9 +37,11 @@ from mcp_servers.codebase_tools.tools import (  # noqa: E402
     get_routes_map,
     get_tools_map,
     init_repo,
+    is_ready,
     read_file_summary,
     search_codebase,
     trace_flow,
+    warmup_surrealdb,
 )
 
 
@@ -368,6 +370,20 @@ async def handle_request(request: dict[str, Any]) -> dict[str, Any]:
         tool_name = params.get("name")
         arguments = params.get("arguments", {})
 
+        # Guard: refuse tool calls if the repo index has not finished
+        # building yet (cold-start window).
+        if not is_ready():
+            return {
+                "error": {
+                    "code": -32000,
+                    "message": (
+                        "Codebase index is still building. "
+                        "The symbol index has not finished initializing. "
+                        "Please retry in a few seconds."
+                    ),
+                }
+            }
+
         try:
             if tool_name == "find_definitions":
                 return {
@@ -577,6 +593,12 @@ def _init_repo_safe(repo_path: str) -> None:
     """Wrapper to safely init the repo from a thread executor."""
     try:
         init_repo(repo_path)
+        # Pre-load SurrealDB HNSW index pages so the first tool call
+        # does not experience a cold-start miss.
+        try:
+            warmup_surrealdb()
+        except Exception as e:
+            logger.warning(f"SurrealDB warmup failed: {e}")
     except Exception as e:
         logger.error(f"Failed to initialize repo: {e}")
 

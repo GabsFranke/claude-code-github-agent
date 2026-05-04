@@ -13,12 +13,14 @@ import httpx
 
 from repo_setup import RepoSetupEngine
 from shared import (
+    IndexingTimeoutError,
     JobQueue,
     RepositorySyncError,
     SDKError,
     SDKTimeoutError,
     WorktreeCreationError,
     execute_git_command,
+    wait_for_indexing,
     wait_for_repo_sync,
 )
 from shared.constants import (
@@ -123,9 +125,10 @@ class JobProcessor:
         logger.info(f"Job data ref value: {self.job_data.get('ref', 'NOT_FOUND')}")
         logger.info(f"Setting up worktree for {self.repo} (ref {self.ref})")
 
-        if not self.job_data.get("github_token") and self.job_data.get(
-            "installation_id"
-        ):
+        # Always regenerate the token when installation_id is available.
+        # Reclaimed jobs may carry a stale (expired) token from backup, and
+        # checking "if not github_token" would skip regeneration for those.
+        if self.job_data.get("installation_id"):
             try:
                 from shared.github_auth import GitHubAuthService
 
@@ -145,6 +148,16 @@ class JobProcessor:
         self.repo_dir = await wait_for_repo_sync(
             self.repo, self.ref, self.job_queue.redis
         )
+
+        # Wait for code indexing to complete so the agent has full
+        # code intelligence (code graph + embeddings + routes) available.
+        try:
+            await wait_for_indexing(self.repo, self.ref, self.job_queue.redis)
+        except IndexingTimeoutError as e:
+            logger.warning(
+                f"Indexing wait timed out for {self.repo}: {e} "
+                f"- proceeding with degraded code intelligence"
+            )
 
         conversation_config = self.job_data.get("conversation_config") or {}
         self.persist_session = conversation_config.get("persist", False)

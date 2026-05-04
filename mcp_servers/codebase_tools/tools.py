@@ -107,6 +107,27 @@ def is_ready() -> bool:
     return _index_ready.is_set()
 
 
+def warmup_surrealdb() -> None:
+    """Pre-load SurrealDB HNSW index pages into memory.
+
+    Running a lightweight query forces SurrealDB to load index segments
+    into the page cache, avoiding a cold-start scenario where the first
+    k-NN search returns 0 rows or mutates internal structures during
+    iteration.
+
+    Safe to call before init — it is a no-op if SurrealDB is not
+    connected.
+    """
+    try:
+        if not _sdb_is_initialized():
+            return
+        db = get_surreal()
+        db.query("SELECT count() FROM symbol LIMIT 1")
+        logger.info("SurrealDB warmup complete")
+    except Exception as e:
+        logger.warning("SurrealDB warmup query failed: %s", e)
+
+
 # ---------------------------------------------------------------------------
 # Path validation
 # ---------------------------------------------------------------------------
