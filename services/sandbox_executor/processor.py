@@ -151,11 +151,19 @@ class JobProcessor:
 
         # Wait for code indexing to complete so the agent has full
         # code intelligence (code graph + embeddings + routes) available.
+        # Catch ALL exceptions so a Redis pub/sub issue or missing
+        # channel never kills the job — the agent can still work
+        # without indexed code intelligence.
         try:
             await wait_for_indexing(self.repo, self.ref, self.job_queue.redis)
-        except IndexingTimeoutError as e:
+        except IndexingTimeoutError:
             logger.warning(
-                f"Indexing wait timed out for {self.repo}: {e} "
+                f"Indexing wait timed out for {self.repo} "
+                f"- proceeding with degraded code intelligence"
+            )
+        except Exception as e:
+            logger.warning(
+                f"Indexing wait failed for {self.repo}: {e} "
                 f"- proceeding with degraded code intelligence"
             )
 

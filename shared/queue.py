@@ -398,17 +398,9 @@ async def wait_for_indexing(
 
     logger.info(f"Waiting for indexing completion event for {repo} (ref={ref})...")
 
-    try:
-        start_time = asyncio.get_event_loop().time()
-
+    async def _listen_for_completion() -> None:
+        """Inner coroutine that processes pub/sub messages until completion."""
         async for message in pubsub.listen():
-            elapsed = asyncio.get_event_loop().time() - start_time
-            if elapsed > timeout:
-                raise IndexingTimeoutError(
-                    f"Indexing wait timeout for {repo} after {timeout}s "
-                    f"- indexing worker may be down or slow"
-                )
-
             if message["type"] == "message":
                 try:
                     event = json.loads(message["data"])
@@ -433,6 +425,14 @@ async def wait_for_indexing(
         logger.warning(
             f"Indexing event stream ended for {repo} - "
             f"proceeding without code intelligence"
+        )
+
+    try:
+        await asyncio.wait_for(_listen_for_completion(), timeout=timeout)
+    except TimeoutError:
+        raise IndexingTimeoutError(
+            f"Indexing wait timeout for {repo} after {timeout}s "
+            f"- indexing worker may be down or slow"
         )
     finally:
         await pubsub.unsubscribe(events_channel)

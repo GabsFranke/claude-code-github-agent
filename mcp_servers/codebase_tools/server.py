@@ -37,7 +37,6 @@ from mcp_servers.codebase_tools.tools import (  # noqa: E402
     get_routes_map,
     get_tools_map,
     init_repo,
-    is_ready,
     read_file_summary,
     search_codebase,
     trace_flow,
@@ -369,20 +368,6 @@ async def handle_request(request: dict[str, Any]) -> dict[str, Any]:
     if method == "tools/call":
         tool_name = params.get("name")
         arguments = params.get("arguments", {})
-
-        # Guard: refuse tool calls if the repo index has not finished
-        # building yet (cold-start window).
-        if not is_ready():
-            return {
-                "error": {
-                    "code": -32000,
-                    "message": (
-                        "Codebase index is still building. "
-                        "The symbol index has not finished initializing. "
-                        "Please retry in a few seconds."
-                    ),
-                }
-            }
 
         try:
             if tool_name == "find_definitions":
