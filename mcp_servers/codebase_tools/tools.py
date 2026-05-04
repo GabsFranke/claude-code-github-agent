@@ -212,6 +212,8 @@ def find_definitions(symbol_name: str) -> list[dict[str, Any]]:
     if _symbol_index is None:
         return []
 
+    MAX_DEFINITIONS = 50
+
     tags = _symbol_index.find_definitions(symbol_name)
     seen: set[tuple[str, int, str]] = set()
     results: list[dict[str, Any]] = []
@@ -233,7 +235,15 @@ def find_definitions(symbol_name: str) -> list[dict[str, Any]]:
                 "end_line": tag.end_line or tag.line,
             }
         )
+        if len(results) >= MAX_DEFINITIONS:
+            break
 
+    if len(results) < len(tags):
+        return {
+            "results": results,
+            "partial": True,
+            "total": len(tags),
+        }
     return results
 
 
@@ -592,6 +602,11 @@ def _semantic_search(
 
         output: list[dict[str, Any]] = []
         for row in rows:
+            content = row.get("content", "")
+            content_truncated = False
+            if content and len(content) > 2000:
+                content = content[:2000] + "\n... [truncated]"
+                content_truncated = True
             output.append(
                 {
                     "file": row.get("filepath", ""),
@@ -599,10 +614,12 @@ def _semantic_search(
                     "kind": row.get("kind", ""),
                     "line": row.get("line", 0),
                     "end_line": row.get("end_line", 0),
-                    "content": row.get("content", ""),
+                    "content": content,
                     "score": row.get("score"),
                 }
             )
+            if content_truncated:
+                output[-1]["content_truncated"] = True
             if len(output) >= max_results:
                 break
 
@@ -955,7 +972,17 @@ def get_context(symbol_name: str, file_hint: str | None = None) -> dict[str, Any
     if _symbol_index is None:
         return {"symbol": symbol_name, "error": "Symbol index not initialized"}
 
-    return _symbol_index.get_context(symbol_name, file_hint=file_hint)
+    result = _symbol_index.get_context(symbol_name, file_hint=file_hint)
+
+    # Cap unbounded call graph sets
+    for field in ("calls", "called_by"):
+        items = result.get(field)
+        if isinstance(items, list) and len(items) > 100:
+            result[field] = sorted(items)[:100]
+            result[f"{field}_partial"] = True
+            result[f"{field}_total"] = len(items)
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -993,13 +1020,25 @@ def get_impact(
     # Validate the file path
     _resolve_and_validate(file_path)
 
-    return _symbol_index.get_impact(
+    result = _symbol_index.get_impact(
         file_path,
         start_line,
         end_line,
         max_depth=max_depth,
         direction=direction,
     )
+
+    # Cap items per depth level in upstream/downstream impact
+    for direction_key in ("upstream_impact", "downstream_impact"):
+        impact = result.get(direction_key)
+        if isinstance(impact, dict):
+            for depth_key, items in impact.items():
+                if isinstance(items, list) and len(items) > 50:
+                    impact[depth_key] = items[:50]
+                    impact[f"{depth_key}_partial"] = True
+                    impact[f"{depth_key}_total"] = len(items)
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1022,7 +1061,15 @@ def get_file_overview(file_path: str) -> dict[str, Any]:
     # Validate the file path
     _resolve_and_validate(file_path)
 
-    return _symbol_index.get_file_overview(file_path)
+    result = _symbol_index.get_file_overview(file_path)
+
+    imported_by = result.get("imported_by")
+    if isinstance(imported_by, list) and len(imported_by) > 50:
+        result["imported_by"] = imported_by[:50]
+        result["imported_by_partial"] = True
+        result["imported_by_total"] = len(imported_by)
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1046,7 +1093,15 @@ def detect_changes(scope: str = "staged") -> dict[str, Any]:
     if _symbol_index is None:
         return {"changed_files": [], "error": "Symbol index not initialized"}
 
-    return _symbol_index.detect_changes_from_diff(scope=scope)
+    result = _symbol_index.detect_changes_from_diff(scope=scope)
+
+    changed_files = result.get("changed_files")
+    if isinstance(changed_files, list) and len(changed_files) > 30:
+        result["changed_files"] = changed_files[:30]
+        result["changed_files_partial"] = True
+        result["changed_files_total"] = len(changed_files)
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1078,11 +1133,19 @@ def trace_flow(
     if _symbol_index is None:
         return {"entry_point": entry_point, "error": "Symbol index not initialized"}
 
-    return _symbol_index.trace_flow(
+    result = _symbol_index.trace_flow(
         entry_point,
         file_hint=file_hint,
         max_depth=max_depth,
     )
+
+    steps = result.get("steps")
+    if isinstance(steps, list) and len(steps) > 200:
+        result["steps"] = steps[:200]
+        result["steps_partial"] = True
+        result["steps_total"] = len(steps)
+
+    return result
 
 
 # ---------------------------------------------------------------------------

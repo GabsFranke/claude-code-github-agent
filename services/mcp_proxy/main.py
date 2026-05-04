@@ -158,6 +158,7 @@ async def mcp_sse(server_name: str, request: Request):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
+            limit=16 * 1024 * 1024,  # 16 MB — MCP responses can be large
         )
         sessions[session_id] = process
         logger.info(f"Started {server_name} session {session_id} (PID {process.pid})")
@@ -188,11 +189,18 @@ async def mcp_sse(server_name: str, request: Request):
             if not process.stdout:
                 return
 
-            # Read stdout line by line (JSON-RPC) and yield as message events
+            # Read stdout line by line (JSON-RPC) and yield as message events.
             while True:
                 if process.stdout.at_eof():
                     break
-                line = await process.stdout.readline()
+                try:
+                    line = await process.stdout.readline()
+                except ValueError:
+                    logger.error(
+                        "readline exceeded buffer for session %s, closing session",
+                        session_id,
+                    )
+                    return
                 if not line:
                     break
 

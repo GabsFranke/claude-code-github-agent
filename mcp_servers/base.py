@@ -12,6 +12,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 logger = logging.getLogger(__name__)
 
+MAX_RESPONSE_BYTES = 1024 * 1024  # 1 MB — safety net for oversized tool responses
+
 
 async def read_stdin_line() -> str | None:
     """Read a line from stdin asynchronously."""
@@ -60,7 +62,26 @@ async def run_server(
                 else:
                     output["result"] = response
 
-                sys.stdout.write(json.dumps(output) + "\n")
+                encoded = json.dumps(output)
+                if len(encoded) > MAX_RESPONSE_BYTES:
+                    logger.warning(
+                        "Response for request %s exceeded %d bytes, truncating",
+                        request.get("id"),
+                        MAX_RESPONSE_BYTES,
+                    )
+                    output["result"] = {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": encoded[:MAX_RESPONSE_BYTES]
+                                + "\n\n[RESPONSE TRUNCATED: exceeded 1MB limit]",
+                            }
+                        ],
+                        "isError": True,
+                    }
+                    encoded = json.dumps(output)
+
+                sys.stdout.write(encoded + "\n")
                 sys.stdout.flush()
 
             except json.JSONDecodeError as e:
