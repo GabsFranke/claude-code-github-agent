@@ -21,6 +21,7 @@ from typing import Any
 from shared.code_graph import SymbolIndex
 from shared.file_tree import EXCLUDE_DIRS
 from shared.surrealdb_client import (
+    _raw_result_rows,
     get_surreal,
     init_surrealdb,
     is_initialized as _sdb_is_initialized,
@@ -104,6 +105,27 @@ def init_repo(repo_path: str) -> None:
 def is_ready() -> bool:
     """Check whether the symbol index has finished building."""
     return _index_ready.is_set()
+
+
+def warmup_surrealdb() -> None:
+    """Pre-load SurrealDB HNSW index pages into memory.
+
+    Running a lightweight query forces SurrealDB to load index segments
+    into the page cache, avoiding a cold-start scenario where the first
+    k-NN search returns 0 rows or mutates internal structures during
+    iteration.
+
+    Safe to call before init — it is a no-op if SurrealDB is not
+    connected.
+    """
+    try:
+        if not _sdb_is_initialized():
+            return
+        db = get_surreal()
+        db.query("SELECT count() FROM symbol LIMIT 1")
+        logger.info("SurrealDB warmup complete")
+    except Exception as e:
+        logger.warning("SurrealDB warmup query failed: %s", e)
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +219,7 @@ def _get_or_parse(filepath: Path) -> tuple[Any, bytes | None]:
 # ---------------------------------------------------------------------------
 
 
-def find_definitions(symbol_name: str) -> list[dict[str, Any]]:
+def find_definitions(symbol_name: str) -> dict[str, Any]:
     """Find where a symbol (class, function, method) is defined.
 
     Uses the cached tag index from SymbolIndex. Supports
@@ -207,10 +229,10 @@ def find_definitions(symbol_name: str) -> list[dict[str, Any]]:
         symbol_name: Exact name of the symbol to find.
 
     Returns:
-        List of dicts with keys: file, line, kind, signature, end_line.
+        Dict with keys: results (list of defs), partial (bool), total (int).
     """
     if _symbol_index is None:
-        return []
+        return {"results": [], "partial": False, "total": 0}
 
     MAX_DEFINITIONS = 50
 
@@ -238,13 +260,11 @@ def find_definitions(symbol_name: str) -> list[dict[str, Any]]:
         if len(results) >= MAX_DEFINITIONS:
             break
 
-    if len(results) < len(tags):
-        return {
-            "results": results,
-            "partial": True,
-            "total": len(tags),
-        }
-    return results
+    return {
+        "results": results,
+        "partial": len(results) < len(tags),
+        "total": len(tags),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -253,10 +273,10 @@ def find_definitions(symbol_name: str) -> list[dict[str, Any]]:
 
 
 def find_references(symbol_name: str) -> list[dict[str, Any]]:
-    """Find all references to a symbol across the codebase.
+    """Find all references to a symbol across the codebase using text search.
 
-    Combines SymbolIndex reference data with text search (ripgrep or
-    Python regex) to find all occurrences, excluding definition lines.
+    Uses ripgrep or Python regex for word-boundary matching across the codebase,
+    excluding definition lines. Does NOT use graph-based reference tracking.
 
     Args:
         symbol_name: Exact name of the symbol.
@@ -515,19 +535,19 @@ def _semantic_search(
 ) -> list[dict[str, Any]]:
     """Semantic search via Gemini embedding + SurrealDB HNSW vector index.
 
-    Falls back to text search if Gemini or SurrealDB are unavailable.
+    Returns error dicts if Gemini or SurrealDB are unavailable.
     """
     try:
         from google import genai
         from google.genai import types
     except ImportError:
-        logger.warning("google-genai not installed. Falling back to text search.")
-        return _fallback_text_search(query, file_type, max_results)
+        logger.warning("google-genai not installed; semantic search unavailable")
+        return [{"error": "google-genai package is not installed. Semantic search requires it."}]
 
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
-        logger.warning("GEMINI_API_KEY not set. Falling back to text search.")
-        return _fallback_text_search(query, file_type, max_results)
+        logger.warning("GEMINI_API_KEY not set; semantic search unavailable")
+        return [{"error": "GEMINI_API_KEY is not set. Semantic search requires it."}]
 
     embedding_dim = int(os.getenv("EMBEDDING_DIMENSION", "1024"))
 
@@ -544,7 +564,7 @@ def _semantic_search(
 
         if not response.embeddings or not response.embeddings[0].values:
             logger.warning("Gemini returned empty embedding for query: %s", query[:100])
-            return []
+            return [{"error": "Gemini returned empty embedding for this query."}]
 
         query_embedding = response.embeddings[0].values
 
@@ -591,14 +611,14 @@ def _semantic_search(
             params,
         )
 
-        rows = _extract_surrealdb_rows(result)
+        rows = _raw_result_rows(result)
 
         if not rows:
-            logger.debug(
-                "Semantic search returned 0 rows for query: %s (dim=%d)",
+            logger.info(
+                "Semantic search returned 0 rows for query: %s",
                 query[:100],
-                len(query_embedding),
             )
+            return []
 
         output: list[dict[str, Any]] = []
         for row in rows:
@@ -625,9 +645,12 @@ def _semantic_search(
 
         return output
 
+    except (ConnectionRefusedError, OSError) as e:
+        logger.error("SurrealDB unreachable: %s", e)
+        return [{"error": f"SurrealDB is not available at {os.getenv('SURREALDB_URL', 'ws://localhost:8000/rpc')}. Semantic search requires a running SurrealDB instance."}]
     except Exception as e:
         logger.error("Semantic search failed: %s", e, exc_info=True)
-        return _fallback_text_search(query, file_type, max_results)
+        return [{"error": f"Semantic search failed: {e}"}]
 
 
 def _hybrid_search(
@@ -640,16 +663,21 @@ def _hybrid_search(
 
     Runs both search modes independently and merges results. Semantic results
     are prioritized since they capture meaning, not just literal matches.
-    Deduplicates by (file, line) key.
+    Deduplicates by (file, line) key. Errors from semantic search (e.g.
+    SurrealDB unreachable) are surfaced in the result list.
     """
     text_results = _fallback_text_search(pattern, file_type, max_results)
     semantic_results = _semantic_search(pattern, file_type, max_results, kind_filter)
+
+    # Separate error results from valid semantic results
+    errors = [r for r in semantic_results if "error" in r]
+    valid_semantic = [r for r in semantic_results if "error" not in r]
 
     seen: set[tuple[str, int]] = set()
     merged: list[dict[str, Any]] = []
 
     # Add semantic results first (ranked by relevance)
-    for r in semantic_results:
+    for r in valid_semantic:
         key = (r["file"], r["line"])
         if key not in seen:
             seen.add(key)
@@ -664,7 +692,8 @@ def _hybrid_search(
             r["source"] = "text"
             merged.append(r)
 
-    return merged[:max_results]
+    # Prepend any error dicts so the caller knows semantic search had issues
+    return errors + merged[:max_results]
 
 
 def _fallback_text_search(
@@ -672,26 +701,11 @@ def _fallback_text_search(
     file_type: str | None,
     max_results: int,
 ) -> list[dict[str, Any]]:
-    """Text search fallback used when semantic search is unavailable."""
+    """Text search used for text and hybrid search modes."""
     rg_path = shutil.which("rg")
     if rg_path:
         return _search_with_rg(rg_path, pattern, file_type, max_results)
     return _search_with_re(pattern, file_type, max_results)
-
-
-def _extract_surrealdb_rows(result: object) -> list[dict]:
-    """Extract rows from a SurrealDB query result across known response shapes."""
-    if result is None:
-        return []
-    if isinstance(result, list):
-        items = result
-    elif isinstance(result, dict) and "result" in result:
-        items = result["result"]
-    else:
-        return []
-    if isinstance(items, list):
-        return [r for r in items if isinstance(r, dict)]
-    return []  # type: ignore[unreachable]
 
 
 # ---------------------------------------------------------------------------

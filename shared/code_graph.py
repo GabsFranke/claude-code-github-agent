@@ -157,7 +157,7 @@ class SymbolIndex:
                     continue  # type: ignore[unreachable]
                 root = tree.root_node
             except Exception as e:
-                logger.debug("Tree-sitter parse failed for %s: %s", rel_path, e)
+                logger.warning("Tree-sitter parse failed for %s: %s", rel_path, e)
                 continue
 
             # Build definition map: (start_byte, end_byte) → name for every named
@@ -194,7 +194,7 @@ class SymbolIndex:
                             )
                         )
                 except Exception as e:
-                    logger.debug("Call query failed for %s: %s", rel_path, e)
+                    logger.warning("Call query failed for %s: %s", rel_path, e)
 
             # --- Import relationships ---
             import_matches: list[tuple[str, str, int, str | None]] = []
@@ -209,7 +209,7 @@ class SymbolIndex:
                             (_category, target_text, line, source_name)
                         )
                 except Exception as e:
-                    logger.debug("Import query failed for %s: %s", rel_path, e)
+                    logger.warning("Import query failed for %s: %s", rel_path, e)
 
             # Group by line for from-import pairing (module + name on same line)
             modules_by_line: dict[int, str] = {}
@@ -275,7 +275,7 @@ class SymbolIndex:
                             )
                         )
                 except Exception as e:
-                    logger.debug("Inheritance query failed for %s: %s", rel_path, e)
+                    logger.warning("Inheritance query failed for %s: %s", rel_path, e)
 
         return relationships
 
@@ -359,14 +359,10 @@ class SymbolIndex:
             }
 
         # Use SurrealQL graph traversal for relationships
-        result["calls"] = sorted(_get_edge_targets(db, symbol_name, "calls", "out"))
-        result["called_by"] = sorted(_get_edge_sources(db, symbol_name, "calls", "in"))
-        result["inherits_from"] = sorted(
-            _get_edge_targets(db, symbol_name, "inherits", "out")
-        )
-        result["inherited_by"] = sorted(
-            _get_edge_sources(db, symbol_name, "inherits", "in")
-        )
+        result["calls"] = sorted(_get_edge_targets(db, symbol_name, "calls"))
+        result["called_by"] = sorted(_get_edge_sources(db, symbol_name, "calls"))
+        result["inherits_from"] = sorted(_get_edge_targets(db, symbol_name, "inherits"))
+        result["inherited_by"] = sorted(_get_edge_sources(db, symbol_name, "inherits"))
 
         return result
 
@@ -433,7 +429,7 @@ class SymbolIndex:
 
         affected_names = {d.name for d in file_defs}
 
-        imported_by = sorted(_get_edge_sources(db, file_path, "imports", "in"))
+        imported_by = sorted(_get_edge_sources(db, file_path, "imports"))
 
         upstream = {}
         downstream = {}
@@ -477,17 +473,15 @@ class SymbolIndex:
             for d in file_defs
         ]
 
-        imports = sorted(_get_edge_targets(db, file_path, "imports", "out"))
-        imported_by = sorted(_get_edge_sources(db, file_path, "imports", "in"))
+        imports = sorted(_get_edge_targets(db, file_path, "imports"))
+        imported_by = sorted(_get_edge_sources(db, file_path, "imports"))
 
         # Build class structure
         classes: dict[str, dict] = {}
         for d in file_defs:
             if d.category == "class":
                 classes[d.name] = {
-                    "inherits_from": sorted(
-                        _get_edge_targets(db, d.name, "inherits", "out")
-                    ),
+                    "inherits_from": sorted(_get_edge_targets(db, d.name, "inherits")),
                     "methods": [],
                 }
 
@@ -551,7 +545,7 @@ class SymbolIndex:
                 continue
 
             affected_names = {s["name"] for s in symbols}
-            imported_by = sorted(_get_edge_sources(db, filepath, "imports", "in"))
+            imported_by = sorted(_get_edge_sources(db, filepath, "imports"))
             upstream = _bfs_upstream(self, db, affected_names, max_depth=3)
             downstream = _bfs_downstream(self, db, affected_names, max_depth=3)
             risk_level, risk_summary = _assess_risk(upstream, downstream, imported_by)
@@ -635,7 +629,7 @@ class SymbolIndex:
             if depth >= max_depth:
                 continue
 
-            callees = sorted(_get_edge_targets(db, current_name, "calls", "out"))
+            callees = sorted(_get_edge_targets(db, current_name, "calls"))
             for callee in callees:
                 if callee in visited:
                     continue
@@ -694,7 +688,7 @@ def _build_call_chain(
     if depth >= max_depth:
         return {"name": name, "callees": [], "truncated": True}
 
-    callees = sorted(_get_edge_targets(db, name, "calls", "out"))
+    callees = sorted(_get_edge_targets(db, name, "calls"))
     return {
         "name": name,
         "callees": [
@@ -747,8 +741,8 @@ def _build_definition_map(
                         enclosing = node
                         break
                 entries.append((enclosing.start_byte, enclosing.end_byte, name_text))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Definition map building failed: %s", e)
 
     # Also walk direct children for any named function/class/method nodes that
     # the definition queries might have missed (e.g. arrow functions, exported
@@ -902,9 +896,26 @@ def _rows_to_tags(rows: list[dict]) -> list[Tag]:
                     end_line=row.get("end_line", 0),
                 )
             )
-        except Exception:
+        except Exception as e:
+            logger.warning("Failed to convert SurrealDB row to Tag: %s", e)
             continue
     return tags
+
+
+def _lang_from_filepath(filepath: str) -> str:
+    """Derive programming language from file extension."""
+    ext = filepath.rsplit(".", 1)[-1].lower() if "." in filepath else ""
+    return {
+        "py": "python",
+        "js": "javascript",
+        "mjs": "javascript",
+        "ts": "typescript",
+        "tsx": "typescript",
+        "jsx": "javascript",
+        "go": "go",
+        "rs": "rust",
+        "java": "java",
+    }.get(ext, "")
 
 
 def _upsert_symbols(db, tags: list[Tag]) -> None:
@@ -925,7 +936,7 @@ def _upsert_symbols(db, tags: list[Tag]) -> None:
                 "filepath": t.filepath,
                 "line": t.line,
                 "end_line": t.end_line or t.line,
-                "language": "",
+                "language": _lang_from_filepath(t.filepath),
                 "content": "",
             }
         )
@@ -933,14 +944,22 @@ def _upsert_symbols(db, tags: list[Tag]) -> None:
             try:
                 db.query("INSERT INTO symbol $records", {"records": batch})
             except Exception as e:
-                logger.warning("Batch insert failed: %s", e)
+                logger.error(
+                    "Batch insert of %d symbols failed: %s. Data loss — these symbols will be missing from the index.",
+                    len(batch),
+                    e,
+                )
             batch.clear()
 
     if batch:
         try:
             db.query("INSERT INTO symbol $records", {"records": batch})
         except Exception as e:
-            logger.warning("Final batch insert failed: %s", e)
+            logger.error(
+                "Final batch insert of %d symbols failed: %s. Data loss — these symbols will be missing from the index.",
+                len(batch),
+                e,
+            )
 
 
 def _upsert_relationships(db, relationships: list[Relationship]) -> None:
@@ -974,7 +993,7 @@ def _upsert_relationships(db, relationships: list[Relationship]) -> None:
             if rows:
                 src_map[key] = rows[0]["id"]
         except Exception as e:
-            logger.debug("Source lookup failed for %s: %s", key, e)
+            logger.warning("Source lookup failed for %s: %s", key, e)
 
     # -- 2. Batch target lookup -------------------------------------------
     tgt_with_file: set[tuple[str, str]] = set()
@@ -999,7 +1018,7 @@ def _upsert_relationships(db, relationships: list[Relationship]) -> None:
             if rows:
                 tgt_map[(name, fp)] = rows[0]["id"]
         except Exception as e:
-            logger.debug("Target (file) lookup failed for %s:%s: %s", name, fp, e)
+            logger.warning("Target (file) lookup failed for %s:%s: %s", name, fp, e)
     for name in tgt_no_file:
         try:
             result = db.query(
@@ -1010,7 +1029,7 @@ def _upsert_relationships(db, relationships: list[Relationship]) -> None:
             if rows:
                 tgt_map[(name, "")] = rows[0]["id"]
         except Exception as e:
-            logger.debug("Target (name) lookup failed for %s: %s", name, e)
+            logger.warning("Target (name) lookup failed for %s: %s", name, e)
 
     # -- 3. Issue RELATE statements --------------------------------------
     for rel in relationships:
@@ -1034,10 +1053,10 @@ def _upsert_relationships(db, relationships: list[Relationship]) -> None:
                 {"src": src_id, "tgt": tgt_id, "line": rel.source_line},
             )
         except Exception as e:
-            logger.debug("Edge upsert failed: %s", e)
+            logger.warning("Edge upsert failed: %s", e)
 
 
-def _get_edge_targets(db, name: str, edge_table: str, direction: str) -> set[str]:
+def _get_edge_targets(db, name: str, edge_table: str) -> set[str]:
     """Get target names from a graph edge table."""
     try:
         result = db.query(
@@ -1046,11 +1065,17 @@ def _get_edge_targets(db, name: str, edge_table: str, direction: str) -> set[str
         )
         rows = _raw_result_rows(result)
         return {r.get("target", "") for r in rows if r.get("target")}
-    except Exception:
+    except Exception as e:
+        logger.warning(
+            "Edge target query failed for table '%s', name '%s': %s",
+            edge_table,
+            name,
+            e,
+        )
         return set()
 
 
-def _get_edge_sources(db, name: str, edge_table: str, direction: str) -> set[str]:
+def _get_edge_sources(db, name: str, edge_table: str) -> set[str]:
     """Get source names from a graph edge table."""
     try:
         result = db.query(
@@ -1059,7 +1084,13 @@ def _get_edge_sources(db, name: str, edge_table: str, direction: str) -> set[str
         )
         rows = _raw_result_rows(result)
         return {r.get("source", "") for r in rows if r.get("source")}
-    except Exception:
+    except Exception as e:
+        logger.warning(
+            "Edge source query failed for table '%s', name '%s': %s",
+            edge_table,
+            name,
+            e,
+        )
         return set()
 
 
@@ -1076,8 +1107,14 @@ def _resolve_scope(db, tag: Tag) -> str | None:
         if rows:
             parent: object = rows[0].get("parent")
             return str(parent) if parent else None
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(
+            "Scope resolution failed for %s:%s:%s: %s",
+            tag.filepath,
+            tag.line,
+            tag.name,
+            e,
+        )
     return None
 
 
@@ -1097,7 +1134,7 @@ def _bfs_upstream(symbol_index, db, seed_names: set[str], max_depth: int) -> dic
         level_items: list[dict] = []
 
         for name in current:
-            for source in _get_edge_sources(db, name, "calls", "in"):
+            for source in _get_edge_sources(db, name, "calls"):
                 if source not in visited:
                     visited.add(source)
                     next_level.add(source)
@@ -1131,7 +1168,7 @@ def _bfs_downstream(symbol_index, db, seed_names: set[str], max_depth: int) -> d
         level_items: list[dict] = []
 
         for name in current:
-            for target in _get_edge_targets(db, name, "calls", "out"):
+            for target in _get_edge_targets(db, name, "calls"):
                 if target not in visited:
                     visited.add(target)
                     next_level.add(target)
@@ -1212,7 +1249,8 @@ def _is_commit_indexed(db, commit_hash: str) -> bool:
             row = rows[0]
             return bool(row.get("version") == SCHEMA_VERSION)
         return False
-    except Exception:
+    except Exception as e:
+        logger.warning("Failed to check if commit %s is indexed: %s", commit_hash, e)
         return False
 
 
@@ -1224,7 +1262,7 @@ def _mark_commit_indexed(db, commit_hash: str) -> None:
             {"hash": commit_hash, "ver": SCHEMA_VERSION},
         )
     except Exception as e:
-        logger.debug("Failed to mark commit indexed: %s", e)
+        logger.warning("Failed to mark commit indexed: %s", e)
 
 
 def _clear_repo_data(db) -> None:
@@ -1238,13 +1276,13 @@ def _clear_repo_data(db) -> None:
     for table in tables:
         try:
             db.query(f"DELETE FROM {table}")  # nosec B608
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Failed to clear table '%s' during re-index: %s", table, e)
     # Only clear symbol records that are graph definitions (no embedding)
     try:
         db.query("DELETE FROM symbol WHERE embedding IS NULL")
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Failed to clear symbol definitions during re-index: %s", e)
 
 
 # ---------------------------------------------------------------------------
@@ -1288,9 +1326,12 @@ def _get_head_commit(repo_path: Path) -> str:
         )
         if result.returncode == 0:
             return result.stdout.strip()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Failed to resolve HEAD commit via git command: %s", e)
 
+    logger.warning(
+        "Could not resolve HEAD commit hash — returning 'unknown'. This may trigger unnecessary full re-indexing."
+    )
     return "unknown"
 
 
@@ -1345,7 +1386,14 @@ def _get_symbols_in_range(
             }
             for r in rows
         ]
-    except Exception:
+    except Exception as e:
+        logger.warning(
+            "Symbol-in-range query failed for %s lines %d-%d: %s",
+            filepath,
+            start_line,
+            end_line,
+            e,
+        )
         return []
 
 

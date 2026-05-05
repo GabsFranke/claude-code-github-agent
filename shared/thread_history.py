@@ -121,7 +121,13 @@ async def _fetch_issue_body(
                 "state": data.get("state", ""),
                 "labels": [lbl.get("name", "") for lbl in data.get("labels", [])],
             }
-        logger.debug(f"Failed to fetch issue body: HTTP {response.status_code}")
+        if response.status_code == 401:
+            logger.warning(
+                f"Failed to fetch issue body for {repo}#{issue_number}: "
+                f"HTTP 401 (token may be expired or invalid)"
+            )
+        else:
+            logger.debug(f"Failed to fetch issue body: HTTP {response.status_code}")
         return None
     except Exception as e:
         logger.warning(f"Error fetching issue body for {repo}#{issue_number}: {e}")
@@ -153,7 +159,13 @@ async def _fetch_comments(
                 url, headers=headers, params=params, timeout=15.0
             )
             if response.status_code != 200:
-                logger.debug(f"Comments API returned {response.status_code}")
+                if response.status_code == 401:
+                    logger.warning(
+                        f"Comments API returned 401 for {repo}#{issue_number} "
+                        f"(token may be expired or invalid)"
+                    )
+                else:
+                    logger.debug(f"Comments API returned {response.status_code}")
                 break
             page_comments = response.json()
             if not page_comments:

@@ -40,6 +40,7 @@ from mcp_servers.codebase_tools.tools import (  # noqa: E402
     read_file_summary,
     search_codebase,
     trace_flow,
+    warmup_surrealdb,
 )
 
 
@@ -72,7 +73,8 @@ def _tool_definitions() -> list[dict[str, Any]]:
             "description": (
                 "Find all references to a symbol across the codebase. "
                 "Returns the file path, line number, and surrounding context for each reference. "
-                "Use this to understand how a symbol is used and what depends on it."
+                "Use this to understand how a symbol is used. "
+                "For dependency analysis, use get_context or get_impact instead."
             ),
             "inputSchema": {
                 "type": "object",
@@ -576,6 +578,12 @@ def _init_repo_safe(repo_path: str) -> None:
     """Wrapper to safely init the repo from a thread executor."""
     try:
         init_repo(repo_path)
+        # Pre-load SurrealDB HNSW index pages so the first tool call
+        # does not experience a cold-start miss.
+        try:
+            warmup_surrealdb()
+        except Exception as e:
+            logger.warning(f"SurrealDB warmup failed: {e}")
     except Exception as e:
         logger.error(f"Failed to initialize repo: {e}")
 

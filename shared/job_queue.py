@@ -369,11 +369,20 @@ class JobQueue:
                 backup_json = await self.redis.get(backup_key)
 
                 if backup_json:
-                    # Restore job data from backup
+                    # Restore job data from backup, but strip any
+                    # github_token since it may have expired while
+                    # the job was stale. The processor will regenerate
+                    # a fresh token from the installation_id.
+                    try:
+                        job_data = json.loads(backup_json)
+                        job_data.pop("github_token", None)
+                        restored_json = json.dumps(job_data)
+                    except (json.JSONDecodeError, TypeError):
+                        restored_json = backup_json
                     await self.redis.setex(
                         f"{self.job_data_prefix}{job_id}",
                         self.job_ttl,
-                        backup_json,
+                        restored_json,
                     )
                     await self.redis.setex(
                         f"{self.job_status_prefix}{job_id}",

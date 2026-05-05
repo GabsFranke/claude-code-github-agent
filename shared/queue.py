@@ -8,7 +8,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from .exceptions import QueueError, RepositorySyncError
+from .exceptions import IndexingTimeoutError, QueueError, RepositorySyncError
 
 logger = logging.getLogger(__name__)
 
@@ -333,4 +333,107 @@ async def wait_for_repo_sync(
         )
     finally:
         await pubsub.unsubscribe(completion_channel)
+        await pubsub.close()
+
+
+def _indexing_configured() -> bool:
+    """Check whether indexing is configured and expected to run.
+
+    Returns False if INDEXING_ENABLED is false or GEMINI_API_KEY is
+    missing, meaning no indexing worker will process this repo and we
+    should skip the wait.
+    """
+    indexing_enabled = os.getenv("INDEXING_ENABLED", "true").lower() == "true"
+    gemini_key = os.getenv("GEMINI_API_KEY")
+
+    if not indexing_enabled:
+        logger.info("INDEXING_ENABLED=false, skipping indexing wait")
+        return False
+    if not gemini_key:
+        logger.info("GEMINI_API_KEY not set, skipping indexing wait")
+        return False
+    return True
+
+
+async def wait_for_indexing(
+    repo: str,
+    ref: str,
+    redis_client,
+    timeout: int = 600,
+) -> None:
+    """Wait for code indexing to complete before proceeding.
+
+    Checks Redis metadata hash first (fast path).  If no metadata is
+    cached, subscribes to the indexing events channel and waits for a
+    completion event matching repo+ref.
+
+    If indexing is not configured (INDEXING_ENABLED=false or
+    GEMINI_API_KEY missing), returns immediately.
+
+    Raises:
+        IndexingTimeoutError: On timeout.  Callers should catch this and
+            decide whether to proceed with degraded code intelligence.
+    """
+    if not _indexing_configured():
+        return
+
+    meta_key = f"agent:indexing:meta:{repo}"
+
+    # Fast path: metadata hash already has this ref
+    try:
+        existing = await redis_client.hget(meta_key, ref)
+        if existing:
+            logger.info(
+                f"Indexing metadata found for {repo} (ref={ref}), "
+                f"indexing already complete"
+            )
+            return
+    except Exception as e:
+        logger.debug(f"Could not check indexing metadata: {e}")
+
+    # Subscribe to completion events
+    events_channel = "agent:indexing:events"
+    pubsub = redis_client.pubsub()
+    await pubsub.subscribe(events_channel)
+
+    logger.info(f"Waiting for indexing completion event for {repo} (ref={ref})...")
+
+    async def _listen_for_completion() -> None:
+        """Inner coroutine that processes pub/sub messages until completion."""
+        async for message in pubsub.listen():
+            if message["type"] == "message":
+                try:
+                    event = json.loads(message["data"])
+                    if event.get("repo") == repo and event.get("ref") == ref:
+                        if event.get("status") == "complete":
+                            logger.info(
+                                f"Received indexing completion event for {repo}"
+                            )
+                            return
+                        elif event.get("status") == "error":
+                            logger.warning(
+                                f"Indexing failed for {repo}: "
+                                f"{event.get('error', 'unknown error')} "
+                                f"- proceeding without code intelligence"
+                            )
+                            return
+                except json.JSONDecodeError:
+                    logger.warning(f"Invalid JSON in indexing event: {message['data']}")
+                    continue
+
+        # Stream ended unexpectedly
+        logger.warning(
+            f"Indexing event stream ended for {repo} - "
+            f"proceeding without code intelligence"
+        )
+
+    try:
+        await asyncio.wait_for(_listen_for_completion(), timeout=timeout)
+    except TimeoutError:
+        raise IndexingTimeoutError(
+            f"Indexing wait timeout for {repo} after {timeout}s "
+            f"- indexing worker may be down or slow"
+        )
+    finally:
+        await pubsub.unsubscribe(events_channel)
         await pubsub.close()

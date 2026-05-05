@@ -539,6 +539,29 @@ async def _update_indexing_metadata(
 
 
 # ---------------------------------------------------------------------------
+# Indexing event publishing
+# ---------------------------------------------------------------------------
+
+
+_INDEXING_EVENTS_CHANNEL = "agent:indexing:events"
+
+
+async def _publish_indexing_event(
+    redis_client, repo: str, ref: str, status: str, error: str | None = None
+) -> None:
+    """Publish an indexing lifecycle event to the pub/sub channel."""
+    if not redis_client:
+        return
+    event: dict[str, str] = {"status": status, "repo": repo, "ref": ref}
+    if error:
+        event["error"] = error
+    try:
+        await redis_client.publish(_INDEXING_EVENTS_CHANNEL, json.dumps(event))
+    except Exception as e:
+        logger.warning(f"Failed to publish indexing event: {e}")
+
+
+# ---------------------------------------------------------------------------
 # Indexing pipeline
 # ---------------------------------------------------------------------------
 
@@ -622,6 +645,7 @@ async def process_indexing_job(message: dict, redis_client=None) -> None:
                 )
                 # Still update metadata to refresh the commit hash
                 await _update_indexing_metadata(repo, commit_hash, 0, ref, redis_client)
+                await _publish_indexing_event(redis_client, repo, ref, "complete")
                 return
 
             full_index = False
@@ -658,10 +682,14 @@ async def process_indexing_job(message: dict, redis_client=None) -> None:
         # Update metadata in Redis
         await _update_indexing_metadata(repo, commit_hash, count, ref, redis_client)
 
+        # Notify waiters that indexing is complete
+        await _publish_indexing_event(redis_client, repo, ref, "complete")
+
         logger.info(f"Indexing complete for {repo}: {count} points")
 
     except Exception as e:
         logger.error(f"Indexing failed for {repo}: {e}", exc_info=True)
+        await _publish_indexing_event(redis_client, repo, ref, "error", error=str(e))
     finally:
         if worktree:
             await _cleanup_worktree(repo, worktree)
