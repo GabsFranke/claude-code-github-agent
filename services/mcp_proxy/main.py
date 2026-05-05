@@ -29,7 +29,14 @@ MCP_SERVERS_DIR = os.getenv("MCP_SERVERS_DIR", "/app/mcp_servers")
 
 # Security: allowed prefixes for query parameters injected as env vars.
 # Prevents overwriting sensitive env vars like PATH, HOME, LD_LIBRARY_PATH, etc.
-DEFAULT_ALLOWED_ENV_PREFIXES = ("REPO_", "GITHUB_", "MCP_", "SURREALDB_", "PYTHONPATH")
+DEFAULT_ALLOWED_ENV_PREFIXES = (
+    "REPO_",
+    "GITHUB_",
+    "MCP_",
+    "SURREALDB_",
+    "GEMINI_",
+    "PYTHONPATH",
+)
 _ALLOWED_ENV_PREFIXES: tuple[str, ...] | None = None
 
 

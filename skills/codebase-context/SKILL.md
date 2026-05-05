@@ -136,7 +136,7 @@ detect_changes(scope="staged")
 
 ### `search_codebase(pattern, search_type="semantic"|"hybrid", max_results?, file_type?, kind_filter?)`
 
-Semantic mode embeds the query via Gemini and searches SurrealDB's HNSW vector index. Hybrid mode merges text + semantic results with deduplication. Needs `GEMINI_API_KEY` — falls back to text search if unavailable.
+Semantic mode embeds the query via Gemini and searches SurrealDB's HNSW vector index. Hybrid mode merges text + semantic results with deduplication. Needs `GEMINI_API_KEY` — returns error dict if unavailable.
 
 Use for conceptual searches where you don't know exact names:
 
