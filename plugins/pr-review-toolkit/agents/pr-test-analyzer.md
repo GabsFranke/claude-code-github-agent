@@ -75,8 +75,7 @@ Your report is the primary deliverable. Structure your analysis as:
 
 **Delivering Results:**
 
-If this agent was invoked as a subagent, return the analysis as text — the parent workflow will aggregate and post to GitHub.
-If running standalone (directly invoked), post the analysis as a PR comment using `add_issue_comment` on the PR.
+Return your analysis as structured text. The parent workflow will aggregate findings and handle posting to GitHub.
 
 **Important Considerations:**
 
