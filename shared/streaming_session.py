@@ -25,8 +25,9 @@ from shared.constants import (
     SESSION_HISTORY_KEY,
     SESSION_INBOX_KEY,
     SESSION_KEY,
-    SESSION_LOOKUP_KEY,
     SESSION_SUBSCRIBERS_KEY,
+    decode_redis_hash,
+    streaming_lookup_key,
 )
 
 logger = logging.getLogger(__name__)
@@ -52,18 +53,6 @@ return count
 
 def _session_key(token: str) -> str:
     return SESSION_KEY.format(token)
-
-
-def _lookup_key(
-    repo: str, thread_id: str | int, workflow: str, thread_type: str = ""
-) -> str:
-    safe_repo = repo.replace("/", "--")
-    if thread_type:
-        return SESSION_LOOKUP_KEY.format(
-            f"{safe_repo}:{thread_type}:{thread_id}:{workflow}"
-        )
-    # Fallback: search across all thread types for backwards compatibility
-    return SESSION_LOOKUP_KEY.format(f"{safe_repo}:{thread_id}:{workflow}")
 
 
 def _inbox_key(token: str) -> str:
@@ -147,7 +136,9 @@ class StreamingSessionStore:
         pipeline.hset(key, mapping=data)
         pipeline.expire(key, ttl_seconds)
         # Register lookup so the token can be found by repo/issue/workflow
-        lk = _lookup_key(repo, str(issue_number), workflow, thread_type=thread_type)
+        lk = streaming_lookup_key(
+            repo, str(issue_number), workflow, thread_type=thread_type
+        )
         pipeline.setex(lk, ttl_seconds, token)
         await pipeline.execute()
         logger.info(
@@ -171,12 +162,14 @@ class StreamingSessionStore:
         precise matching. When empty, falls back to the legacy key
         format (without thread_type) for backwards compatibility.
         """
-        lk = _lookup_key(repo, str(issue_number), workflow, thread_type=thread_type)
+        lk = streaming_lookup_key(
+            repo, str(issue_number), workflow, thread_type=thread_type
+        )
         raw = await self._redis.get(lk)
         if not raw:
             # If thread_type was given but no match, try legacy key
             if thread_type:
-                lk_legacy = _lookup_key(
+                lk_legacy = streaming_lookup_key(
                     repo, str(issue_number), workflow, thread_type=""
                 )
                 raw = await self._redis.get(lk_legacy)
@@ -228,11 +221,7 @@ class StreamingSessionStore:
         data = await self._redis.hgetall(key)
         if not data:
             return None
-        decoded: dict[str, Any] = {}
-        for k, v in data.items():
-            dk = k.decode() if isinstance(k, bytes) else k
-            dv = v.decode() if isinstance(v, bytes) else v
-            decoded[dk] = dv
+        decoded = decode_redis_hash(data)
         return decoded
 
     async def set_completed(

@@ -48,14 +48,6 @@ from shared.streaming_session import _history_key, _inbox_key
 logger = logging.getLogger(__name__)
 
 
-def _msg_channel(token: str) -> str:
-    return MSG_CHANNEL.format(token)
-
-
-def _ctl_channel(token: str) -> str:
-    return CTL_CHANNEL.format(token)
-
-
 class SessionStreamBridge:
     """Publishes SDK messages to Redis pub/sub for cross-process streaming.
 
@@ -75,7 +67,7 @@ class SessionStreamBridge:
     def __init__(self, token: str, redis: Any) -> None:
         self._token = token
         self._redis = redis
-        self._channel = _msg_channel(token)
+        self._channel = MSG_CHANNEL.format(token)
         self._history_key = _history_key(token)
 
     async def publish(self, msg_type: str, data: dict) -> None:
@@ -200,7 +192,7 @@ class ControlChannel:
     ) -> None:
         self._token = token
         self._redis = redis
-        self._channel = _ctl_channel(token)
+        self._channel = CTL_CHANNEL.format(token)
         self._task: asyncio.Task | None = None
         self._stopped = False
         self._interrupt_event = interrupt_event

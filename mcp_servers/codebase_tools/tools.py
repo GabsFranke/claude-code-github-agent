@@ -542,7 +542,11 @@ def _semantic_search(
         from google.genai import types
     except ImportError:
         logger.warning("google-genai not installed; semantic search unavailable")
-        return [{"error": "google-genai package is not installed. Semantic search requires it."}]
+        return [
+            {
+                "error": "google-genai package is not installed. Semantic search requires it."
+            }
+        ]
 
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
@@ -647,7 +651,11 @@ def _semantic_search(
 
     except (ConnectionRefusedError, OSError) as e:
         logger.error("SurrealDB unreachable: %s", e)
-        return [{"error": f"SurrealDB is not available at {os.getenv('SURREALDB_URL', 'ws://localhost:8000/rpc')}. Semantic search requires a running SurrealDB instance."}]
+        return [
+            {
+                "error": f"SurrealDB is not available at {os.getenv('SURREALDB_URL', 'ws://localhost:8000/rpc')}. Semantic search requires a running SurrealDB instance."
+            }
+        ]
     except Exception as e:
         logger.error("Semantic search failed: %s", e, exc_info=True)
         return [{"error": f"Semantic search failed: {e}"}]

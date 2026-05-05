@@ -265,6 +265,15 @@ async def lifespan(app: FastAPI):
         decode_responses=False,  # Keep raw bytes for pub/sub
     )
     logger.info(f"Connected to Redis at {REDIS_URL}")
+
+    # Warn if WebSocket origin validation is wide open (CSWSH risk)
+    if os.getenv("ALLOWED_ORIGINS", "") == "*":
+        logger.warning(
+            "[Security] ALLOWED_ORIGINS='*' allows WebSocket connections from "
+            "any origin, which enables cross-site WebSocket hijacking (CSWSH). "
+            "Set ALLOWED_ORIGINS to a comma-separated list of trusted origins."
+        )
+
     yield
     if _redis:
         await _redis.close()
@@ -482,9 +491,27 @@ async def websocket_session(
     # otherwise it returns 403 Forbidden to the client.
     await websocket.accept()
 
-    # Validate Origin header to prevent cross-site WebSocket hijacking
-    allowed_origins = os.getenv("ALLOWED_ORIGINS", "*")
-    if allowed_origins != "*":
+    # Validate Origin header to prevent cross-site WebSocket hijacking (CSWSH)
+    allowed_origins = os.getenv("ALLOWED_ORIGINS", "")
+    if allowed_origins == "*":
+        # Wildcard — allow all origins but log a warning at startup time
+        # (the startup warning is emitted in lifespan)
+        pass
+    elif allowed_origins == "":
+        # No origins configured — only allow localhost/loopback
+        origin = websocket.headers.get("origin", "")
+        if origin:
+            from urllib.parse import urlparse
+
+            parsed = urlparse(origin)
+            hostname = parsed.hostname or ""
+            if hostname not in ("localhost", "127.0.0.1", "::1"):
+                logger.warning(
+                    f"[WS] Rejected WebSocket from non-local origin: {origin}"
+                )
+                await websocket.close(code=4403, reason="Origin not allowed")
+                return
+    else:
         origin = websocket.headers.get("origin", "")
         origin_list = [o.strip() for o in allowed_origins.split(",") if o.strip()]
         if origin and origin not in origin_list:

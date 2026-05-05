@@ -27,7 +27,8 @@ def _discover_host_mcp_names(cwd: str | None = None) -> list[str]:
     if not claude_json.exists():
         return []
     try:
-        data = json.load(open(claude_json, encoding="utf-8"))
+        with open(claude_json, encoding="utf-8") as f:
+            data = json.load(f)
     except Exception as e:
         logger.warning(f"Failed to read ~/.claude.json for MCP discovery: {e}")
         return []

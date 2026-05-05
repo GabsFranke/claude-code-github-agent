@@ -93,3 +93,37 @@ def sanitize_repo_key(repo: str) -> str:
     and ``owner-repo`` would collide with single-dash).
     """
     return repo.replace("/", "--")
+
+
+def streaming_lookup_key(
+    repo: str, thread_id: str | int, workflow: str, thread_type: str = ""
+) -> str:
+    """Build the Redis lookup key for a streaming session token.
+
+    Centralises the key format used by both SessionStore and
+    StreamingSessionStore so the two modules cannot drift apart.
+
+    When *thread_type* is provided the key includes it for precise
+    matching; otherwise a legacy (pre-thread_type) key is returned
+    for backwards compatibility.
+    """
+    safe_repo = sanitize_repo_key(repo)
+    tid = str(thread_id)
+    if thread_type:
+        return SESSION_LOOKUP_KEY.format(f"{safe_repo}:{thread_type}:{tid}:{workflow}")
+    return SESSION_LOOKUP_KEY.format(f"{safe_repo}:{tid}:{workflow}")
+
+
+def decode_redis_hash(data: dict[bytes | str, bytes | str]) -> dict[str, str]:
+    """Decode all keys and values in a Redis hash result from bytes to str.
+
+    Redis returns bytes keys/values when decode_responses is False (the
+    default for async clients).  This helper converts the entire dict so
+    callers never need to repeat the isinstance/decode pattern.
+    """
+    return {
+        (k.decode() if isinstance(k, bytes) else k): (
+            v.decode() if isinstance(v, bytes) else v
+        )
+        for k, v in data.items()
+    }

@@ -18,7 +18,11 @@ except ImportError:
 
 from pydantic import BaseModel, Field
 
-from .constants import DEFAULT_SESSION_TTL_HOURS
+from .constants import (
+    DEFAULT_SESSION_TTL_HOURS,
+    decode_redis_hash,
+    streaming_lookup_key,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -136,7 +140,7 @@ class SessionStore:
         key = _session_key(repo, thread_type, thread_id, workflow)
         now = datetime.now(UTC).isoformat()
 
-        # Atomic: set fields individually (no read-modify-write race)
+        # Set fields individually (each hset is atomic, but the full update is not atomic across calls)
         session_data = {
             "session_id": session_id,
             "repo": repo,
@@ -177,11 +181,7 @@ class SessionStore:
         data = await redis.hgetall(key)
         if not data:
             return None
-        decoded: dict[str, Any] = {}
-        for k, v in data.items():
-            dk = k.decode() if isinstance(k, bytes) else k
-            dv = v.decode() if isinstance(v, bytes) else v
-            decoded[dk] = dv
+        decoded = decode_redis_hash(data)
         try:
             return SessionInfo.model_validate(decoded)  # type: ignore[no-any-return]
         except Exception as e:
@@ -222,11 +222,7 @@ class SessionStore:
                 data = await redis.hgetall(key)
                 if data:
                     try:
-                        decoded: dict[str, Any] = {}
-                        for k, v in data.items():
-                            dk = k.decode() if isinstance(k, bytes) else k
-                            dv = v.decode() if isinstance(v, bytes) else v
-                            decoded[dk] = dv
+                        decoded = decode_redis_hash(data)
                         sessions.append(SessionInfo.model_validate(decoded))
                     except Exception as e:
                         logger.warning(f"Skipping corrupt session at {key}: {e}")
@@ -317,15 +313,13 @@ class SessionStore:
         session_key = f"session:stream:{token}"
         await self.redis.delete(session_key)
         # Delete the lookup key
-        lookup_key = _streaming_lookup_key(
+        lookup_key = streaming_lookup_key(
             repo, thread_id, workflow, thread_type=thread_type
         )
         await self.redis.delete(lookup_key)
         # Also try deleting the legacy key (without thread_type) for cleanup
         if thread_type:
-            legacy_key = _streaming_lookup_key(
-                repo, thread_id, workflow, thread_type=""
-            )
+            legacy_key = streaming_lookup_key(repo, thread_id, workflow, thread_type="")
             await self.redis.delete(legacy_key)
         logger.info(
             f"Cleaned up streaming session {token[:8]}... for {repo}/{thread_type}/{thread_id}/{workflow}"
@@ -349,28 +343,12 @@ class SessionStore:
         ttl_seconds = ttl_hours * 3600
         await self._streaming_store.set_ttl(token, ttl_seconds)
         # Also propagate to the lookup key
-        lookup_key = _streaming_lookup_key(
+        lookup_key = streaming_lookup_key(
             repo, thread_id, workflow, thread_type=thread_type
         )
         await self.redis.expire(lookup_key, ttl_seconds)
         # Also propagate to legacy key (without thread_type) if present
         if thread_type:
-            legacy_key = _streaming_lookup_key(
-                repo, thread_id, workflow, thread_type=""
-            )
+            legacy_key = streaming_lookup_key(repo, thread_id, workflow, thread_type="")
             await self.redis.expire(legacy_key, ttl_seconds)
         logger.debug(f"Propagated TTL {ttl_hours}h to streaming session {token[:8]}...")
-
-
-def _streaming_lookup_key(
-    repo: str, thread_id: str, workflow: str, thread_type: str = ""
-) -> str:
-    """Build the Redis key for the streaming token lookup.
-
-    Includes thread_type when provided to match the key format used by
-    StreamingSessionStore._lookup_key().
-    """
-    safe_repo = repo.replace("/", "--")
-    if thread_type:
-        return f"session:stream:lookup:{safe_repo}:{thread_type}:{thread_id}:{workflow}"
-    return f"session:stream:lookup:{safe_repo}:{thread_id}:{workflow}"

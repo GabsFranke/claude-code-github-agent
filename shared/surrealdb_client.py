@@ -13,8 +13,10 @@ Usage:
     db.query("SELECT * FROM symbol WHERE name = 'App'")
 """
 
+import asyncio
 import logging
 import os
+import threading
 from typing import Any
 
 from surrealdb import AsyncSurreal, Surreal
@@ -28,6 +30,19 @@ logger = logging.getLogger(__name__)
 _surreal: Any = None
 _async_surreal: Any = None
 _initialized: bool = False
+
+# Thread-safety locks for initialization
+_init_lock = threading.Lock()
+_async_init_lock: asyncio.Lock | None = None
+
+
+def _get_async_init_lock() -> asyncio.Lock:
+    """Lazily create the async init lock (cannot be created before an event loop exists)."""
+    global _async_init_lock
+    if _async_init_lock is None:
+        _async_init_lock = asyncio.Lock()
+    return _async_init_lock
+
 
 # Default connection parameters
 DEFAULT_URL = os.getenv("SURREALDB_URL", "ws://localhost:8000/rpc")
@@ -51,6 +66,7 @@ def init_surrealdb(
 
     Must be called once before using get_surreal() or get_async_surreal().
     Idempotent — subsequent calls return the existing client.
+    Thread-safe — uses a lock to prevent concurrent initialization.
 
     Args:
         url: WebSocket URL (default: SURREALDB_URL env or ws://localhost:8000/rpc)
@@ -64,21 +80,22 @@ def init_surrealdb(
     """
     global _surreal, _initialized  # noqa: PLW0603
 
-    if _surreal is not None:
+    with _init_lock:
+        if _surreal is not None:
+            return _surreal
+
+        _url = url or DEFAULT_URL
+        _user = user or DEFAULT_USER
+        _pass = password or DEFAULT_PASS
+        _ns = ns or DEFAULT_NS
+        _db = db or DEFAULT_DB
+
+        _surreal = Surreal(_url)
+        _surreal.signin({"username": _user, "password": _pass})
+        _surreal.use(_ns, _db)
+        _initialized = True
+        logger.info("SurrealDB connected: %s ns=%s db=%s", _url, _ns, _db)
         return _surreal
-
-    _url = url or DEFAULT_URL
-    _user = user or DEFAULT_USER
-    _pass = password or DEFAULT_PASS
-    _ns = ns or DEFAULT_NS
-    _db = db or DEFAULT_DB
-
-    _surreal = Surreal(_url)
-    _surreal.signin({"username": _user, "password": _pass})
-    _surreal.use(_ns, _db)
-    _initialized = True
-    logger.info("SurrealDB connected: %s ns=%s db=%s", _url, _ns, _db)
-    return _surreal
 
 
 async def init_async_surrealdb(
@@ -89,6 +106,8 @@ async def init_async_surrealdb(
     db: str | None = None,
 ) -> Any:
     """Initialize the async SurrealDB client.
+
+    Thread-safe — uses an async lock to prevent concurrent initialization.
 
     Args:
         url: WebSocket URL
@@ -102,20 +121,21 @@ async def init_async_surrealdb(
     """
     global _async_surreal  # noqa: PLW0603
 
-    if _async_surreal is not None:
+    async with _get_async_init_lock():
+        if _async_surreal is not None:
+            return _async_surreal
+
+        _url = url or DEFAULT_URL
+        _user = user or DEFAULT_USER
+        _pass = password or DEFAULT_PASS
+        _ns = ns or DEFAULT_NS
+        _db = db or DEFAULT_DB
+
+        _async_surreal = AsyncSurreal(_url)
+        await _async_surreal.signin({"username": _user, "password": _pass})
+        await _async_surreal.use(_ns, _db)
+        logger.info("SurrealDB async connected: %s ns=%s db=%s", _url, _ns, _db)
         return _async_surreal
-
-    _url = url or DEFAULT_URL
-    _user = user or DEFAULT_USER
-    _pass = password or DEFAULT_PASS
-    _ns = ns or DEFAULT_NS
-    _db = db or DEFAULT_DB
-
-    _async_surreal = AsyncSurreal(_url)
-    await _async_surreal.signin({"username": _user, "password": _pass})
-    await _async_surreal.use(_ns, _db)
-    logger.info("SurrealDB async connected: %s ns=%s db=%s", _url, _ns, _db)
-    return _async_surreal
 
 
 def get_surreal() -> Any:
