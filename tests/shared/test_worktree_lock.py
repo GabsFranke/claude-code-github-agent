@@ -162,7 +162,8 @@ class TestSetSessionId:
         call_args = redis.eval.call_args[0]
         assert call_args[1] == 1
         assert call_args[2] == key.lock_key
-        assert call_args[3] == "sess-456"
+        assert call_args[3] == "session_id"
+        assert call_args[4] == "sess-456"
 
     @pytest.mark.asyncio
     async def test_set_session_id_without_acquire_no_op(self):
@@ -193,6 +194,8 @@ class TestSetInterrupted:
         call_args = redis.eval.call_args[0]
         assert call_args[1] == 1
         assert call_args[2] == key.lock_key
+        assert call_args[3] == "status"
+        assert call_args[4] == "interrupted"
 
     @pytest.mark.asyncio
     async def test_set_interrupted_without_acquire_no_op(self):
@@ -204,6 +207,53 @@ class TestSetInterrupted:
         lock = WorktreeLock(redis, key)
         await lock.set_interrupted()
         redis.eval.assert_not_called()
+
+
+class TestUpdateLockField:
+    """Tests for the shared _update_lock_field method and its TTL guard."""
+
+    @pytest.mark.asyncio
+    async def test_update_lock_field_returns_true_on_success(self):
+        redis = MagicMock()
+        redis.set = AsyncMock(return_value=True)
+        redis.eval = AsyncMock(return_value=1)
+        key = WorktreeKey(
+            repo="owner/repo", thread_type="pr", thread_id="42", workflow="review"
+        )
+        lock = WorktreeLock(redis, key)
+        await lock.acquire(job_id="job-123")
+        result = await lock._update_lock_field("session_id", "sess-789")
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_update_lock_field_returns_false_when_key_missing_or_expired(self):
+        redis = MagicMock()
+        redis.set = AsyncMock(return_value=True)
+        # Redis eval returns 0 when TTL <= 0 or key missing
+        redis.eval = AsyncMock(return_value=0)
+        key = WorktreeKey(
+            repo="owner/repo", thread_type="pr", thread_id="42", workflow="review"
+        )
+        lock = WorktreeLock(redis, key)
+        await lock.acquire(job_id="job-123")
+        result = await lock._update_lock_field("session_id", "sess-789")
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_update_lock_field_lua_script_includes_ttl_guard(self):
+        redis = MagicMock()
+        redis.set = AsyncMock(return_value=True)
+        redis.eval = AsyncMock(return_value=1)
+        key = WorktreeKey(
+            repo="owner/repo", thread_type="pr", thread_id="42", workflow="review"
+        )
+        lock = WorktreeLock(redis, key)
+        await lock.acquire(job_id="job-123")
+        await lock._update_lock_field("status", "interrupted")
+
+        lua_script = redis.eval.call_args[0][0]
+        # Verify the TTL guard is present in the Lua script
+        assert "if ttl <= 0 then return 0 end" in lua_script
 
 
 class TestGetLockInfo:
