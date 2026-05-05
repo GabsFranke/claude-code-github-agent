@@ -805,7 +805,7 @@ When `ALLOW_HOST_MCP=true`, MCP server definitions from the host's `~/.claude.js
 6. Worker creates rich job in `JobQueue`
 7. Repo sync service clones/updates bare repository
 8. Sandbox worker waits for sync, creates worktree from bare repo (detached HEAD)
-9. Structural context generated (file tree + personalized repomap with PR changed files)
+9. Structural context generated (file tree with PR changed files)
 10. Claude SDK executes with 4 MCP servers (GitHub, GitHub Actions, Memory, Codebase Tools)
 11. Claude SDK posts review to GitHub via MCP
 12. Post-processing: transcript staged, memory/retrospector/indexing jobs enqueued
