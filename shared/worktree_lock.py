@@ -22,7 +22,7 @@ import signal
 import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from shared.constants import sanitize_repo_key
 
@@ -46,7 +46,7 @@ class WorktreeKey:
     """Unique identifier for a worktree/session combination."""
 
     repo: str
-    thread_type: str  # "pr", "issue", "discussion"
+    thread_type: Literal["pr", "issue", "discussion"]
     thread_id: str
     workflow: str
 
@@ -73,7 +73,7 @@ class LockInfo:
 
     job_id: str
     session_id: str | None = None
-    status: str = "running"  # "running" | "interrupted"
+    status: Literal["running", "interrupted"] = "running"
     pid: int | None = None  # Process ID of the worker holding the lock
 
 

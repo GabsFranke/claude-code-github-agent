@@ -59,7 +59,7 @@ logger = logging.getLogger(__name__)
 _SENSITIVE_SESSION_FIELDS = {"installation_id"}
 
 
-def _sanitize_session(session: dict) -> dict:
+def _sanitize_session(session: dict[str, str]) -> dict:
     """Remove sensitive fields from session data before exposing to clients."""
     return {k: v for k, v in session.items() if k not in _SENSITIVE_SESSION_FIELDS}
 
@@ -118,7 +118,7 @@ async def _create_job(job_data: dict) -> str:
 
 
 def _build_job_data(
-    session: dict,
+    session: dict[str, str],
     content: str,
     conversation_config: dict,
     token: str,
@@ -160,7 +160,7 @@ def _build_job_data(
 
 async def _resolve_session(
     owner: str, repo: str, thread_type_segment: str, number: str, workflow: str
-) -> tuple[str | None, dict | None]:
+) -> tuple[str | None, dict[str, str] | None]:
     """Look up a streaming session by human-readable path.
 
     Returns (token, session) or (None, None) if not found.
@@ -178,7 +178,7 @@ async def _resolve_session(
     session = await store.get_session(token)
     if not session:
         return None, None
-    return token, session
+    return token, session  # type: ignore[return-value]
 
 
 # ---------------------------------------------------------------------------
@@ -186,7 +186,9 @@ async def _resolve_session(
 # ---------------------------------------------------------------------------
 
 
-async def _handle_resume_message(token: str, content: str, session: dict) -> None:
+async def _handle_resume_message(
+    token: str, content: str, session: dict[str, str]
+) -> None:
     """Create a new job to resume a completed session.
 
     Called when a user sends a message to a session that is not running.
@@ -376,7 +378,7 @@ async def resolve_session(
 
 
 async def _load_history_async(
-    session: dict, store: StreamingSessionStore, token: str
+    session: dict[str, str], store: StreamingSessionStore, token: str
 ) -> list[dict]:
     """Load conversation history — transcript file first, Redis fallback.
 
@@ -426,7 +428,7 @@ async def _load_history_async(
 
 async def _resolve_token_from_path(
     owner: str, repo: str, thread_type_segment: str, number: str, workflow: str
-) -> tuple[str | None, dict | None]:
+) -> tuple[str | None, dict[str, str] | None]:
     """Resolve a human-readable path to a session token and metadata.
 
     Checks Redis first, then falls back to transcript-based lookup.
@@ -598,8 +600,10 @@ async def websocket_session(
 
         # Transition to live mode with the rehydrated session
         token = new_token
-        session = await store.get_session(token)
-        if session is None:
+        updated_session = await store.get_session(token)
+        if updated_session is not None:
+            session = updated_session  # type: ignore[assignment]
+        else:
             logger.error(f"[WS] Session {new_token[:8]}... not found after rehydration")
             await websocket.close(code=4500, reason="Session creation failed")
             return
@@ -689,7 +693,7 @@ async def _redis_to_ws(websocket: WebSocket, token: str) -> None:
 
 
 async def _rehydrate_transcript_session(
-    websocket: WebSocket, token: str, session: dict
+    websocket: WebSocket, token: str, session: dict[str, str]
 ) -> str | None:
     """Wait for the first user message on a transcript-only session and rehydrate.
 
@@ -738,7 +742,7 @@ async def _rehydrate_transcript_session(
                 installation_id=session.get("installation_id", ""),
                 ref=session.get("ref", "main"),
                 user=session.get("user", "remote-control"),
-                thread_type=thread_type,
+                thread_type=thread_type,  # type: ignore[arg-type]
             )
 
             # Build resume job data
@@ -825,7 +829,7 @@ async def _ws_to_redis(websocket: WebSocket, token: str, session_status: str) ->
                     # inject_message payloads. Currently sessions are localhost-only
                     # so risk is low, but this should be addressed before exposing
                     # the proxy to non-local networks.
-                    await _handle_resume_message(token, content, session)
+                    await _handle_resume_message(token, content, session)  # type: ignore[arg-type]
                     continue
 
                 # Session is running — echo the user message to the

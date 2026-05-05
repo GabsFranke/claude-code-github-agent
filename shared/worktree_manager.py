@@ -9,12 +9,19 @@ import asyncio
 import logging
 import shutil
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from shared import execute_git_command
 from shared.constants import sanitize_repo_key
 
 logger = logging.getLogger(__name__)
+
+
+class HasListSessions(Protocol):
+    """Protocol for session stores that can enumerate active sessions."""
+
+    async def list_sessions(self, repo: str) -> list[Any]: ...
+
 
 WORKTREE_BASE = Path.home() / ".claude" / "worktrees"
 
@@ -316,7 +323,7 @@ async def cleanup_worktrees_by_branch(
                 logger.debug(f"Worktree branch check/remove failed: {e}")
 
 
-async def detect_orphan_worktrees(session_store: Any) -> list[Path]:
+async def detect_orphan_worktrees(session_store: HasListSessions) -> list[Path]:
     """Find worktrees on disk with no corresponding Redis session.
 
     Returns list of orphan paths for optional cleanup.

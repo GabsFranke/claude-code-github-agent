@@ -18,7 +18,7 @@ Redis keys:
 
 import json
 import logging
-from typing import Any
+from typing import Any, Literal, TypedDict
 
 from shared.constants import (
     DEFAULT_SESSION_TTL_SECONDS,
@@ -67,6 +67,24 @@ def _history_key(token: str) -> str:
     return SESSION_HISTORY_KEY.format(token)
 
 
+class StreamingSessionData(TypedDict, total=False):
+    """Shape of a streaming session record returned by get_session()."""
+
+    token: str
+    repo: str
+    issue_number: str
+    workflow: str
+    session_proxy_url: str
+    status: str
+    installation_id: str
+    initial_query: str
+    thread_type: str
+    ref: str
+    user: str
+    conversation_config: str
+    session_id: str
+
+
 class StreamingSessionStore:
     """Manages streaming session metadata in Redis.
 
@@ -91,7 +109,7 @@ class StreamingSessionStore:
         ttl_seconds: int = DEFAULT_SESSION_TTL_SECONDS,
         installation_id: str = "",
         initial_query: str = "",
-        thread_type: str = "issue",
+        thread_type: Literal["pr", "issue", "discussion"] = "issue",
         ref: str = "main",
         user: str = "",
         conversation_config: str = "",
@@ -211,7 +229,7 @@ class StreamingSessionStore:
             return token
         return None
 
-    async def get_session(self, token: str) -> dict | None:
+    async def get_session(self, token: str) -> StreamingSessionData | None:
         """Get session metadata.
 
         Returns:
@@ -222,7 +240,7 @@ class StreamingSessionStore:
         if not data:
             return None
         decoded = decode_redis_hash(data)
-        return decoded
+        return decoded  # type: ignore[return-value]
 
     async def set_completed(
         self,

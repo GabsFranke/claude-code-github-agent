@@ -7,7 +7,7 @@ thread ID + workflow, and expire after a configurable TTL.
 
 import logging
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 try:
     import redis.asyncio as aioredis
@@ -33,7 +33,7 @@ class SessionInfo(BaseModel):
 
     session_id: str
     repo: str
-    thread_type: str  # "pr", "issue", "discussion"
+    thread_type: Literal["pr", "issue", "discussion"]
     thread_id: str
     workflow_name: str
     ref: str
@@ -41,7 +41,7 @@ class SessionInfo(BaseModel):
     created_at: str
     last_run: str
     turn_count: int = 0
-    status: str = "active"
+    status: Literal["active", "completed", "expired"] = "active"
     summary: str | None = None
     streaming_token: str | None = None
 
@@ -65,7 +65,7 @@ class ConversationConfig(BaseModel):
     )
 
 
-def resolve_thread_type(event_data: dict) -> str:
+def resolve_thread_type(event_data: dict) -> Literal["pr", "issue", "discussion"]:
     """Determine thread type from webhook payload.
 
     Args:
