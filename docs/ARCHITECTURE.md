@@ -360,7 +360,7 @@ await redis.publish("agent:sync:events", json.dumps({"repo": repo, "ref": ref, "
 - Creates isolated git worktree per job from cached bare repo (detached HEAD mode)
 - Handles multiple ref formats: `refs/pull/N/head`, `refs/tags/*`, `refs/remotes/origin/*`
 - Runs repository setup commands via `RepoSetupEngine` (from `repo-setup.yaml`)
-- Generates structural context (file tree + personalized repomap with PageRank)
+- Generates structural context (file tree + personalized repomap)
 - Builds `ClaudeAgentOptions` via composable `SDKOptionsBuilder`
 - Executes Claude Agent SDK with retry (configurable, default 3 attempts)
 - Flushes buffered post-processing jobs (memory, retrospector, indexing)
@@ -385,9 +385,8 @@ git config user.name "Claude Code Agent"
 git config user.email "claude-code-agent[bot]@users.noreply.github.com"
 
 # Generate structural context
-file_tree, repomap = await generate_structural_context(
-    workspace, repo, mentioned_files, mentioned_idents,
-    token_budget=context_profile.repomap_budget
+file_tree = await generate_structural_context(
+    workspace, repo, mentioned_files, mentioned_idents
 )
 
 # Build SDK options and execute
@@ -398,7 +397,7 @@ options = (builder.with_model(model)
     .with_codebase_tools(workspace)
     .with_auto_discovered_plugins()
     .with_full_toolset()
-    .with_structural_context(file_tree, repomap)
+    .with_structural_context(file_tree)
     .with_repository_context(claude_md, memory_index)
     .build())
 
@@ -609,7 +608,7 @@ Python, JavaScript, TypeScript, TSX, Go, Rust, Java, C, C++, Ruby — via per-la
 
 **Layer 1 — Structural Context (Repomap)**:
 
-- `shared/repomap.py` — Aider-style repomap using tree-sitter + PageRank
+- `shared/repomap.py` — Aider-style repomap using tree-sitter
 - `shared/context_builder.py` — Async wrapper with commit-based caching and personalization
 - Generates compact "table of contents" of a codebase within a token budget
 - Ranks definitions by importance using reference graph analysis
@@ -761,7 +760,7 @@ When `ALLOW_HOST_MCP=true`, MCP server definitions from the host's `~/.claude.js
 | Module | Purpose |
 |--------|---------|
 | `chunker.py` | Tree-sitter-based semantic code chunker (functions, classes, methods) |
-| `repomap.py` | Aider-style repomap using tree-sitter + PageRank for structural context |
+| `repomap.py` | Aider-style repomap using tree-sitter for structural context |
 | `context_builder.py` | Async structural context generation with commit-based caching |
 | `ts_languages.py` | Language registry (10 languages) with dynamic tree-sitter loading |
 | `file_tree.py` | File tree generation with exclusion rules and SurrealDB collection naming |
@@ -807,7 +806,7 @@ When `ALLOW_HOST_MCP=true`, MCP server definitions from the host's `~/.claude.js
 7. Repo sync service clones/updates bare repository
 8. Sandbox worker waits for sync, creates worktree from bare repo (detached HEAD)
 9. Structural context generated (file tree + personalized repomap with PR changed files)
-10. Claude SDK executes with 5 MCP servers (GitHub, GitHub Actions, Memory, Codebase Tools, Semantic Search)
+10. Claude SDK executes with 4 MCP servers (GitHub, GitHub Actions, Memory, Codebase Tools)
 11. Claude SDK posts review to GitHub via MCP
 12. Post-processing: transcript staged, memory/retrospector/indexing jobs enqueued
 13. Job marked as complete in Redis

@@ -820,6 +820,11 @@ async def _ws_to_redis(websocket: WebSocket, token: str, session_status: str) ->
 
                 if current_status in ("completed", "error") and session:
                     # Session not running — create a resume job
+                    # TODO: Add rate limiting on resume job creation to prevent
+                    # a single client from flooding the job queue via repeated
+                    # inject_message payloads. Currently sessions are localhost-only
+                    # so risk is low, but this should be addressed before exposing
+                    # the proxy to non-local networks.
                     await _handle_resume_message(token, content, session)
                     continue
 
