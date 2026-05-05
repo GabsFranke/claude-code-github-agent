@@ -77,7 +77,7 @@ docker-compose up --build -d
 docker-compose -f docker-compose.minimal.yml up --build -d
 ```
 
-Manual setup is not recommended. The system requires 7+ services running simultaneously (webhook, worker, sandbox_worker, repo_sync, memory_worker, retrospector_worker, indexing_worker, Redis, and optionally Qdrant/Langfuse).
+Manual setup is not recommended. The system requires 7+ services running simultaneously (webhook, worker, sandbox_worker, repo_sync, memory_worker, retrospector_worker, indexing_worker, Redis, and optionally SurrealDB/Langfuse).
 
 ## Project Structure
 
@@ -90,7 +90,7 @@ claude-code-github-agent/
 │   ├── repo_sync/            # Bare repository cache management
 │   ├── memory_worker/        # Memory extraction from session transcripts
 │   ├── retrospector_worker/  # Self-improvement: analyzes sessions, opens PRs
-│   ├── indexing_worker/      # Semantic code indexing (Gemini + Qdrant)
+│   ├── indexing_worker/      # Semantic code indexing + code graph (Gemini + SurrealDB)
 │   └── session_proxy/        # WebSocket streaming bridge for browser sessions
 │       ├── main.py            # FastAPI app with WebSocket + REST endpoints
 │       ├── transcript_loader.py  # SDK transcript file loading for history replay
@@ -110,7 +110,11 @@ claude-code-github-agent/
 │   ├── repomap.py            # Aider-style repomap (tree-sitter + PageRank)
 │   ├── context_builder.py    # Structural context generation with caching
 │   ├── ts_languages.py       # 10-language tree-sitter registry
-│   ├── file_tree.py          # File tree generation + Qdrant collection naming
+│   ├── code_graph.py         # Symbol index for code intelligence queries (graph traversal)
+│   ├── file_tree.py          # File tree generation + SurrealDB collection naming
+│   ├── import_resolver.py    # Python/TypeScript import path resolution
+│   ├── route_maps.py         # API route and MCP tool definition extraction
+│   ├── surrealdb_client.py   # SurrealDB connection management and schema
 │   ├── transcript_parser.py  # JSONL transcript parsing
 │   ├── session_store.py      # SessionStore — Redis-backed persistent sessions with TTL
 │   ├── streaming_session.py   # StreamingSessionStore — streaming session metadata
@@ -126,8 +130,7 @@ claude-code-github-agent/
 ├── mcp_servers/              # MCP server implementations
 │   ├── base.py               # Shared stdio JSON-RPC 2.0 server loop
 │   ├── memory/               # memory_read / memory_write tools
-│   ├── codebase_tools/       # find_definitions, find_references, search_codebase, read_file_summary
-│   └── semantic_search/      # semantic_search tool (Qdrant + Gemini)
+│   └── codebase_tools/       # find_definitions, find_references, search_codebase (text/semantic/hybrid), read_file_summary
 ├── plugins/                  # Claude Code plugins
 │   ├── pr-review-toolkit/    # PR review workflow (7 agents, review-pr command)
 │   ├── ci-failure-toolkit/   # CI failure analysis (4 agents, GitHub Actions MCP)
@@ -248,9 +251,8 @@ tests/
 ├── services/indexing_worker/            # Indexing pipeline tests
 ├── mcp_servers/                         # MCP server tests
 │   ├── test_base.py                     # JSON-RPC protocol
-│   ├── codebase_tools/                  # find_definitions, search, etc.
+│   ├── codebase_tools/                  # find_definitions, search (text/semantic/hybrid), etc.
 │   ├── memory/                          # memory_read/write + security
-│   └── semantic_search/                 # Embedding + Qdrant filtering
 ├── plugins/                             # Plugin tests (GitHub Actions tools)
 ├── workflows/                           # Workflow engine tests (routing, filters, skip_self)
 ├── integration/                         # Integration tests (require live Redis)
@@ -294,9 +296,9 @@ async def test_queue_publish(mock_redis):
 docker-compose -f docker-compose.minimal.yml up --build -d
 ```
 
-Services: webhook, worker, sandbox_worker, mcp_proxy, repo_sync, memory_worker, retrospector_worker, Redis, Qdrant, indexing_worker
+Services: webhook, worker, sandbox_worker, mcp_proxy, repo_sync, memory_worker, retrospector_worker, Redis, SurrealDB, indexing_worker
 
-Volumes: repo-cache, agent-memory, transcripts, qdrant-storage
+Volumes: repo-cache, agent-memory, transcripts, surrealdb-data
 
 **Host `~/.claude/` integration**: The sandbox worker bind-mounts `~/.claude/` from your host. This means MCP servers, plugins, and skills you install with Claude Code CLI on the host are automatically available inside Docker. See [CONFIGURATION.md](CONFIGURATION.md) for `ALLOW_HOST_MCP` details.
 

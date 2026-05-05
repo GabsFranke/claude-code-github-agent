@@ -90,6 +90,7 @@ services:
     command: sh -c '(socat TCP-LISTEN:18000,fork TCP:mcp_proxy:18000 >/dev/null 2>&1 &) && python -m services.sandbox_executor.sandbox_worker 2>&1 | tee /var/log/bot/sandbox_worker.log'
     env_file: .env
     restart: unless-stopped
+    mem_limit: 4g
     volumes:
       # Persistent cache for bare repositories across all workers
       - repo-cache:/var/cache/repos:rw
@@ -123,7 +124,7 @@ services:
       - MEMORY_WORKER_ENABLED=${MEMORY_WORKER_ENABLED:-true}
       - RETROSPECTOR_ENABLED=${RETROSPECTOR_ENABLED:-true}
       - INDEXING_ENABLED=${INDEXING_ENABLED:-false}
-      - QDRANT_URL=http://qdrant:6333
+      - SURREALDB_URL=http://surrealdb:8000/rpc
       - GEMINI_API_KEY=${GEMINI_API_KEY}
     depends_on:
       redis:
@@ -140,7 +141,7 @@ services:
     build:
       context: .
       dockerfile: services/mcp_proxy/Dockerfile
-    command: sh -c '(socat TCP-LISTEN:11434,fork TCP:host.docker.internal:11434 >/dev/null 2>&1 &) && (socat TCP-LISTEN:6333,fork TCP:qdrant:6333 >/dev/null 2>&1 &) && uvicorn services.mcp_proxy.main:app --host 0.0.0.0 --port 18000 2>&1 | tee /var/log/bot/mcp_proxy.log'
+    command: sh -c '(socat TCP-LISTEN:11434,fork TCP:host.docker.internal:11434 >/dev/null 2>&1 &) && (socat TCP-LISTEN:8000,fork TCP:surrealdb:8000 >/dev/null 2>&1 &) && uvicorn services.mcp_proxy.main:app --host 0.0.0.0 --port 18000 2>&1 | tee /var/log/bot/mcp_proxy.log'
     env_file: .env
     restart: unless-stopped
     ports:
@@ -152,7 +153,7 @@ services:
     environment:
       - PYTHONPATH=/app
       - GITHUB_TOKEN=${GITHUB_TOKEN}
-      - QDRANT_URL=http://qdrant:6333
+      - SURREALDB_URL=http://surrealdb:8000/rpc
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - INDEXING_ENABLED=${INDEXING_ENABLED:-false}
     depends_on:
@@ -171,6 +172,7 @@ services:
     command: sh -c '(socat TCP-LISTEN:11434,fork TCP:host.docker.internal:11434 >/dev/null 2>&1 &) && (socat TCP-LISTEN:18000,fork TCP:mcp_proxy:18000 >/dev/null 2>&1 &) && python -m services.memory_worker.memory_worker 2>&1 | tee /var/log/bot/memory_worker.log'
     env_file: .env
     restart: unless-stopped
+    mem_limit: 4g
     volumes:
       # Claude home — reads transcripts, writes memory files
       - ~/.claude:/home/bot/.claude:rw
@@ -368,6 +370,7 @@ services:
     command: sh -c '(socat TCP-LISTEN:11434,fork TCP:host.docker.internal:11434 >/dev/null 2>&1 &) && (socat TCP-LISTEN:18000,fork TCP:mcp_proxy:18000 >/dev/null 2>&1 &) && python -m services.retrospector_worker.retrospector_worker 2>&1 | tee /var/log/bot/retrospector_worker.log'
     env_file: .env
     restart: unless-stopped
+    mem_limit: 4g
     volumes:
       # Claude home — reads transcripts
       - ~/.claude:/home/bot/.claude:rw
@@ -436,24 +439,23 @@ services:
       retries: 3
       start_period: 10s
 
-  # Vector database for semantic code search
-  qdrant:
-    image: qdrant/qdrant:v1.17.1
+  # Multi-model database: graph edges + vector search + full-text search
+  surrealdb:
+    image: surrealdb/surrealdb:latest
+    user: "0:0"
     volumes:
-      - qdrant-storage:/qdrant/storage
+      - surrealdb-data:/data
     ports:
-      - "127.0.0.1:6333:6333"
-      - "127.0.0.1:6334:6334"
-    environment:
-      QDRANT__SERVICE__GRPC_PORT: 6334
+      - "127.0.0.1:8000:8000"
+    command: start --user root --pass root rocksdb:/data/db
     healthcheck:
-      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/6333'"]
+      test: ["CMD", "/surreal", "isready"]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 10s
+      start_period: 5s
 
-  # Background worker: chunks code, generates embeddings, stores in Qdrant
+  # Background worker: chunks code, generates embeddings, stores in SurrealDB
   indexing_worker:
     build:
       context: .
@@ -468,7 +470,7 @@ services:
       - PYTHONPATH=/app
       - REDIS_URL=redis://redis:6379
       - REDIS_PASSWORD=${REDIS_PASSWORD}
-      - QDRANT_URL=http://qdrant:6333
+      - SURREALDB_URL=http://surrealdb:8000/rpc
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - INDEXING_ENABLED=${INDEXING_ENABLED:-false}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-gemini-embedding-001}
@@ -480,7 +482,7 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-      qdrant:
+      surrealdb:
         condition: service_healthy
 
   session_proxy:
@@ -516,4 +518,4 @@ volumes:
   langfuse-clickhouse-data:
   langfuse-clickhouse-logs:
   langfuse-minio-data:
-  qdrant-storage:
+  surrealdb-data:

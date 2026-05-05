@@ -77,7 +77,6 @@ def configure_builder(
     memory_index: str | None,
     thread_history_text: str,
     file_tree_text: str,
-    repomap_text: str,
 ) -> SDKOptionsBuilder:
     """Apply common sandbox-specific configuration to an SDKOptionsBuilder.
 
@@ -94,5 +93,5 @@ def configure_builder(
         .with_system_prompt(system_context)
         .with_repository_context(claude_md=claude_md, memory_index=memory_index)
         .with_thread_history(thread_history_text)
-        .with_structural_context(file_tree=file_tree_text, repomap=repomap_text)
+        .with_structural_context(file_tree=file_tree_text)
     )

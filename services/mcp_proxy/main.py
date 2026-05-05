@@ -29,7 +29,14 @@ MCP_SERVERS_DIR = os.getenv("MCP_SERVERS_DIR", "/app/mcp_servers")
 
 # Security: allowed prefixes for query parameters injected as env vars.
 # Prevents overwriting sensitive env vars like PATH, HOME, LD_LIBRARY_PATH, etc.
-DEFAULT_ALLOWED_ENV_PREFIXES = ("REPO_", "GITHUB_", "MCP_", "QDRANT_", "PYTHONPATH")
+DEFAULT_ALLOWED_ENV_PREFIXES = (
+    "REPO_",
+    "GITHUB_",
+    "MCP_",
+    "SURREALDB_",
+    "GEMINI_",
+    "PYTHONPATH",
+)
 _ALLOWED_ENV_PREFIXES: tuple[str, ...] | None = None
 
 
@@ -158,6 +165,7 @@ async def mcp_sse(server_name: str, request: Request):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
+            limit=16 * 1024 * 1024,  # 16 MB — MCP responses can be large
         )
         sessions[session_id] = process
         logger.info(f"Started {server_name} session {session_id} (PID {process.pid})")
@@ -188,11 +196,18 @@ async def mcp_sse(server_name: str, request: Request):
             if not process.stdout:
                 return
 
-            # Read stdout line by line (JSON-RPC) and yield as message events
+            # Read stdout line by line (JSON-RPC) and yield as message events.
             while True:
                 if process.stdout.at_eof():
                     break
-                line = await process.stdout.readline()
+                try:
+                    line = await process.stdout.readline()
+                except ValueError:
+                    logger.error(
+                        "readline exceeded buffer for session %s, closing session",
+                        session_id,
+                    )
+                    return
                 if not line:
                     break
 

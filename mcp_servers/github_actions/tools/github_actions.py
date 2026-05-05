@@ -130,6 +130,8 @@ async def get_job_logs_raw(
         # Read last 500 lines (if total is 2000)
         chunk_end = get_job_logs_raw(owner, repo, job_id, start_line=1500, num_lines=500)
     """
+    num_lines = min(num_lines, 500)
+
     github_token = os.getenv("GITHUB_TOKEN")
     if not github_token:
         raise AuthenticationError("GITHUB_TOKEN not available in environment")
@@ -173,7 +175,7 @@ async def search_job_logs(
     repo: str,
     job_id: str,
     pattern: str,
-    context_lines: int = 5,
+    context_lines: int = 3,
     case_sensitive: bool = False,
 ) -> dict[str, Any]:
     """
@@ -235,8 +237,8 @@ async def search_job_logs(
             "job_id": job_id,
             "pattern": pattern,
             "total_matches": len(matches),
-            "matches": matches[:50],  # Limit to first 50 matches
-            "truncated": len(matches) > 50,
+            "matches": matches[:30],  # Limit to first 30 matches
+            "truncated": len(matches) > 30,
         }
 
 
@@ -244,7 +246,7 @@ async def get_failed_steps(
     owner: str,
     repo: str,
     job_id: str,
-    log_lines_per_step: int = 100,
+    log_lines_per_step: int = 80,
 ) -> dict[str, Any]:
     """
     Extract failed steps from a job with relevant log sections.
@@ -304,7 +306,7 @@ async def get_failed_steps(
         # For multiple failed steps, give more context
         total_lines = len(logs_lines)
         lines_to_include = min(
-            log_lines_per_step * max(len(failed_steps), 1), total_lines
+            log_lines_per_step * max(len(failed_steps), 1), total_lines, 500
         )
 
         # Get the last N lines (where errors usually are)

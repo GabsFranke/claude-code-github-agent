@@ -31,6 +31,7 @@ _LAZY_NAMES = {
     "CommandExecutionError": ".exceptions",
     "ConfigurationError": ".exceptions",
     "GitHubAPIError": ".exceptions",
+    "IndexingTimeoutError": ".exceptions",
     "QueueError": ".exceptions",
     "RateLimitError": ".exceptions",
     "RepositorySyncError": ".exceptions",
@@ -71,6 +72,7 @@ _LAZY_NAMES = {
     "RedisQueue": ".queue",
     "PubSubQueue": ".queue",
     "get_queue": ".queue",
+    "wait_for_indexing": ".queue",
     "wait_for_repo_sync": ".queue",
     # Rate limiting
     "RateLimiter": ".rate_limiter",

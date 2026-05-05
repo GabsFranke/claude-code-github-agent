@@ -101,7 +101,7 @@ services:
       - MEMORY_WORKER_ENABLED=${MEMORY_WORKER_ENABLED:-true}
       - RETROSPECTOR_ENABLED=${RETROSPECTOR_ENABLED:-true}
       - INDEXING_ENABLED=${INDEXING_ENABLED:-false}
-      - QDRANT_URL=http://qdrant:6333
+      - SURREALDB_URL=ws://surrealdb:8000/rpc
       - GEMINI_API_KEY=${GEMINI_API_KEY}
     depends_on:
       redis:
@@ -202,24 +202,22 @@ services:
       repo_sync:
         condition: service_healthy
 
-  # Vector database for semantic code search
-  qdrant:
-    image: qdrant/qdrant:v1.17.1
+  # Multi-model database for code intelligence (graph + vector + full-text)
+  surrealdb:
+    image: surrealdb/surrealdb:latest
     volumes:
-      - qdrant-storage:/qdrant/storage
+      - surrealdb-data:/data
     ports:
-      - "127.0.0.1:6333:6333"
-      - "127.0.0.1:6334:6334"
-    environment:
-      QDRANT__SERVICE__GRPC_PORT: 6334
+      - "127.0.0.1:8000:8000"
+    command: start --user root --pass root rocksdb:/data/db
     healthcheck:
-      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/6333'"]
+      test: ["CMD", "/surreal", "is-ready", "--conn", "http://localhost:8000"]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 10s
 
-  # Background worker: chunks code, generates embeddings, stores in Qdrant
+  # Background worker: chunks code, generates embeddings, stores in SurrealDB
   indexing_worker:
     build:
       context: .
@@ -233,7 +231,7 @@ services:
       - PYTHONPATH=/app
       - REDIS_URL=redis://redis:6379
       - REDIS_PASSWORD=${REDIS_PASSWORD:-myredissecret}
-      - QDRANT_URL=http://qdrant:6333
+      - SURREALDB_URL=ws://surrealdb:8000/rpc
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - INDEXING_ENABLED=${INDEXING_ENABLED:-true}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-gemini-embedding-001}
@@ -245,9 +243,9 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-      qdrant:
+      surrealdb:
         condition: service_healthy
 
 volumes:
   repo-cache:
-  qdrant-storage:
+  surrealdb-data:

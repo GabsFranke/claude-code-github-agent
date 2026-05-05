@@ -26,23 +26,20 @@ class TestStructuralContext:
         builder = SDKOptionsBuilder(cwd="/tmp")
         builder.with_structural_context(
             file_tree="root/\n  src/\n    main.py",
-            repomap="main.py:\n  5│ class App",
         )
         assert builder._structural_context is not None
         assert "<repo_structure>" in builder._structural_context
-        assert "<repo_map>" in builder._structural_context
 
     def test_with_empty_structural_context(self):
         builder = SDKOptionsBuilder(cwd="/tmp")
-        builder.with_structural_context(file_tree="", repomap="")
+        builder.with_structural_context(file_tree="")
         assert builder._structural_context is None
 
     def test_with_file_tree_only(self):
         builder = SDKOptionsBuilder(cwd="/tmp")
-        builder.with_structural_context(file_tree="root/\n  main.py", repomap=None)
+        builder.with_structural_context(file_tree="root/\n  main.py")
         assert builder._structural_context is not None
         assert "<repo_structure>" in builder._structural_context
-        assert "<repo_map>" not in builder._structural_context
 
 
 class TestSystemPromptBudget:
@@ -59,7 +56,6 @@ class TestSystemPromptBudget:
         )
         builder.with_structural_context(
             file_tree="root/\n  main.py",
-            repomap="main.py:\n  5│ class App",
         )
 
         result = builder._assemble_system_prompt()
@@ -81,7 +77,6 @@ class TestSystemPromptBudget:
         builder.with_system_prompt("Test prompt")
         builder.with_structural_context(
             file_tree="root/\n  main.py",
-            repomap="main.py:\n  5│ class App",
         )
 
         # Need to mock ClaudeAgentOptions since it's mocked in conftest

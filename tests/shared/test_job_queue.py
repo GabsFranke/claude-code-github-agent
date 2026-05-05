@@ -476,3 +476,124 @@ class TestJobQueueConnect:
         with patch("redis.asyncio.from_url", side_effect=OSError("Connection refused")):
             with pytest.raises(QueueError, match="Failed to connect to Redis"):
                 await queue._connect()
+
+
+class TestJobQueueReclaimStaleJobs:
+    """Test reclaim_stale_jobs method, especially github_token stripping."""
+
+    @pytest.mark.asyncio
+    async def test_reclaim_strips_github_token(self):
+        """Reclaimed jobs have github_token removed so a fresh one is generated."""
+        queue = JobQueue(redis_url="redis://localhost:6379")
+
+        stale_job_id = "550e8400-e29b-41d4-a716-446655440099"
+        original_data = {
+            "repo": "owner/repo",
+            "issue_number": 123,
+            "prompt": "Test prompt",
+            "github_token": "ghs_expired_token_12345",
+            "installation_id": 112053500,
+            "user": "testuser",
+        }
+        backup_json = json.dumps(original_data)
+
+        mock_redis = AsyncMock()
+        # smembers returns the stale job ID
+        mock_redis.smembers = AsyncMock(return_value={stale_job_id})
+        # exists returns 0 — job data has expired
+        mock_redis.exists = AsyncMock(return_value=0)
+        # get returns the backup JSON
+        mock_redis.get = AsyncMock(return_value=backup_json.encode())
+        mock_redis.setex = AsyncMock()
+        mock_redis.rpush = AsyncMock()
+        mock_redis.srem = AsyncMock()
+        mock_redis.delete = AsyncMock()
+        queue.redis = mock_redis
+
+        reclaimed = await queue.reclaim_stale_jobs()
+
+        assert reclaimed == 1
+
+        # Find the setex call that restores job data and verify
+        # github_token was stripped
+        for call in mock_redis.setex.call_args_list:
+            args = call[0]
+            if args[0] == f"{queue.job_data_prefix}{stale_job_id}":
+                restored_data = json.loads(args[2])
+                assert "github_token" not in restored_data
+                assert restored_data.get("installation_id") == 112053500
+                break
+        else:
+            pytest.fail("Expected setex call for job data restoration")
+
+    @pytest.mark.asyncio
+    async def test_reclaim_preserves_data_without_token(self):
+        """Jobs without github_token should pass through unchanged."""
+        queue = JobQueue(redis_url="redis://localhost:6379")
+
+        stale_job_id = "550e8400-e29b-41d4-a716-446655440100"
+        original_data = {
+            "repo": "owner/repo",
+            "issue_number": 456,
+            "prompt": "Another prompt",
+            "installation_id": 999,
+            "user": "testuser",
+        }
+        backup_json = json.dumps(original_data)
+
+        mock_redis = AsyncMock()
+        mock_redis.smembers = AsyncMock(return_value={stale_job_id})
+        mock_redis.exists = AsyncMock(return_value=0)
+        mock_redis.get = AsyncMock(return_value=backup_json.encode())
+        mock_redis.setex = AsyncMock()
+        mock_redis.rpush = AsyncMock()
+        mock_redis.srem = AsyncMock()
+        mock_redis.delete = AsyncMock()
+        queue.redis = mock_redis
+
+        reclaimed = await queue.reclaim_stale_jobs()
+
+        assert reclaimed == 1
+
+        for call in mock_redis.setex.call_args_list:
+            args = call[0]
+            if args[0] == f"{queue.job_data_prefix}{stale_job_id}":
+                restored_data = json.loads(args[2])
+                # No github_token was in original, and none should be added
+                assert "github_token" not in restored_data
+                assert restored_data == original_data
+                break
+        else:
+            pytest.fail("Expected setex call for job data restoration")
+
+    @pytest.mark.asyncio
+    async def test_reclaim_handles_corrupt_json(self):
+        """Corrupt backup JSON should be restored as-is (not crash)."""
+        queue = JobQueue(redis_url="redis://localhost:6379")
+
+        stale_job_id = "550e8400-e29b-41d4-a716-446655440101"
+
+        mock_redis = AsyncMock()
+        mock_redis.smembers = AsyncMock(return_value={stale_job_id})
+        mock_redis.exists = AsyncMock(return_value=0)
+        # Corrupt JSON (bytes, as Redis returns)
+        corrupt_bytes = b"not valid json{"
+        mock_redis.get = AsyncMock(return_value=corrupt_bytes)
+        mock_redis.setex = AsyncMock()
+        mock_redis.rpush = AsyncMock()
+        mock_redis.srem = AsyncMock()
+        mock_redis.delete = AsyncMock()
+        queue.redis = mock_redis
+
+        reclaimed = await queue.reclaim_stale_jobs()
+
+        assert reclaimed == 1
+
+        # Verify corrupt JSON was passed through unchanged
+        for call in mock_redis.setex.call_args_list:
+            args = call[0]
+            if args[0] == f"{queue.job_data_prefix}{stale_job_id}":
+                assert args[2] == corrupt_bytes
+                break
+        else:
+            pytest.fail("Expected setex call for job data restoration")

@@ -13,12 +13,14 @@ import httpx
 
 from repo_setup import RepoSetupEngine
 from shared import (
+    IndexingTimeoutError,
     JobQueue,
     RepositorySyncError,
     SDKError,
     SDKTimeoutError,
     WorktreeCreationError,
     execute_git_command,
+    wait_for_indexing,
     wait_for_repo_sync,
 )
 from shared.constants import (
@@ -72,7 +74,6 @@ class JobProcessor:
 
         # Context details
         self.file_tree_text = ""
-        self.repomap_text = ""
         self.thread_history_text = ""
         self.parent_span_id = job_data.get("parent_span_id")
 
@@ -124,9 +125,10 @@ class JobProcessor:
         logger.info(f"Job data ref value: {self.job_data.get('ref', 'NOT_FOUND')}")
         logger.info(f"Setting up worktree for {self.repo} (ref {self.ref})")
 
-        if not self.job_data.get("github_token") and self.job_data.get(
-            "installation_id"
-        ):
+        # Always regenerate the token when installation_id is available.
+        # Reclaimed jobs may carry a stale (expired) token from backup, and
+        # checking "if not github_token" would skip regeneration for those.
+        if self.job_data.get("installation_id"):
             try:
                 from shared.github_auth import GitHubAuthService
 
@@ -146,6 +148,24 @@ class JobProcessor:
         self.repo_dir = await wait_for_repo_sync(
             self.repo, self.ref, self.job_queue.redis
         )
+
+        # Wait for code indexing to complete so the agent has full
+        # code intelligence (code graph + embeddings + routes) available.
+        # Catch ALL exceptions so a Redis pub/sub issue or missing
+        # channel never kills the job — the agent can still work
+        # without indexed code intelligence.
+        try:
+            await wait_for_indexing(self.repo, self.ref, self.job_queue.redis)
+        except IndexingTimeoutError:
+            logger.warning(
+                f"Indexing wait timed out for {self.repo} "
+                f"- proceeding with degraded code intelligence"
+            )
+        except Exception as e:
+            logger.warning(
+                f"Indexing wait failed for {self.repo}: {e} "
+                f"- proceeding with degraded code intelligence"
+            )
 
         conversation_config = self.job_data.get("conversation_config") or {}
         self.persist_session = conversation_config.get("persist", False)
@@ -381,7 +401,9 @@ class JobProcessor:
 
             context_profile = self.job_data.get("context_profile", {})
             if context_profile:
-                context_budget = context_profile.get("repomap_budget", 4096)
+                context_budget = context_profile.get(
+                    "repomap_budget", 4096
+                )  # noqa: E501 repomap_budget kept for config compat
                 include_test_files = context_profile.get("include_test_files", True)
 
             if context_profile.get("personalized", False):
@@ -401,7 +423,7 @@ class JobProcessor:
                                     f["path"] for f in files if "path" in f
                                 ]
                                 logger.info(
-                                    f"Personalizing repomap toward {len(mentioned_files)} changed files"
+                                    f"Personalizing context toward {len(mentioned_files)} changed files"
                                 )
                     except Exception as e:
                         logger.debug(
@@ -419,7 +441,7 @@ class JobProcessor:
                             f"Added {len(focus_files)} priority focus files for areas: {priority_focus}"
                         )
 
-            self.file_tree_text, self.repomap_text = await generate_structural_context(
+            self.file_tree_text = await generate_structural_context(
                 repo_path=Path(self.workspace),
                 repo=self.repo,
                 mentioned_files=mentioned_files,
@@ -428,7 +450,7 @@ class JobProcessor:
                 cache_dir=Path.home() / ".claude",
             )
             logger.info(
-                f"Generated structural context: file_tree={len(self.file_tree_text)} chars, repomap={len(self.repomap_text)} chars"
+                f"Generated structural context: file_tree={len(self.file_tree_text)} chars"
             )
         except Exception as e:
             logger.warning(
@@ -558,7 +580,6 @@ class JobProcessor:
                 memory_index=memory_index,
                 thread_history_text=self.thread_history_text,
                 file_tree_text=self.file_tree_text,
-                repomap_text=self.repomap_text,
             )
 
             if continue_count == 0:

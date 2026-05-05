@@ -1,8 +1,0 @@
-{
-  "condition": "INDEXING_ENABLED=true",
-  "extra_params": {
-    "qdrant_url": "${QDRANT_URL:-http://localhost:6333}",
-    "gemini_api_key": "${GEMINI_API_KEY}",
-    "embedding_dimension": "${EMBEDDING_DIMENSION:-1024}"
-  }
-}
