@@ -1000,5 +1000,4 @@ See [SUBAGENTS.md](SUBAGENTS.md) for details.
 
 - [Development](DEVELOPMENT.md) - Setup, testing, deployment
 - [Configuration](CONFIGURATION.md) - Environment variables
-- [PR Review Flow](PR_REVIEW_FLOW.md) - Review workflow details
 - [Plugins](PLUGINS.md) - Plugin system

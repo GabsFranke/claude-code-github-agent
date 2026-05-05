@@ -59,7 +59,7 @@ The agent runs Claude SDK with the full Claude Code feature set. Because `~/.cla
 
 - **3-layer context** — File tree → AST code tools → semantic vector search
 - **Structural awareness** — Aider-style repomap with tree-sitter + PageRank (10 languages), personalized per PR
-- **5 MCP servers** — GitHub (HTTP), GitHub Actions, Memory, Codebase Tools, Semantic Search (proxied via SSE)
+- **4 MCP servers** — GitHub (HTTP), GitHub Actions, Memory, Codebase Tools (proxied via SSE)
 - **Self-improvement** — Retrospector analyzes past sessions and proposes instruction improvements via PRs
 
 ## Quick Start
