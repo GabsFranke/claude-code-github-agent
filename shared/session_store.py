@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from .constants import (
     DEFAULT_SESSION_TTL_HOURS,
     decode_redis_hash,
+    sanitize_repo_key,
     streaming_lookup_key,
 )
 
@@ -98,13 +99,13 @@ def resolve_thread_type(event_data: dict) -> str:
 
 def _session_key(repo: str, thread_type: str, thread_id: str, workflow: str) -> str:
     """Build the Redis key for a session mapping."""
-    safe_repo = repo.replace("/", "--")
+    safe_repo = sanitize_repo_key(repo)
     return f"session:map:{safe_repo}:{thread_type}:{thread_id}:{workflow}"
 
 
 def _session_pattern(repo: str) -> str:
     """Build a Redis SCAN pattern for all sessions of a repo."""
-    safe_repo = repo.replace("/", "--")
+    safe_repo = sanitize_repo_key(repo)
     return f"session:map:{safe_repo}:*"
 
 

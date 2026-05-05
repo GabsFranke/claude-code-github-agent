@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+from .constants import sanitize_repo_key
 from .file_tree import load_ignore_spec, walk_source_files
 from .import_resolver import resolve_python_import, resolve_ts_import
 from .repomap import RepoMap, Tag
@@ -863,7 +864,8 @@ def _find_enclosing_def(
     def_map: list[tuple[int, int, str]],
     node,
 ) -> str | None:
-    """Find the name of the definition that encloses *node* using binary search.
+    """Find the name of the definition that encloses *node* using bisect-based
+    lookup with backward linear scan.
 
     *def_map* is sorted by start_byte.  Returns the tightest enclosing definition
     (smallest byte range) that contains *node*.
@@ -1358,7 +1360,7 @@ def _get_head_commit(repo_path: Path) -> str:
 
 def _safe_repo_name(repo: str) -> str:
     """Convert a repo slug to a safe key for cache/index naming."""
-    return repo.replace("/", "--")
+    return sanitize_repo_key(repo)
 
 
 def _parse_git_diff(diff_output: str) -> list[dict]:

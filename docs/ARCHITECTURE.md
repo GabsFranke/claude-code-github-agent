@@ -980,6 +980,27 @@ When `ALLOW_HOST_MCP=true`, MCP server definitions from the host's `~/.claude.js
 - Use CLAUDE.md for repository-specific constraints
 - Monitor logs and Langfuse traces
 
+### Shared Volume Security Model
+
+The `~/.claude/` directory is bind-mounted as a shared volume across all worker services. This design ensures host-worker state parity (plugins, skills, MCP servers installed on the host are automatically available to the bot), but introduces a shared-filesystem security consideration.
+
+**What each worker can access via the shared volume:**
+
+- Worktrees managed by `WorktreeManager` with deterministic paths
+- Session transcripts persisted to `~/.claude/transcripts/`
+- Memory files at `~/.claude/memory/{repo}/`
+- Claude Code configuration files (`settings.json`, `CLAUDE.md`)
+- Plugin installations and MCP server registrations
+
+**Mitigations:**
+
+- **Isolated worktrees**: Each job operates in its own git worktree scoped by `{repo}/{thread_id}/{workflow}`, preventing cross-job file conflicts.
+- **WorktreeLock**: Redis-based distributed lock prevents parallel jobs from operating on the same worktree simultaneously (see `shared/worktree_lock.py`).
+- **Internal Docker network**: The session proxy and all workers communicate over an internal Docker network, not exposed to external networks by default.
+- **Input validation**: Session IDs and repository names are validated and sanitized before filesystem access (see `_validate_session_id` in `services/session_proxy/transcript_loader.py`).
+
+**Trade-off**: The shared volume means a compromised worker could read/write files from other workers' sessions. For production deployments with untrusted code execution, consider using separate volumes per worker type or isolating sandbox execution entirely.
+
 ## Subagents
 
 **Core Subagents** (in `subagents/`):

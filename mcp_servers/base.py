@@ -98,7 +98,7 @@ async def run_server(
                 }
                 sys.stdout.write(json.dumps(error_response) + "\n")
                 sys.stdout.flush()
-            except Exception as e:
+            except Exception:
                 logger.exception("Error processing request")
                 error_response = {
                     "jsonrpc": "2.0",
