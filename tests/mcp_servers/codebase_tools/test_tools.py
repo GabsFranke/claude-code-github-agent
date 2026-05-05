@@ -446,10 +446,10 @@ class TestSemanticSearch:
             for r in results:
                 assert r["kind"] == "class"
 
-    def test_semantic_search_falls_back_on_missing_api_key(
+    def test_semantic_search_errors_on_missing_api_key(
         self, initialized_repo: Path, monkeypatch
     ):
-        """When GEMINI_API_KEY is not set, fall back to text search."""
+        """When GEMINI_API_KEY is not set, return an error dict."""
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
 
         results = search_codebase(
@@ -457,6 +457,9 @@ class TestSemanticSearch:
             search_type="semantic",
         )
         assert isinstance(results, list)
+        assert len(results) == 1
+        assert "error" in results[0]
+        assert "GEMINI_API_KEY" in results[0]["error"]
 
 
 class TestHybridSearch:

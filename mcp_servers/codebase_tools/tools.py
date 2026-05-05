@@ -535,19 +535,19 @@ def _semantic_search(
 ) -> list[dict[str, Any]]:
     """Semantic search via Gemini embedding + SurrealDB HNSW vector index.
 
-    Falls back to text search if Gemini or SurrealDB are unavailable.
+    Returns error dicts if Gemini or SurrealDB are unavailable.
     """
     try:
         from google import genai
         from google.genai import types
     except ImportError:
-        logger.warning("google-genai not installed. Falling back to text search.")
-        return _fallback_text_search(query, file_type, max_results)
+        logger.warning("google-genai not installed; semantic search unavailable")
+        return [{"error": "google-genai package is not installed. Semantic search requires it."}]
 
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
-        logger.warning("GEMINI_API_KEY not set. Falling back to text search.")
-        return _fallback_text_search(query, file_type, max_results)
+        logger.warning("GEMINI_API_KEY not set; semantic search unavailable")
+        return [{"error": "GEMINI_API_KEY is not set. Semantic search requires it."}]
 
     embedding_dim = int(os.getenv("EMBEDDING_DIMENSION", "1024"))
 
@@ -564,7 +564,7 @@ def _semantic_search(
 
         if not response.embeddings or not response.embeddings[0].values:
             logger.warning("Gemini returned empty embedding for query: %s", query[:100])
-            return []
+            return [{"error": "Gemini returned empty embedding for this query."}]
 
         query_embedding = response.embeddings[0].values
 
@@ -614,11 +614,11 @@ def _semantic_search(
         rows = _raw_result_rows(result)
 
         if not rows:
-            logger.debug(
-                "Semantic search returned 0 rows for query: %s (dim=%d)",
+            logger.info(
+                "Semantic search returned 0 rows for query: %s",
                 query[:100],
-                len(query_embedding),
             )
+            return []
 
         output: list[dict[str, Any]] = []
         for row in rows:
@@ -645,9 +645,12 @@ def _semantic_search(
 
         return output
 
+    except (ConnectionRefusedError, OSError) as e:
+        logger.error("SurrealDB unreachable: %s", e)
+        return [{"error": f"SurrealDB is not available at {os.getenv('SURREALDB_URL', 'ws://localhost:8000/rpc')}. Semantic search requires a running SurrealDB instance."}]
     except Exception as e:
         logger.error("Semantic search failed: %s", e, exc_info=True)
-        return _fallback_text_search(query, file_type, max_results)
+        return [{"error": f"Semantic search failed: {e}"}]
 
 
 def _hybrid_search(
@@ -660,16 +663,21 @@ def _hybrid_search(
 
     Runs both search modes independently and merges results. Semantic results
     are prioritized since they capture meaning, not just literal matches.
-    Deduplicates by (file, line) key.
+    Deduplicates by (file, line) key. Errors from semantic search (e.g.
+    SurrealDB unreachable) are surfaced in the result list.
     """
     text_results = _fallback_text_search(pattern, file_type, max_results)
     semantic_results = _semantic_search(pattern, file_type, max_results, kind_filter)
+
+    # Separate error results from valid semantic results
+    errors = [r for r in semantic_results if "error" in r]
+    valid_semantic = [r for r in semantic_results if "error" not in r]
 
     seen: set[tuple[str, int]] = set()
     merged: list[dict[str, Any]] = []
 
     # Add semantic results first (ranked by relevance)
-    for r in semantic_results:
+    for r in valid_semantic:
         key = (r["file"], r["line"])
         if key not in seen:
             seen.add(key)
@@ -684,7 +692,8 @@ def _hybrid_search(
             r["source"] = "text"
             merged.append(r)
 
-    return merged[:max_results]
+    # Prepend any error dicts so the caller knows semantic search had issues
+    return errors + merged[:max_results]
 
 
 def _fallback_text_search(
@@ -692,7 +701,7 @@ def _fallback_text_search(
     file_type: str | None,
     max_results: int,
 ) -> list[dict[str, Any]]:
-    """Text search fallback used when semantic search is unavailable."""
+    """Text search used for text and hybrid search modes."""
     rg_path = shutil.which("rg")
     if rg_path:
         return _search_with_rg(rg_path, pattern, file_type, max_results)
