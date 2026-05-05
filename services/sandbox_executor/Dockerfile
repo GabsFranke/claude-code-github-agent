@@ -18,6 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     zip \
     sudo \
     ripgrep \
+    socat \
     && rm -rf /var/lib/apt/lists/*
 
 # The sandbox needs the shared agent definitions and shared utilities
@@ -43,19 +44,20 @@ RUN pip3 install --no-cache-dir -r requirements.txt
 # Sandbox Executor source code
 COPY services/sandbox_executor/ /app/services/sandbox_executor/
 
-# Copy plugins and skills to bot user's .claude directory
-RUN mkdir -p /home/bot/.claude/plugins /home/bot/.claude/skills
-COPY plugins/ /home/bot/.claude/plugins/
-COPY skills/ /home/bot/.claude/skills/
+# Copy plugins and skills to /app/ for seeding into bind-mounted ~/.claude/
+RUN mkdir -p /app/plugins /app/skills
+COPY plugins/ /app/plugins/
+COPY skills/ /app/skills/
+
+# Entrypoint seeds plugins/skills into ~/.claude/ on first run
+COPY services/sandbox_executor/entrypoint.sh /app/entrypoint.sh
+RUN sed -i 's/\r$//' /app/entrypoint.sh && chmod +x /app/entrypoint.sh
 
 # Create repo cache directory and set ownership to bot user
 RUN mkdir -p /var/cache/repos && chown -R bot:bot /var/cache/repos
 
 # Create agent memory directory structure and set ownership to bot user
 RUN mkdir -p /home/bot/.claude/projects && chown -R bot:bot /home/bot/.claude/projects
-
-# Create agent memory directory and transcript staging directory
-RUN mkdir -p /home/bot/agent-memory /home/bot/transcripts && chown -R bot:bot /home/bot/agent-memory /home/bot/transcripts
 
 # Set ownership to bot user
 RUN chown -R bot:bot /app /home/bot/.claude

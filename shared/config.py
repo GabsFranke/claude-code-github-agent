@@ -186,7 +186,7 @@ class QueueConfig(BaseConfig):
 
 
 class IndexingConfig(BaseConfig):
-    """Semantic indexing configuration for Google Gemini + Qdrant."""
+    """Semantic indexing configuration for Google Gemini + SurrealDB."""
 
     indexing_enabled: bool = Field(
         default=False, description="Enable semantic indexing worker"
@@ -194,12 +194,13 @@ class IndexingConfig(BaseConfig):
     gemini_api_key: str | None = Field(
         default=None, description="Google Gemini API key for embeddings"
     )
-    qdrant_url: str = Field(
-        default="http://localhost:6333", description="Qdrant REST API URL"
+    surrealdb_url: str = Field(
+        default="ws://localhost:8000/rpc", description="SurrealDB WebSocket URL"
     )
-    qdrant_api_key: str | None = Field(
-        default=None, description="Qdrant API key (optional)"
-    )
+    surrealdb_user: str = Field(default="root", description="SurrealDB username")
+    surrealdb_pass: str = Field(default="root", description="SurrealDB password")
+    surrealdb_ns: str = Field(default="bot", description="SurrealDB namespace")
+    surrealdb_db: str = Field(default="codebase", description="SurrealDB database")
     embedding_model: str = Field(
         default="gemini-embedding-001", description="Gemini embedding model name"
     )

@@ -2,16 +2,18 @@ services:
   redis:
     image: redis:7-alpine
     env_file: .env
-    command: sh -c 'redis-server --requirepass "$${REDIS_PASSWORD:-myredissecret}"'
+    command: sh -c 'redis-server --requirepass "$${REDIS_PASSWORD}" --appendonly yes'
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis-data:/data
     healthcheck:
       test:
         [
           "CMD",
           "sh",
           "-c",
-          "redis-cli --no-auth-warning -a $${REDIS_PASSWORD:-myredissecret} ping",
+          "redis-cli --no-auth-warning -a $${REDIS_PASSWORD} ping",
         ]
       interval: 5s
       timeout: 3s
@@ -23,6 +25,7 @@ services:
       dockerfile: services/webhook/Dockerfile
     command: sh -c 'python main.py 2>&1 | tee /var/log/bot/webhook.log'
     env_file: .env
+    restart: unless-stopped
     volumes:
       - ./logs:/var/log/bot
     ports:
@@ -41,6 +44,11 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
   worker:
     build:
@@ -48,8 +56,10 @@ services:
       dockerfile: services/agent_worker/Dockerfile
     command: sh -c 'python3 -m services.agent_worker.worker 2>&1 | tee /var/log/bot/worker.log'
     env_file: .env
+    restart: unless-stopped
     volumes:
-      - agent-memory:/home/bot/agent-memory:rw
+      # Claude home — read-only access to memory
+      - ~/.claude:/home/bot/.claude:ro
       - ./logs:/var/log/bot
     environment:
       - PYTHONPATH=/app
@@ -59,26 +69,34 @@ services:
       - GITHUB_PRIVATE_KEY=${GITHUB_PRIVATE_KEY}
       - QUEUE_TYPE=redis
       - REDIS_URL=redis://redis:6379
-      - REDIS_PASSWORD=${REDIS_PASSWORD:-myredissecret}
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      # Session streaming URL (for live-view links in GitHub comments)
+      - SESSION_PROXY_URL=${SESSION_PROXY_URL:-http://localhost:10001}
     depends_on:
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "ps aux | grep -v grep | grep -q worker || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
   sandbox_worker:
     build:
       context: .
       dockerfile: services/sandbox_executor/Dockerfile
-    command: sh -c 'python -m services.sandbox_executor.sandbox_worker 2>&1 | tee /var/log/bot/sandbox_worker.log'
+    entrypoint: ["/app/entrypoint.sh"]
+    command: sh -c '(socat TCP-LISTEN:18000,fork TCP:mcp_proxy:18000 >/dev/null 2>&1 &) && python -m services.sandbox_executor.sandbox_worker 2>&1 | tee /var/log/bot/sandbox_worker.log'
     env_file: .env
-
+    restart: unless-stopped
+    mem_limit: 4g
     volumes:
       # Persistent cache for bare repositories across all workers
       - repo-cache:/var/cache/repos:rw
-      # Persistent agent memory
-      - agent-memory:/home/bot/agent-memory:rw
-      # Shared transcript staging area (moved here from ephemeral workspace)
-      - transcripts:/home/bot/transcripts:rw
+      # Claude home — bind-mounted from host ~/.claude/ for CLI-friendly sessions
+      - ~/.claude:/home/bot/.claude:rw
+      - ~/.claude.json:/home/bot/.claude.json:rw
       - ./logs:/var/log/bot
       # gcloud credentials for Vertex AI — sandbox is the one calling the SDK
       # Mounted to bot user's home directory
@@ -98,31 +116,67 @@ services:
       - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY}
       - LANGFUSE_HOST=http://langfuse:3000
       - REDIS_URL=redis://redis:6379
-      - REDIS_PASSWORD=${REDIS_PASSWORD:-myredissecret}
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - GITHUB_TOKEN=${GITHUB_TOKEN}
       - SDK_DEBUG=${SDK_DEBUG:-false}
+      - ALLOW_HOST_MCP=${ALLOW_HOST_MCP:-true}
       - MEMORY_WORKER_ENABLED=${MEMORY_WORKER_ENABLED:-true}
       - RETROSPECTOR_ENABLED=${RETROSPECTOR_ENABLED:-true}
       - INDEXING_ENABLED=${INDEXING_ENABLED:-false}
-      - QDRANT_URL=http://qdrant:6333
+      - SURREALDB_URL=http://surrealdb:8000/rpc
       - GEMINI_API_KEY=${GEMINI_API_KEY}
     depends_on:
       redis:
         condition: service_healthy
       langfuse:
         condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "ps aux | grep -v grep | grep -q worker || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  mcp_proxy:
+    build:
+      context: .
+      dockerfile: services/mcp_proxy/Dockerfile
+    command: sh -c '(socat TCP-LISTEN:11434,fork TCP:host.docker.internal:11434 >/dev/null 2>&1 &) && (socat TCP-LISTEN:8000,fork TCP:surrealdb:8000 >/dev/null 2>&1 &) && uvicorn services.mcp_proxy.main:app --host 0.0.0.0 --port 18000 2>&1 | tee /var/log/bot/mcp_proxy.log'
+    env_file: .env
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:18000:18000"
+    volumes:
+      - repo-cache:/var/cache/repos:rw
+      - ~/.claude:/home/bot/.claude:rw
+      - ./logs:/var/log/bot
+    environment:
+      - PYTHONPATH=/app
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - SURREALDB_URL=http://surrealdb:8000/rpc
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - INDEXING_ENABLED=${INDEXING_ENABLED:-false}
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:18000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
   memory_worker:
     build:
       context: .
       dockerfile: services/memory_worker/Dockerfile
-    command: sh -c 'python -m services.memory_worker.memory_worker 2>&1 | tee /var/log/bot/memory_worker.log'
+    command: sh -c '(socat TCP-LISTEN:11434,fork TCP:host.docker.internal:11434 >/dev/null 2>&1 &) && (socat TCP-LISTEN:18000,fork TCP:mcp_proxy:18000 >/dev/null 2>&1 &) && python -m services.memory_worker.memory_worker 2>&1 | tee /var/log/bot/memory_worker.log'
     env_file: .env
+    restart: unless-stopped
+    mem_limit: 4g
     volumes:
-      # Reads transcripts from shared staging area; writes memory files
-      - agent-memory:/home/bot/agent-memory:rw
-      - transcripts:/home/bot/transcripts:rw
+      # Claude home — reads transcripts, writes memory files
+      - ~/.claude:/home/bot/.claude:rw
+      - ~/.claude.json:/home/bot/.claude.json:rw
       - ./logs:/var/log/bot
       # gcloud credentials for Vertex AI (if using Vertex backend)
       - ${APPDATA}/gcloud/application_default_credentials.json:/home/bot/.config/gcloud/application_default_credentials.json:ro
@@ -139,11 +193,17 @@ services:
       - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY}
       - LANGFUSE_HOST=http://langfuse:3000
       - REDIS_URL=redis://redis:6379
-      - REDIS_PASSWORD=${REDIS_PASSWORD:-myredissecret}
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - WORKER_SESSION_PERSIST=${WORKER_SESSION_PERSIST:-true}
     depends_on:
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "ps aux | grep -v grep | grep -q worker || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
   # PostgreSQL for Langfuse
   langfuse-db:
@@ -174,7 +234,7 @@ services:
     environment:
       CLICKHOUSE_DB: default
       CLICKHOUSE_USER: clickhouse
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
     volumes:
       - langfuse-clickhouse-data:/var/lib/clickhouse
       - langfuse-clickhouse-logs:/var/log/clickhouse-server
@@ -196,12 +256,12 @@ services:
     env_file: .env
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-miniosecret}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
     volumes:
       - langfuse-minio-data:/data
       - ./logs/langfuse:/var/log/bot
     ports:
-      - "9090:9000"
+      - "127.0.0.1:9090:9000"
       - "127.0.0.1:9091:9001"
     healthcheck:
       test: ["CMD", "mc", "ready", "local"]
@@ -217,27 +277,27 @@ services:
     environment:
       DATABASE_URL: postgresql://langfuse:${LANGFUSE_DB_PASSWORD:-langfuse}@langfuse-db:5432/langfuse
       NEXTAUTH_URL: http://localhost:7500
-      SALT: ${LANGFUSE_SALT:-changeme-generate-a-salt-here}
-      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-66dcdfca97e12b2225f09fefdafc54b7563bdaca9efc95d490b3aae290b40d8f}
+      SALT: ${LANGFUSE_SALT}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY}
       TELEMETRY_ENABLED: "false"
       CLICKHOUSE_URL: http://langfuse-clickhouse:8123
       CLICKHOUSE_USER: clickhouse
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
       CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
       CLICKHOUSE_CLUSTER_ENABLED: "false"
       REDIS_HOST: redis
       REDIS_PORT: 6379
-      REDIS_AUTH: ${REDIS_PASSWORD:-myredissecret}
+      REDIS_AUTH: ${REDIS_PASSWORD}
       LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
       LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
       LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minio}
-      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-miniosecret}
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
       LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://langfuse-minio:9000
       LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
       LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
       LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
       LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minio}
-      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-miniosecret}
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
       LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://langfuse-minio:9000
       LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
     depends_on:
@@ -260,28 +320,28 @@ services:
       PORT: 3000
       DATABASE_URL: postgresql://langfuse:${LANGFUSE_DB_PASSWORD:-langfuse}@langfuse-db:5432/langfuse
       NEXTAUTH_URL: http://localhost:7500
-      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-changeme-generate-a-secret-here}
-      SALT: ${LANGFUSE_SALT:-changeme-generate-a-salt-here}
-      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-66dcdfca97e12b2225f09fefdafc54b7563bdaca9efc95d490b3aae290b40d8f}
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET}
+      SALT: ${LANGFUSE_SALT}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY}
       TELEMETRY_ENABLED: "false"
       CLICKHOUSE_URL: http://langfuse-clickhouse:8123
       CLICKHOUSE_USER: clickhouse
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
       CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
       CLICKHOUSE_CLUSTER_ENABLED: "false"
       REDIS_HOST: redis
       REDIS_PORT: 6379
-      REDIS_AUTH: ${REDIS_PASSWORD:-myredissecret}
+      REDIS_AUTH: ${REDIS_PASSWORD}
       LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
       LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
       LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minio}
-      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-miniosecret}
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
       LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://langfuse-minio:9000
       LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
       LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
       LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
       LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minio}
-      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-miniosecret}
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
       LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://langfuse-minio:9000
       LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
       LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID:-github-agent}
@@ -307,11 +367,14 @@ services:
     build:
       context: .
       dockerfile: services/retrospector_worker/Dockerfile
-    command: sh -c 'python -m services.retrospector_worker.retrospector_worker 2>&1 | tee /var/log/bot/retrospector_worker.log'
+    command: sh -c '(socat TCP-LISTEN:11434,fork TCP:host.docker.internal:11434 >/dev/null 2>&1 &) && (socat TCP-LISTEN:18000,fork TCP:mcp_proxy:18000 >/dev/null 2>&1 &) && python -m services.retrospector_worker.retrospector_worker 2>&1 | tee /var/log/bot/retrospector_worker.log'
     env_file: .env
+    restart: unless-stopped
+    mem_limit: 4g
     volumes:
-      # Reads transcripts from shared staging area
-      - transcripts:/home/bot/transcripts:rw
+      # Claude home — reads transcripts
+      - ~/.claude:/home/bot/.claude:rw
+      - ~/.claude.json:/home/bot/.claude.json:rw
       # Bare repo cache — needed to create worktrees of the bot repo
       - repo-cache:/var/cache/repos:rw
       - ./logs:/var/log/bot
@@ -331,8 +394,9 @@ services:
       - LANGFUSE_HOST=http://langfuse:3000
       - LANGFUSE_HOOK_TIMEOUT=${LANGFUSE_HOOK_TIMEOUT:-30}
       - REDIS_URL=redis://redis:6379
-      - REDIS_PASSWORD=${REDIS_PASSWORD:-myredissecret}
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - WORKER_SESSION_PERSIST=${WORKER_SESSION_PERSIST:-true}
       - GITHUB_APP_ID=${GITHUB_APP_ID}
       - GITHUB_INSTALLATION_ID=${GITHUB_INSTALLATION_ID}
       - GITHUB_PRIVATE_KEY=${GITHUB_PRIVATE_KEY}
@@ -352,13 +416,14 @@ services:
       dockerfile: services/repo_sync/Dockerfile
     command: sh -c 'python -m services.repo_sync.sync_worker 2>&1 | tee /var/log/bot/repo_sync.log'
     env_file: .env
+    restart: unless-stopped
     volumes:
       - repo-cache:/var/cache/repos:rw
       - ./logs:/var/log/bot
     environment:
       - PYTHONPATH=/app
       - REDIS_URL=redis://redis:6379
-      - REDIS_PASSWORD=${REDIS_PASSWORD:-myredissecret}
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       # GitHub App credentials for cloning private repos when token not provided
       - GITHUB_APP_ID=${GITHUB_APP_ID}
@@ -374,40 +439,40 @@ services:
       retries: 3
       start_period: 10s
 
-  # Vector database for semantic code search
-  qdrant:
-    image: qdrant/qdrant:v1.17.1
+  # Multi-model database: graph edges + vector search + full-text search
+  surrealdb:
+    image: surrealdb/surrealdb:latest
+    user: "0:0"
     volumes:
-      - qdrant-storage:/qdrant/storage
+      - surrealdb-data:/data
     ports:
-      - "127.0.0.1:6333:6333"
-      - "127.0.0.1:6334:6334"
-    environment:
-      QDRANT__SERVICE__GRPC_PORT: 6334
+      - "127.0.0.1:8000:8000"
+    command: start --user root --pass root rocksdb:/data/db
     healthcheck:
-      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/6333'"]
+      test: ["CMD", "/surreal", "isready"]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 10s
+      start_period: 5s
 
-  # Background worker: chunks code, generates embeddings, stores in Qdrant
+  # Background worker: chunks code, generates embeddings, stores in SurrealDB
   indexing_worker:
     build:
       context: .
       dockerfile: services/indexing_worker/Dockerfile
     command: sh -c 'python -m services.indexing_worker.indexing_worker 2>&1 | tee /var/log/bot/indexing_worker.log'
     env_file: .env
+    restart: unless-stopped
     volumes:
       - repo-cache:/var/cache/repos:rw
       - ./logs:/var/log/bot
     environment:
       - PYTHONPATH=/app
       - REDIS_URL=redis://redis:6379
-      - REDIS_PASSWORD=${REDIS_PASSWORD:-myredissecret}
-      - QDRANT_URL=http://qdrant:6333
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - SURREALDB_URL=http://surrealdb:8000/rpc
       - GEMINI_API_KEY=${GEMINI_API_KEY}
-      - INDEXING_ENABLED=${INDEXING_ENABLED:-true}
+      - INDEXING_ENABLED=${INDEXING_ENABLED:-false}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-gemini-embedding-001}
       - EMBEDDING_DIMENSION=${EMBEDDING_DIMENSION:-1024}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
@@ -417,15 +482,40 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-      qdrant:
+      surrealdb:
         condition: service_healthy
 
+  session_proxy:
+    build:
+      context: .
+      dockerfile: services/session_proxy/Dockerfile
+    command: sh -c 'python -m services.session_proxy.main 2>&1 | tee /var/log/bot/session_proxy.log'
+    restart: unless-stopped
+    ports:
+      - "10001:8080"
+    volumes:
+      - ./logs:/var/log/bot
+      - ~/.claude:/home/bot/.claude:ro
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - PYTHONPATH=/app
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - CLAUDE_HOME=/home/bot/.claude
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:10001/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
 volumes:
-  agent-memory:
   repo-cache:
-  transcripts:
+  redis-data:
   langfuse-db-data:
   langfuse-clickhouse-data:
   langfuse-clickhouse-logs:
   langfuse-minio-data:
-  qdrant-storage:
+  surrealdb-data:

@@ -9,13 +9,14 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     curl \
+    socat \
     && rm -rf /var/lib/apt/lists/*
 
 # Shared utilities
 COPY shared/ ./shared/
 
 # The retrospector plugin (command definitions)
-COPY plugins/retrospector/ ./plugins/retrospector/
+COPY plugins/retrospector/ /app/plugins/retrospector/
 
 # Hook scripts for Langfuse observability (reused if needed)
 COPY hooks/langfuse_hook.py /app/hooks/langfuse_hook.py
@@ -28,8 +29,11 @@ COPY services/retrospector_worker/ /app/services/retrospector_worker/
 COPY services/sandbox_executor/requirements.txt ./requirements.txt
 RUN pip3 install --no-cache-dir -r requirements.txt
 
-# Transcript staging directory (shared volume with sandbox_worker)
-RUN mkdir -p /home/bot/transcripts && chown -R bot:bot /home/bot/transcripts
+# Entrypoint seeds plugins/skills into ~/.claude/ on first run
+COPY services/sandbox_executor/entrypoint.sh /app/entrypoint.sh
+RUN sed -i 's/\r$//' /app/entrypoint.sh && chmod +x /app/entrypoint.sh
+
+# Claude home directory (bind-mounted from host ~/.claude/)
 RUN mkdir -p /home/bot/.claude && chown -R bot:bot /home/bot/.claude
 
 # Set ownership
@@ -39,4 +43,5 @@ ENV USER=bot
 
 USER bot
 
+ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["python", "-m", "services.retrospector_worker.retrospector_worker"]

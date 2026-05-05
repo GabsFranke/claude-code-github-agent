@@ -6,6 +6,12 @@ import logging
 import uuid
 from typing import Any
 
+from .constants import (
+    JOB_DATA_PREFIX,
+    JOB_STATUS_PREFIX,
+    JOB_TTL_SECONDS,
+    PENDING_JOB_QUEUE,
+)
 from .exceptions import QueueError
 
 logger = logging.getLogger(__name__)
@@ -25,7 +31,7 @@ class JobQueue:
         self,
         redis_url: str,
         password: str | None = None,
-        job_ttl: int = 3600,
+        job_ttl: int = JOB_TTL_SECONDS,
     ):
         """Initialize job queue.
 
@@ -40,12 +46,20 @@ class JobQueue:
         self.redis: Any = None
 
         # Redis keys
-        self.pending_queue = "agent:jobs:pending"
+        self.pending_queue = PENDING_JOB_QUEUE
         self.processing_set = "agent:jobs:processing"
-        self.job_data_prefix = "agent:job:data:"
+        self.job_data_prefix = JOB_DATA_PREFIX
         self.job_result_prefix = "agent:job:result:"
-        self.job_status_prefix = "agent:job:status:"
+        self.job_status_prefix = JOB_STATUS_PREFIX
         self.dead_letter_queue = "agent:jobs:dead_letter"
+
+    async def ensure_connected(self) -> None:
+        """Ensure the Redis connection is established.
+
+        Call this before accessing ``self.redis`` directly, e.g. when
+        passing it to other stores that need a live connection.
+        """
+        await self._connect()
 
     async def _connect(self) -> None:
         """Connect to Redis if not already connected."""
@@ -195,6 +209,21 @@ class JobQueue:
                 "processing",
             )
 
+            # Store backup copy (for re-queueing if worker crashes)
+            backup_ttl = self.job_ttl * 2
+            await self.redis.setex(
+                f"{self.job_data_prefix}{job_id}:backup",
+                backup_ttl,
+                job_data_json,
+            )
+
+            # Store processing start timestamp (for stale detection)
+            await self.redis.setex(
+                f"{self.job_status_prefix}{job_id}:ts",
+                self.job_ttl,
+                str(asyncio.get_event_loop().time()),
+            )
+
             logger.info(f"Job {job_id} pulled for processing")
             return job_id, job_data
 
@@ -213,8 +242,11 @@ class JobQueue:
                         }
                     ),
                 )
-            except Exception:
-                pass  # Don't fail if dead letter queue fails
+            except Exception as dlq_err:
+                logger.error(
+                    f"CRITICAL: Failed to write to dead letter queue for job {job_id}: {dlq_err}",
+                    exc_info=True,
+                )
             return None
         except OSError as e:
             logger.error(f"Redis error getting next job: {e}", exc_info=True)
@@ -252,8 +284,10 @@ class JobQueue:
                 status,
             )
 
-            # Remove from processing set
+            # Remove from processing set and clean up backup/timestamp
             await self.redis.srem(self.processing_set, job_id)
+            await self.redis.delete(f"{self.job_data_prefix}{job_id}:backup")
+            await self.redis.delete(f"{self.job_status_prefix}{job_id}:ts")
 
             logger.info(f"Job {job_id} completed with status: {status}")
 
@@ -308,6 +342,74 @@ class JobQueue:
         except OSError as e:
             logger.error(f"Failed to get job result: {e}", exc_info=True)
             return None
+
+    async def reclaim_stale_jobs(self) -> int:
+        """Scan processing set for jobs whose data has expired and re-queue them.
+
+        Returns:
+            Number of stale jobs reclaimed.
+        """
+        await self._connect()
+        reclaimed = 0
+
+        try:
+            job_ids = await self.redis.smembers(self.processing_set)
+        except OSError:
+            return 0
+
+        for job_id in job_ids:
+            try:
+                # Check if job data still exists (not expired)
+                data_exists = await self.redis.exists(f"{self.job_data_prefix}{job_id}")
+                if data_exists:
+                    continue  # Job is still active
+
+                # Job data expired — check if backup exists
+                backup_key = f"{self.job_data_prefix}{job_id}:backup"
+                backup_json = await self.redis.get(backup_key)
+
+                if backup_json:
+                    # Restore job data from backup, but strip any
+                    # github_token since it may have expired while
+                    # the job was stale. The processor will regenerate
+                    # a fresh token from the installation_id.
+                    try:
+                        job_data = json.loads(backup_json)
+                        job_data.pop("github_token", None)
+                        restored_json = json.dumps(job_data)
+                    except (json.JSONDecodeError, TypeError):
+                        restored_json = backup_json
+                    await self.redis.setex(
+                        f"{self.job_data_prefix}{job_id}",
+                        self.job_ttl,
+                        restored_json,
+                    )
+                    await self.redis.setex(
+                        f"{self.job_status_prefix}{job_id}",
+                        self.job_ttl,
+                        "pending",
+                    )
+                    # Re-queue the job
+                    await self.redis.rpush(self.pending_queue, job_id)
+                    # Remove from processing set
+                    await self.redis.srem(self.processing_set, job_id)
+                    # Clean up backup and timestamp
+                    await self.redis.delete(backup_key)
+                    await self.redis.delete(f"{self.job_status_prefix}{job_id}:ts")
+                    logger.warning(
+                        f"Reclaimed stale job {job_id} — re-queued from backup"
+                    )
+                    reclaimed += 1
+                else:
+                    # No backup available — just clean up the zombie entry
+                    await self.redis.srem(self.processing_set, job_id)
+                    logger.error(
+                        f"Stale job {job_id} has no backup — removed from processing_set"
+                    )
+            except OSError:
+                logger.error(f"Redis error reclaiming job {job_id}", exc_info=True)
+
+        return reclaimed
 
     async def get_queue_depth(self) -> int:
         """Get number of pending jobs in queue.

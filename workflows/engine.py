@@ -6,9 +6,11 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-import yaml  # type: ignore[import-untyped]
+import yaml  # type: ignore[import]
 from pydantic import BaseModel, Field, ValidationError
 
+from shared.session_store import ConversationConfig as ConversationConfigModel
+from shared.thread_history import ThreadHistoryConfig
 from shared.utils import resolve_path
 
 logger = logging.getLogger(__name__)
@@ -68,6 +70,30 @@ class ContextProfile(BaseModel):
         default_factory=list,
         description="Focus areas for repomap ranking (e.g., ['build_system', 'test_structure'])",
     )
+    thread_history: ThreadHistoryConfig = Field(
+        default_factory=lambda: ThreadHistoryConfig(),  # type: ignore[call-arg]
+        description="Thread history injection configuration",
+    )
+
+
+class StreamingConfig(BaseModel):
+    """Configuration for real-time session streaming (remote control).
+
+    When enabled, the sandbox worker publishes SDK messages to Redis pub/sub
+    and posts a live-view URL in the GitHub comment. The session_proxy service
+    bridges those messages to a browser via WebSocket.
+
+    Example workflows.yaml:
+        workflows:
+          review-pr:
+            streaming:
+              enabled: true
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="Enable real-time streaming for this workflow",
+    )
 
 
 class WorkflowConfig(BaseModel):
@@ -84,6 +110,17 @@ class WorkflowConfig(BaseModel):
         default_factory=ContextProfile,
         description="Context profile for structural context generation",
     )
+    conversation: ConversationConfigModel = Field(
+        default_factory=ConversationConfigModel,
+        description="Conversation persistence settings",
+    )
+    streaming: StreamingConfig = Field(
+        default_factory=StreamingConfig,
+        description="Real-time session streaming settings",
+    )
+
+
+
 
 
 class WorkflowsConfig(BaseModel):
@@ -234,7 +271,7 @@ class WorkflowEngine:
         self._validate_workflow_names()
 
         # Build lookup tables for fast routing
-        self._event_map: dict[str, str] = {}
+        self._event_map: dict[str, list[str]] = {}
         self._command_map: dict[str, str] = {}
         self._event_filters: dict[tuple[str, str], dict[str, Any]] = {}
 
@@ -245,7 +282,7 @@ class WorkflowEngine:
                     trigger = EventTrigger(event=entry)
                 else:
                     trigger = entry
-                self._event_map[trigger.event] = workflow_name
+                self._event_map.setdefault(trigger.event, []).append(workflow_name)
                 if trigger.filters:
                     self._event_filters[(workflow_name, trigger.event)] = (
                         trigger.filters
@@ -275,27 +312,27 @@ class WorkflowEngine:
 
     def get_workflow_for_event(
         self, event_type: str, action: str | None = None
-    ) -> str | None:
-        """Get workflow name for a GitHub event.
+    ) -> list[str]:
+        """Get candidate workflow names for a GitHub event.
 
         Args:
             event_type: GitHub event type (e.g., "pull_request")
             action: Event action (e.g., "opened")
 
         Returns:
-            Workflow name or None if no workflow handles this event
+            List of workflow names that handle this event. Empty if none.
         """
         # Try with action first (e.g., "pull_request.opened")
         if action:
             key = f"{event_type}.{action}"
             if key in self._event_map:
-                return self._event_map[key]
+                return list(self._event_map[key])
 
         # Try without action (e.g., "pull_request")
         if event_type in self._event_map:
-            return self._event_map[event_type]
+            return list(self._event_map[event_type])
 
-        return None
+        return []
 
     def should_skip_self(
         self, workflow_name: str, event_actor: str, bot_username: str
@@ -373,17 +410,12 @@ class WorkflowEngine:
             actual = resolve_path(payload, dot_path)
             expected_list = expected if isinstance(expected, list) else [expected]
             if actual not in expected_list:
-                logger.info(
-                    "Filter '%s' mismatch: got %r, expected one of %s",
+                logger.debug(
+                    "Filter '%s' mismatch for '%s': got %r, expected one of %s",
                     dot_path,
+                    workflow_name,
                     actual,
                     expected_list,
-                )
-                logger.debug(
-                    "Full filter context: workflow=%s event_key=%s payload_keys=%s",
-                    workflow_name,
-                    event_key,
-                    list(payload.keys()),
                 )
                 return False
 
@@ -531,7 +563,7 @@ class WorkflowEngine:
             for name, workflow in self.workflows.items()
         }
 
-    def get_context_profile(self, workflow_name: str) -> dict:
+    def get_context_profile(self, workflow_name: str) -> dict[str, Any]:
         """Get the context profile for a workflow.
 
         Args:
@@ -543,7 +575,21 @@ class WorkflowEngine:
         if workflow_name not in self.workflows:
             return {}
 
-        return self.workflows[workflow_name].context.model_dump()
+        profile = self.workflows[workflow_name].context.model_dump()
+        return {k: v for k, v in profile.items()}
+
+    def get_conversation_config(self, workflow_name: str) -> ConversationConfigModel:
+        """Get the conversation persistence config for a workflow.
+
+        Args:
+            workflow_name: Name of the workflow.
+
+        Returns:
+            ConversationConfigModel instance (defaults if workflow not found).
+        """
+        if workflow_name not in self.workflows:
+            return ConversationConfigModel()
+        return self.workflows[workflow_name].conversation
 
 
 @lru_cache(maxsize=None)

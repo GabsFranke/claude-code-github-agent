@@ -2,9 +2,8 @@
 
 Tests cover: content hashing, embedding cache, batch_embed validation,
 commit hash handling, metadata migration, dead-letter queue behavior,
-collection name generation, ensure_collection, cached embeddings,
-cache storage, embedding API calls, point ID generation, git diff,
-metadata read/write, and worktree management.
+ensure_surrealdb, cached embeddings, cache storage, embedding API calls,
+symbol ID generation, git diff, metadata read/write, and worktree management.
 """
 
 import hashlib
@@ -23,7 +22,6 @@ from services.indexing_worker.indexing_worker import (
     MAX_JOB_RETRIES,
     _cache_embeddings,
     _cleanup_worktree,
-    _collection_name,
     _content_hash,
     _create_worktree,
     _embed_texts,
@@ -33,29 +31,13 @@ from services.indexing_worker.indexing_worker import (
     _git_diff_files,
     _is_transient_error,
     _migrate_meta_key,
-    _point_id,
+    _symbol_id,
     _update_indexing_metadata,
     batch_embed,
-    ensure_collection,
+    ensure_surrealdb,
     get_dlq_count,
     inspect_dlq,
 )
-
-# ---------------------------------------------------------------------------
-# _collection_name
-# ---------------------------------------------------------------------------
-
-
-class TestCollectionName:
-    def test_converts_slash_to_double_underscore(self):
-        assert _collection_name("owner/repo") == "owner__repo"
-
-    def test_no_slash(self):
-        assert _collection_name("repo") == "repo"
-
-    def test_multiple_slashes(self):
-        assert _collection_name("org/team/repo") == "org__team__repo"
-
 
 # ---------------------------------------------------------------------------
 # _content_hash
@@ -319,67 +301,28 @@ class TestGetCommitHash:
 
 
 # ---------------------------------------------------------------------------
-# ensure_collection
+# ensure_surrealdb
 # ---------------------------------------------------------------------------
 
 
-class TestEnsureCollection:
+class TestEnsureSurrealDB:
     @pytest.mark.asyncio
-    async def test_creates_new_collection(self):
-        """Should create a new Qdrant collection when it does not exist."""
-        mock_client = MagicMock()
-        mock_collection = MagicMock()
-        mock_collection.name = "other_collection"
-        mock_client.get_collections.return_value = MagicMock(
-            collections=[mock_collection]
-        )
-        mock_client.close = MagicMock()
-
-        with patch(
-            "qdrant_client.QdrantClient",
-            return_value=mock_client,
+    async def test_initializes_and_applies_schema(self):
+        """Should init SurrealDB and apply schema."""
+        with (
+            patch(
+                "services.indexing_worker.indexing_worker.init_surrealdb"
+            ) as mock_init,
+            patch("services.indexing_worker.indexing_worker.get_surreal") as mock_get,
+            patch(
+                "services.indexing_worker.indexing_worker.apply_schema"
+            ) as mock_apply,
         ):
-            result = await ensure_collection("owner/repo")
+            await ensure_surrealdb()
 
-        assert result == "owner__repo"
-        mock_client.create_collection.assert_called_once()
-        mock_client.close.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_skips_if_collection_exists(self):
-        """Should not create collection if it already exists."""
-        mock_client = MagicMock()
-        mock_collection = MagicMock()
-        mock_collection.name = "owner__repo"
-        mock_client.get_collections.return_value = MagicMock(
-            collections=[mock_collection]
-        )
-        mock_client.close = MagicMock()
-
-        with patch(
-            "qdrant_client.QdrantClient",
-            return_value=mock_client,
-        ):
-            result = await ensure_collection("owner/repo")
-
-        assert result == "owner__repo"
-        mock_client.create_collection.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_closes_client_in_finally(self):
-        """Should close the Qdrant client even when an error occurs."""
-        mock_client = MagicMock()
-        mock_client.get_collections.side_effect = Exception("Qdrant down")
-        mock_client.close = MagicMock()
-
-        with patch(
-            "qdrant_client.QdrantClient",
-            return_value=mock_client,
-        ):
-            with pytest.raises(Exception, match="Qdrant down"):
-                await ensure_collection("owner/repo")
-
-        mock_client.close.assert_called_once()
+        mock_init.assert_called_once()
+        mock_get.assert_called_once()
+        mock_apply.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -583,24 +526,24 @@ class TestEmbedTexts:
 
 
 # ---------------------------------------------------------------------------
-# _point_id
+# _symbol_id
 # ---------------------------------------------------------------------------
 
 
-class TestPointId:
+class TestSymbolId:
     def test_deterministic(self):
         """Same inputs should always produce the same UUID."""
-        id1 = _point_id("src/app.py", 10, "function", "hello")
-        id2 = _point_id("src/app.py", 10, "function", "hello")
+        id1 = _symbol_id("src/app.py", 10, "function", "hello")
+        id2 = _symbol_id("src/app.py", 10, "function", "hello")
         assert id1 == id2
         # Should be a valid UUID
         uuid.UUID(id1)
 
     def test_different_for_different_inputs(self):
         """Different inputs should produce different UUIDs."""
-        id1 = _point_id("src/app.py", 10, "function", "hello")
-        id2 = _point_id("src/app.py", 20, "function", "hello")
-        id3 = _point_id("src/app.py", 10, "class", "Hello")
+        id1 = _symbol_id("src/app.py", 10, "function", "hello")
+        id2 = _symbol_id("src/app.py", 20, "function", "hello")
+        id3 = _symbol_id("src/app.py", 10, "class", "Hello")
         assert id1 != id2
         assert id1 != id3
         assert id2 != id3
@@ -726,7 +669,6 @@ class TestUpdateIndexingMetadata:
 
         await _update_indexing_metadata(
             repo="owner/repo",
-            collection="owner__repo",
             commit_hash="abc123def",
             chunk_count=42,
             ref="main",
@@ -739,7 +681,6 @@ class TestUpdateIndexingMetadata:
         assert call_args[0][0] == key
         assert call_args[0][1] == "main"
         stored = json.loads(call_args[0][2])
-        assert stored["collection_name"] == "owner__repo"
         assert stored["indexed_commit"] == "abc123def"
         assert stored["chunk_count"] == 42
 

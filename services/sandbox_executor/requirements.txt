@@ -19,8 +19,9 @@ tree-sitter-cpp>=0.23.4
 tree-sitter-ruby>=0.23.1
 networkx>=3.6.1
 numpy>=2.4.4
+scipy>=1.17.1
 tiktoken>=0.12.0
 pathspec>=1.0.4
 # Semantic search MCP dependencies
 google-genai>=1.72.0
-qdrant-client>=1.17.1
+surrealdb>=0.3.0

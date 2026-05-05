@@ -49,7 +49,7 @@ services:
     command: sh -c 'python3 -m services.agent_worker.worker 2>&1 | tee /var/log/bot/worker.log'
     env_file: .env
     volumes:
-      - agent-memory:/home/bot/agent-memory:rw
+      - ~/.claude:/home/bot/.claude:ro
       - ./logs:/var/log/bot
     environment:
       - PYTHONPATH=/app
@@ -69,16 +69,15 @@ services:
     build:
       context: .
       dockerfile: services/sandbox_executor/Dockerfile
+    entrypoint: ["/app/entrypoint.sh"]
     command: sh -c 'python -m services.sandbox_executor.sandbox_worker 2>&1 | tee /var/log/bot/sandbox_worker.log'
     env_file: .env
 
     volumes:
       # Persistent cache for bare repositories across all workers
       - repo-cache:/var/cache/repos:rw
-      # Persistent agent memory
-      - agent-memory:/home/bot/agent-memory:rw
-      # Shared transcript staging area (moved here from ephemeral workspace)
-      - transcripts:/home/bot/transcripts:rw
+      # Claude home — bind-mounted from host ~/.claude/ for CLI-friendly sessions
+      - ~/.claude:/home/bot/.claude:rw
       - ./logs:/var/log/bot
       # gcloud credentials for Vertex AI — sandbox is the one calling the SDK
       # Mounted to bot user's home directory
@@ -102,7 +101,7 @@ services:
       - MEMORY_WORKER_ENABLED=${MEMORY_WORKER_ENABLED:-true}
       - RETROSPECTOR_ENABLED=${RETROSPECTOR_ENABLED:-true}
       - INDEXING_ENABLED=${INDEXING_ENABLED:-false}
-      - QDRANT_URL=http://qdrant:6333
+      - SURREALDB_URL=ws://surrealdb:8000/rpc
       - GEMINI_API_KEY=${GEMINI_API_KEY}
     depends_on:
       redis:
@@ -115,9 +114,8 @@ services:
     command: sh -c 'python -m services.memory_worker.memory_worker 2>&1 | tee /var/log/bot/memory_worker.log'
     env_file: .env
     volumes:
-      # Reads transcripts from shared staging area; writes memory files
-      - agent-memory:/home/bot/agent-memory:rw
-      - transcripts:/home/bot/transcripts:rw
+      # Claude home — reads transcripts, writes memory files
+      - ~/.claude:/home/bot/.claude:rw
       - ./logs:/var/log/bot
       # gcloud credentials for Vertex AI (if using Vertex backend)
       - ${APPDATA}/gcloud/application_default_credentials.json:/home/bot/.config/gcloud/application_default_credentials.json:ro
@@ -172,8 +170,8 @@ services:
     command: sh -c 'python -m services.retrospector_worker.retrospector_worker 2>&1 | tee /var/log/bot/retrospector_worker.log'
     env_file: .env
     volumes:
-      # Reads transcripts from shared staging area
-      - transcripts:/home/bot/transcripts:rw
+      # Claude home — reads transcripts
+      - ~/.claude:/home/bot/.claude:rw
       # Bare repo cache — needed to create worktrees of the bot repo
       - repo-cache:/var/cache/repos:rw
       - ./logs:/var/log/bot
@@ -204,24 +202,22 @@ services:
       repo_sync:
         condition: service_healthy
 
-  # Vector database for semantic code search
-  qdrant:
-    image: qdrant/qdrant:v1.17.1
+  # Multi-model database for code intelligence (graph + vector + full-text)
+  surrealdb:
+    image: surrealdb/surrealdb:latest
     volumes:
-      - qdrant-storage:/qdrant/storage
+      - surrealdb-data:/data
     ports:
-      - "127.0.0.1:6333:6333"
-      - "127.0.0.1:6334:6334"
-    environment:
-      QDRANT__SERVICE__GRPC_PORT: 6334
+      - "127.0.0.1:8000:8000"
+    command: start --user root --pass root rocksdb:/data/db
     healthcheck:
-      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/6333'"]
+      test: ["CMD", "/surreal", "is-ready", "--conn", "http://localhost:8000"]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 10s
 
-  # Background worker: chunks code, generates embeddings, stores in Qdrant
+  # Background worker: chunks code, generates embeddings, stores in SurrealDB
   indexing_worker:
     build:
       context: .
@@ -235,7 +231,7 @@ services:
       - PYTHONPATH=/app
       - REDIS_URL=redis://redis:6379
       - REDIS_PASSWORD=${REDIS_PASSWORD:-myredissecret}
-      - QDRANT_URL=http://qdrant:6333
+      - SURREALDB_URL=ws://surrealdb:8000/rpc
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - INDEXING_ENABLED=${INDEXING_ENABLED:-true}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-gemini-embedding-001}
@@ -247,11 +243,9 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-      qdrant:
+      surrealdb:
         condition: service_healthy
 
 volumes:
-  agent-memory:
   repo-cache:
-  transcripts:
-  qdrant-storage:
+  surrealdb-data:

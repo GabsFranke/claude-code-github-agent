@@ -9,10 +9,11 @@ _NOISY_LOGGERS = (
     "urllib3",
     "google_genai",
     "google.auth",
-    "qdrant_client",
+    "surrealdb",
     "redis",
     "asyncio",
     "filelock",
+    "shared.import_resolver",
 )
 
 
