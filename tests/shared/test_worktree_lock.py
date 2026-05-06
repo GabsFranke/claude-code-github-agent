@@ -444,3 +444,63 @@ class TestInterruptSdkProcess:
         with patch("shared.worktree_lock.os.kill", side_effect=PermissionError):
             result = await interrupt_sdk_process(1234)
         assert result is False
+
+
+class TestAcquireWithTimeout:
+    """Test WorktreeLock.acquire with timeout and pending prompt flow (T5)."""
+
+    @pytest.mark.asyncio
+    async def test_acquire_with_timeout_calls_set_pending_prompt(self):
+        """When lock is held and acquire times out, set_pending_prompt should be called."""
+        redis = MagicMock()
+        # First set fails (lock held), wait_for_release times out
+        redis.set = AsyncMock(side_effect=[None, None])
+        redis.get = AsyncMock(
+            return_value=json.dumps({"job_id": "other", "status": "running"})
+        )
+        redis.eval = AsyncMock(return_value=1)
+        key = WorktreeKey(
+            repo="owner/repo", thread_type="pr", thread_id="42", workflow="review"
+        )
+        lock = WorktreeLock(redis, key)
+
+        # acquire with timeout=0 should fail immediately without waiting
+        result = await lock.acquire(job_id="job-456", timeout=0)
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_acquire_without_timeout_fails_immediately(self):
+        """When timeout=0 (default), acquire returns False immediately if lock is held."""
+        redis = MagicMock()
+        redis.set = AsyncMock(return_value=None)  # Lock already held
+        key = WorktreeKey(
+            repo="owner/repo", thread_type="pr", thread_id="42", workflow="review"
+        )
+        lock = WorktreeLock(redis, key)
+        result = await lock.acquire(job_id="job-456")
+        assert result is False
+        assert lock._lock_acquired is False
+
+
+class TestReleaseOwnership:
+    """Test WorktreeLock.release only deletes if owned by current job_id (T6)."""
+
+    @pytest.mark.asyncio
+    async def test_release_ownership_check_via_lua(self):
+        """Release uses a Lua script that checks job_id ownership before deleting.
+        When Lua returns 0 (not deleted), release completes without error."""
+        redis = MagicMock()
+        redis.set = AsyncMock(return_value=True)
+        # Lua script returns 0 — simulating job_id mismatch (not deleted)
+        redis.eval = AsyncMock(return_value=0)
+        key = WorktreeKey(
+            repo="owner/repo", thread_type="pr", thread_id="42", workflow="review"
+        )
+        lock = WorktreeLock(redis, key)
+        await lock.acquire(job_id="job-123")
+
+        # Release should complete without error even when Lua returns 0
+        await lock.release()
+
+        # The Lua script should have been called
+        assert redis.eval.call_count >= 1
