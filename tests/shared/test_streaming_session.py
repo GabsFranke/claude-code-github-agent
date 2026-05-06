@@ -54,6 +54,23 @@ class TestCreateSession:
         assert pipeline.setex.call_count == 1
 
     @pytest.mark.asyncio
+    async def test_create_session_pipeline_execute_awaited(self):
+        """Verify pipeline.execute() is awaited during create_session (T7)."""
+        redis = _make_redis()
+        store = StreamingSessionStore(redis=redis)
+
+        await store.create_session(
+            token="test-token",
+            repo="owner/repo",
+            issue_number=42,
+            workflow="review-pr",
+        )
+
+        pipeline = redis.pipeline.return_value
+        # Verify that pipeline.execute was called (and awaited, since it's AsyncMock)
+        pipeline.execute.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_custom_ttl(self):
         redis = _make_redis()
         store = StreamingSessionStore(redis=redis)

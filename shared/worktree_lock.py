@@ -22,7 +22,7 @@ import signal
 import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from shared.constants import sanitize_repo_key
 
@@ -46,7 +46,7 @@ class WorktreeKey:
     """Unique identifier for a worktree/session combination."""
 
     repo: str
-    thread_type: str  # "pr", "issue", "discussion"
+    thread_type: Literal["pr", "issue", "discussion"]
     thread_id: str
     workflow: str
 
@@ -73,7 +73,7 @@ class LockInfo:
 
     job_id: str
     session_id: str | None = None
-    status: str = "running"  # "running" | "interrupted"
+    status: Literal["running", "interrupted"] = "running"
     pid: int | None = None  # Process ID of the worker holding the lock
 
 
@@ -200,6 +200,45 @@ class WorktreeLock:
         self._lock_acquired = False
         logger.info(f"Released lock for {self.key}")
 
+    async def _update_lock_field(self, field: str, value: str) -> bool:
+        """Update a single field in the lock value while preserving TTL (atomic via Lua).
+
+        Guards against TTL expiry between GET and SETEX: if the lock has
+        already expired by the time we read its TTL, the operation is
+        aborted rather than recreating a stale key.
+
+        Args:
+            field: JSON field name to update (e.g. ``session_id``, ``status``).
+            value: New value for the field.
+
+        Returns:
+            True if the update succeeded, False if the key was missing or
+            had already expired.
+        """
+        lua_script = """
+        local val = redis.call('GET', KEYS[1])
+        if not val then return 0 end
+        local data = cjson.decode(val)
+        data[ARGV[1]] = ARGV[2]
+        local ttl = redis.call('TTL', KEYS[1])
+        if ttl <= 0 then return 0 end
+        local new_val = cjson.encode(data)
+        redis.call('SETEX', KEYS[1], ttl, new_val)
+        return 1
+        """
+        try:
+            result = await self.redis.eval(  # type: ignore[misc]
+                lua_script, 1, self.key.lock_key, field, value
+            )
+            if not result:
+                logger.warning(
+                    f"Lock key missing or expired when updating {field} for {self.key}"
+                )
+            return bool(result)
+        except Exception as e:
+            logger.warning(f"Failed to update {field} in lock: {e}")
+            return False
+
     async def set_session_id(self, session_id: str) -> None:
         """Update the lock with the current session ID (atomic via Lua).
 
@@ -208,56 +247,14 @@ class WorktreeLock:
         if not self._lock_acquired:
             return
 
-        lua_script = """
-        local val = redis.call('GET', KEYS[1])
-        if not val then return 0 end
-        local data = cjson.decode(val)
-        data['session_id'] = ARGV[1]
-        local ttl = redis.call('TTL', KEYS[1])
-        local new_val = cjson.encode(data)
-        if ttl > 0 then
-            redis.call('SETEX', KEYS[1], ttl, new_val)
-        else
-            redis.call('SET', KEYS[1], new_val)
-        end
-        return 1
-        """
-        try:
-            result = await self.redis.eval(lua_script, 1, self.key.lock_key, session_id)  # type: ignore[misc]
-            if not result:
-                logger.warning(
-                    f"Lock key not found when setting session_id for {self.key}"
-                )
-        except Exception as e:
-            logger.warning(f"Failed to update session_id in lock: {e}")
+        await self._update_lock_field("session_id", session_id)
 
     async def set_interrupted(self) -> None:
         """Mark the lock as interrupted (atomic via Lua)."""
         if not self._lock_acquired:
             return
 
-        lua_script = """
-        local val = redis.call('GET', KEYS[1])
-        if not val then return 0 end
-        local data = cjson.decode(val)
-        data['status'] = 'interrupted'
-        local ttl = redis.call('TTL', KEYS[1])
-        local new_val = cjson.encode(data)
-        if ttl > 0 then
-            redis.call('SETEX', KEYS[1], ttl, new_val)
-        else
-            redis.call('SET', KEYS[1], new_val)
-        end
-        return 1
-        """
-        try:
-            result = await self.redis.eval(lua_script, 1, self.key.lock_key)  # type: ignore[misc]
-            if not result:
-                logger.warning(
-                    f"Lock key not found when setting interrupted for {self.key}"
-                )
-        except Exception as e:
-            logger.warning(f"Failed to set interrupted status: {e}")
+        await self._update_lock_field("status", "interrupted")
 
     async def get_lock_info(self) -> LockInfo | None:
         """Get current lock holder info."""

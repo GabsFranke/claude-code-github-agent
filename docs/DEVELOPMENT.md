@@ -107,7 +107,7 @@ claude-code-github-agent/
 │   ├── rate_limiter.py       # Token bucket rate limiting (Redis-backed)
 │   ├── github_auth.py        # GitHub App authentication
 │   ├── chunker.py            # Tree-sitter code chunker
-│   ├── repomap.py            # Aider-style repomap (tree-sitter + PageRank)
+│   ├── repomap.py            # Aider-style repomap (tree-sitter)
 │   ├── context_builder.py    # Structural context generation with caching
 │   ├── ts_languages.py       # 10-language tree-sitter registry
 │   ├── code_graph.py         # Symbol index for code intelligence queries (graph traversal)
@@ -229,7 +229,7 @@ tests/
 │   ├── test_github_auth.py              # JWT, token caching, validation
 │   ├── test_job_queue.py                # Redis job queue lifecycle
 │   ├── test_rate_limiter.py             # Token bucket rate limiting
-│   ├── test_repomap.py                  # Tag extraction + PageRank ranking
+│   ├── test_repomap.py                  # Tag extraction + reference graph ranking
 │   ├── test_ts_languages.py             # 10-language registry
 │   ├── test_session_store.py            # Session persistence (save, get, close, expire)
 │   ├── test_streaming_session.py        # Streaming session metadata

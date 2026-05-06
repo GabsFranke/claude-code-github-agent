@@ -93,16 +93,16 @@ async def run_server(
                 )
                 error_response = {
                     "jsonrpc": "2.0",
-                    "error": {"code": -32700, "message": f"Parse error: {str(e)}"},
+                    "error": {"code": -32700, "message": "Parse error"},
                     "id": None,
                 }
                 sys.stdout.write(json.dumps(error_response) + "\n")
                 sys.stdout.flush()
-            except Exception as e:
+            except Exception:
                 logger.exception("Error processing request")
                 error_response = {
                     "jsonrpc": "2.0",
-                    "error": {"code": -32603, "message": f"Internal error: {str(e)}"},
+                    "error": {"code": -32603, "message": "Internal error"},
                     "id": None,
                 }
                 sys.stdout.write(json.dumps(error_response) + "\n")

@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+from .constants import sanitize_repo_key
 from .file_tree import load_ignore_spec, walk_source_files
 from .import_resolver import resolve_python_import, resolve_ts_import
 from .repomap import RepoMap, Tag
@@ -683,20 +684,30 @@ def _build_call_chain(
     visited: set[str],
     max_depth: int,
     depth: int = 0,
+    path_visited: set[str] | None = None,
 ) -> dict:
-    """Recursively build a nested call chain for trace_flow."""
-    if depth >= max_depth:
+    """Recursively build a nested call chain for trace_flow.
+
+    *path_visited* tracks the current recursion path to prevent cycles
+    within a single branch and deduplicate shared callees.
+    """
+    if path_visited is None:
+        path_visited = set()
+    if depth >= max_depth or name in path_visited:
         return {"name": name, "callees": [], "truncated": True}
 
+    path_visited.add(name)
     callees = sorted(_get_edge_targets(db, name, "calls"))
-    return {
+    result = {
         "name": name,
         "callees": [
-            _build_call_chain(db, c, visited, max_depth, depth + 1)
+            _build_call_chain(db, c, visited, max_depth, depth + 1, path_visited)
             for c in callees
             if c in visited
         ],
     }
+    path_visited.discard(name)
+    return result
 
 
 def _build_definition_map(
@@ -767,14 +778,25 @@ def _walk_def_nodes(
     source: bytes,
     definable_types: frozenset[str],
     entries: list[tuple[int, int, str]],
+    depth: int = 0,
+    max_depth: int = 200,
 ) -> None:
-    """Recursively walk AST looking for named definition nodes."""
+    """Recursively walk AST looking for named definition nodes.
+
+    Depth-limited to avoid hitting Python's recursion limit on deeply
+    nested source files.
+    """
+    if depth >= max_depth:
+        logger.warning(
+            "_walk_def_nodes reached max depth %d, truncating AST walk", max_depth
+        )
+        return
     if node.type in definable_types:
         name = _extract_node_name(node, source)
         if name:
             entries.append((node.start_byte, node.end_byte, name))
     for child in node.children:
-        _walk_def_nodes(child, source, definable_types, entries)
+        _walk_def_nodes(child, source, definable_types, entries, depth + 1, max_depth)
 
 
 def _extract_node_name(node, source: bytes) -> str | None:
@@ -842,7 +864,8 @@ def _find_enclosing_def(
     def_map: list[tuple[int, int, str]],
     node,
 ) -> str | None:
-    """Find the name of the definition that encloses *node* using binary search.
+    """Find the name of the definition that encloses *node* using bisect-based
+    lookup with backward linear scan.
 
     *def_map* is sorted by start_byte.  Returns the tightest enclosing definition
     (smallest byte range) that contains *node*.
@@ -1337,7 +1360,7 @@ def _get_head_commit(repo_path: Path) -> str:
 
 def _safe_repo_name(repo: str) -> str:
     """Convert a repo slug to a safe key for cache/index naming."""
-    return repo.replace("/", "--")
+    return sanitize_repo_key(repo)
 
 
 def _parse_git_diff(diff_output: str) -> list[dict]:

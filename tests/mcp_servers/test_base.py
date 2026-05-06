@@ -106,7 +106,7 @@ class TestRunServer:
         captured = capsys.readouterr()
         response = json.loads(captured.out.strip())
         assert response["error"]["code"] == -32603
-        assert "boom" in response["error"]["message"]
+        assert response["error"]["message"] == "Internal error"
 
     @pytest.mark.asyncio
     async def test_calls_init_fn(self, mock_handle_request, capsys):

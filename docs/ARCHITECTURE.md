@@ -360,7 +360,7 @@ await redis.publish("agent:sync:events", json.dumps({"repo": repo, "ref": ref, "
 - Creates isolated git worktree per job from cached bare repo (detached HEAD mode)
 - Handles multiple ref formats: `refs/pull/N/head`, `refs/tags/*`, `refs/remotes/origin/*`
 - Runs repository setup commands via `RepoSetupEngine` (from `repo-setup.yaml`)
-- Generates structural context (file tree + personalized repomap with PageRank)
+- Generates structural context (file tree + personalized repomap)
 - Builds `ClaudeAgentOptions` via composable `SDKOptionsBuilder`
 - Executes Claude Agent SDK with retry (configurable, default 3 attempts)
 - Flushes buffered post-processing jobs (memory, retrospector, indexing)
@@ -385,9 +385,8 @@ git config user.name "Claude Code Agent"
 git config user.email "claude-code-agent[bot]@users.noreply.github.com"
 
 # Generate structural context
-file_tree, repomap = await generate_structural_context(
-    workspace, repo, mentioned_files, mentioned_idents,
-    token_budget=context_profile.repomap_budget
+file_tree = await generate_structural_context(
+    workspace, repo, mentioned_files, mentioned_idents
 )
 
 # Build SDK options and execute
@@ -398,7 +397,7 @@ options = (builder.with_model(model)
     .with_codebase_tools(workspace)
     .with_auto_discovered_plugins()
     .with_full_toolset()
-    .with_structural_context(file_tree, repomap)
+    .with_structural_context(file_tree)
     .with_repository_context(claude_md, memory_index)
     .build())
 
@@ -609,7 +608,7 @@ Python, JavaScript, TypeScript, TSX, Go, Rust, Java, C, C++, Ruby — via per-la
 
 **Layer 1 — Structural Context (Repomap)**:
 
-- `shared/repomap.py` — Aider-style repomap using tree-sitter + PageRank
+- `shared/repomap.py` — Aider-style repomap using tree-sitter
 - `shared/context_builder.py` — Async wrapper with commit-based caching and personalization
 - Generates compact "table of contents" of a codebase within a token budget
 - Ranks definitions by importance using reference graph analysis
@@ -761,7 +760,7 @@ When `ALLOW_HOST_MCP=true`, MCP server definitions from the host's `~/.claude.js
 | Module | Purpose |
 |--------|---------|
 | `chunker.py` | Tree-sitter-based semantic code chunker (functions, classes, methods) |
-| `repomap.py` | Aider-style repomap using tree-sitter + PageRank for structural context |
+| `repomap.py` | Aider-style repomap using tree-sitter for structural context |
 | `context_builder.py` | Async structural context generation with commit-based caching |
 | `ts_languages.py` | Language registry (10 languages) with dynamic tree-sitter loading |
 | `file_tree.py` | File tree generation with exclusion rules and SurrealDB collection naming |
@@ -806,8 +805,8 @@ When `ALLOW_HOST_MCP=true`, MCP server definitions from the host's `~/.claude.js
 6. Worker creates rich job in `JobQueue`
 7. Repo sync service clones/updates bare repository
 8. Sandbox worker waits for sync, creates worktree from bare repo (detached HEAD)
-9. Structural context generated (file tree + personalized repomap with PR changed files)
-10. Claude SDK executes with 5 MCP servers (GitHub, GitHub Actions, Memory, Codebase Tools, Semantic Search)
+9. Structural context generated (file tree with PR changed files)
+10. Claude SDK executes with 4 MCP servers (GitHub, GitHub Actions, Memory, Codebase Tools)
 11. Claude SDK posts review to GitHub via MCP
 12. Post-processing: transcript staged, memory/retrospector/indexing jobs enqueued
 13. Job marked as complete in Redis
@@ -980,6 +979,27 @@ When `ALLOW_HOST_MCP=true`, MCP server definitions from the host's `~/.claude.js
 - Install GitHub App only on required repos
 - Use CLAUDE.md for repository-specific constraints
 - Monitor logs and Langfuse traces
+
+### Shared Volume Security Model
+
+The `~/.claude/` directory is bind-mounted as a shared volume across all worker services. This design ensures host-worker state parity (plugins, skills, MCP servers installed on the host are automatically available to the bot), but introduces a shared-filesystem security consideration.
+
+**What each worker can access via the shared volume:**
+
+- Worktrees managed by `WorktreeManager` with deterministic paths
+- Session transcripts persisted to `~/.claude/transcripts/`
+- Memory files at `~/.claude/memory/{repo}/`
+- Claude Code configuration files (`settings.json`, `CLAUDE.md`)
+- Plugin installations and MCP server registrations
+
+**Mitigations:**
+
+- **Isolated worktrees**: Each job operates in its own git worktree scoped by `{repo}/{thread_id}/{workflow}`, preventing cross-job file conflicts.
+- **WorktreeLock**: Redis-based distributed lock prevents parallel jobs from operating on the same worktree simultaneously (see `shared/worktree_lock.py`).
+- **Internal Docker network**: The session proxy and all workers communicate over an internal Docker network, not exposed to external networks by default.
+- **Input validation**: Session IDs and repository names are validated and sanitized before filesystem access (see `_validate_session_id` in `services/session_proxy/transcript_loader.py`).
+
+**Trade-off**: The shared volume means a compromised worker could read/write files from other workers' sessions. For production deployments with untrusted code execution, consider using separate volumes per worker type or isolating sandbox execution entirely.
 
 ## Subagents
 

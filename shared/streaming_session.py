@@ -18,15 +18,16 @@ Redis keys:
 
 import json
 import logging
-from typing import Any
+from typing import Any, Literal, TypedDict
 
 from shared.constants import (
     DEFAULT_SESSION_TTL_SECONDS,
     SESSION_HISTORY_KEY,
     SESSION_INBOX_KEY,
     SESSION_KEY,
-    SESSION_LOOKUP_KEY,
     SESSION_SUBSCRIBERS_KEY,
+    decode_redis_hash,
+    streaming_lookup_key,
 )
 
 logger = logging.getLogger(__name__)
@@ -54,18 +55,6 @@ def _session_key(token: str) -> str:
     return SESSION_KEY.format(token)
 
 
-def _lookup_key(
-    repo: str, thread_id: str | int, workflow: str, thread_type: str = ""
-) -> str:
-    safe_repo = repo.replace("/", "--")
-    if thread_type:
-        return SESSION_LOOKUP_KEY.format(
-            f"{safe_repo}:{thread_type}:{thread_id}:{workflow}"
-        )
-    # Fallback: search across all thread types for backwards compatibility
-    return SESSION_LOOKUP_KEY.format(f"{safe_repo}:{thread_id}:{workflow}")
-
-
 def _inbox_key(token: str) -> str:
     return SESSION_INBOX_KEY.format(token)
 
@@ -76,6 +65,24 @@ def _subscribers_key(token: str) -> str:
 
 def _history_key(token: str) -> str:
     return SESSION_HISTORY_KEY.format(token)
+
+
+class StreamingSessionData(TypedDict, total=False):
+    """Shape of a streaming session record returned by get_session()."""
+
+    token: str
+    repo: str
+    issue_number: str
+    workflow: str
+    session_proxy_url: str
+    status: str
+    installation_id: str
+    initial_query: str
+    thread_type: str
+    ref: str
+    user: str
+    conversation_config: str
+    session_id: str
 
 
 class StreamingSessionStore:
@@ -102,7 +109,7 @@ class StreamingSessionStore:
         ttl_seconds: int = DEFAULT_SESSION_TTL_SECONDS,
         installation_id: str = "",
         initial_query: str = "",
-        thread_type: str = "issue",
+        thread_type: Literal["pr", "issue", "discussion"] = "issue",
         ref: str = "main",
         user: str = "",
         conversation_config: str = "",
@@ -147,7 +154,9 @@ class StreamingSessionStore:
         pipeline.hset(key, mapping=data)
         pipeline.expire(key, ttl_seconds)
         # Register lookup so the token can be found by repo/issue/workflow
-        lk = _lookup_key(repo, str(issue_number), workflow, thread_type=thread_type)
+        lk = streaming_lookup_key(
+            repo, str(issue_number), workflow, thread_type=thread_type
+        )
         pipeline.setex(lk, ttl_seconds, token)
         await pipeline.execute()
         logger.info(
@@ -171,12 +180,14 @@ class StreamingSessionStore:
         precise matching. When empty, falls back to the legacy key
         format (without thread_type) for backwards compatibility.
         """
-        lk = _lookup_key(repo, str(issue_number), workflow, thread_type=thread_type)
+        lk = streaming_lookup_key(
+            repo, str(issue_number), workflow, thread_type=thread_type
+        )
         raw = await self._redis.get(lk)
         if not raw:
             # If thread_type was given but no match, try legacy key
             if thread_type:
-                lk_legacy = _lookup_key(
+                lk_legacy = streaming_lookup_key(
                     repo, str(issue_number), workflow, thread_type=""
                 )
                 raw = await self._redis.get(lk_legacy)
@@ -218,7 +229,7 @@ class StreamingSessionStore:
             return token
         return None
 
-    async def get_session(self, token: str) -> dict | None:
+    async def get_session(self, token: str) -> StreamingSessionData | None:
         """Get session metadata.
 
         Returns:
@@ -228,12 +239,8 @@ class StreamingSessionStore:
         data = await self._redis.hgetall(key)
         if not data:
             return None
-        decoded: dict[str, Any] = {}
-        for k, v in data.items():
-            dk = k.decode() if isinstance(k, bytes) else k
-            dv = v.decode() if isinstance(v, bytes) else v
-            decoded[dk] = dv
-        return decoded
+        decoded = decode_redis_hash(data)
+        return decoded  # type: ignore[return-value]
 
     async def set_completed(
         self,
