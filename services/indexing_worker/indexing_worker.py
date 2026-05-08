@@ -88,8 +88,7 @@ async def ensure_surrealdb() -> None:
     Must be called once before storing or querying symbols.
     """
     init_surrealdb(SURREALDB_URL)
-    db = get_surreal()
-    apply_schema(db)
+    apply_schema()
 
 
 # ---------------------------------------------------------------------------

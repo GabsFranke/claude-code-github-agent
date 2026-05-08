@@ -22,8 +22,8 @@ from .surrealdb_client import (
     SCHEMA_VERSION,
     _raw_result_rows,
     apply_schema,
-    get_surreal,
     is_initialized,
+    query_surreal,
 )
 from .ts_languages import EXTENSION_MAP, get_language, get_language_config
 
@@ -73,13 +73,12 @@ class SymbolIndex:
             logger.warning("SurrealDB not initialized, skipping build")
             return
 
-        db = get_surreal()
-        apply_schema(db)
+        apply_schema()
 
         commit_hash = _get_head_commit(self.repo_path)
 
         # Skip if already indexed for this commit
-        if not force and not pre_extracted_tags and _is_commit_indexed(db, commit_hash):
+        if not force and not pre_extracted_tags and _is_commit_indexed(commit_hash):
             logger.info(
                 "Commit %s already indexed, reusing SurrealDB data", commit_hash
             )
@@ -87,7 +86,7 @@ class SymbolIndex:
             return
 
         # Clear old data for this repo
-        _clear_repo_data(db)
+        _clear_repo_data()
 
         # Extract tags
         rm = RepoMap(self.repo_path)
@@ -102,7 +101,7 @@ class SymbolIndex:
             return
 
         # Upsert symbols
-        _upsert_symbols(db, tags)
+        _upsert_symbols(tags)
         logger.debug("Upserted %d symbols to SurrealDB", len(tags))
 
         # Extract and upsert relationships as graph edges
@@ -110,10 +109,10 @@ class SymbolIndex:
         logger.debug(
             "Extracted %d relationships, upserting to SurrealDB", len(relationships)
         )
-        _upsert_relationships(db, relationships)
+        _upsert_relationships(relationships)
 
         # Mark commit as indexed
-        _mark_commit_indexed(db, commit_hash)
+        _mark_commit_indexed(commit_hash)
         self._built = True
         logger.info(
             "SymbolIndex built: %d symbols, %d relationships, commit=%s",
@@ -286,8 +285,7 @@ class SymbolIndex:
 
     def find_definitions(self, name: str) -> list[Tag]:
         """Find all definitions of a symbol by name (deduplicated)."""
-        db = get_surreal()
-        result = db.query(
+        result = query_surreal(
             "SELECT * FROM symbol WHERE name = $name AND kind = 'definition'",
             {"name": name},
         )
@@ -303,8 +301,9 @@ class SymbolIndex:
 
     def find_references(self, name: str) -> list[Tag]:
         """Find all references to a symbol (both definitions and references)."""
-        db = get_surreal()
-        result = db.query("SELECT * FROM symbol WHERE name = $name", {"name": name})
+        result = query_surreal(
+            "SELECT * FROM symbol WHERE name = $name", {"name": name}
+        )
         return _rows_to_tags(_raw_result_rows(result))
 
     def get_context(self, symbol_name: str, file_hint: str | None = None) -> dict:
@@ -315,7 +314,6 @@ class SymbolIndex:
         disambiguation list so the agent can narrow down. Pass ``file_hint``
         to select a specific definition when the name exists in multiple files.
         """
-        db = get_surreal()
         definitions = self.find_definitions(symbol_name)
 
         if not definitions:
@@ -356,14 +354,14 @@ class SymbolIndex:
                         "end_line": d.end_line,
                     }
                 ],
-                "scope": _resolve_scope(db, d),
+                "scope": _resolve_scope(d),
             }
 
         # Use SurrealQL graph traversal for relationships
-        result["calls"] = sorted(_get_edge_targets(db, symbol_name, "calls"))
-        result["called_by"] = sorted(_get_edge_sources(db, symbol_name, "calls"))
-        result["inherits_from"] = sorted(_get_edge_targets(db, symbol_name, "inherits"))
-        result["inherited_by"] = sorted(_get_edge_sources(db, symbol_name, "inherits"))
+        result["calls"] = sorted(_get_edge_targets(symbol_name, "calls"))
+        result["called_by"] = sorted(_get_edge_sources(symbol_name, "calls"))
+        result["inherits_from"] = sorted(_get_edge_targets(symbol_name, "inherits"))
+        result["inherited_by"] = sorted(_get_edge_sources(symbol_name, "inherits"))
 
         return result
 
@@ -393,24 +391,23 @@ class SymbolIndex:
             imported_by, risk_level, risk_summary.
         """
         max_depth = min(max(1, max_depth), 10)
-        db = get_surreal()
 
         if start_line is not None and end_line is not None:
-            result = db.query(
+            result = query_surreal(
                 """SELECT * FROM symbol
                    WHERE filepath = $fp AND kind = 'definition'
                    AND line >= $sl AND end_line <= $el""",
                 {"fp": file_path, "sl": start_line, "el": end_line},
             )
         elif start_line is not None:
-            result = db.query(
+            result = query_surreal(
                 """SELECT * FROM symbol
                    WHERE filepath = $fp AND kind = 'definition'
                    AND line >= $sl""",
                 {"fp": file_path, "sl": start_line},
             )
         else:
-            result = db.query(
+            result = query_surreal(
                 """SELECT * FROM symbol
                    WHERE filepath = $fp AND kind = 'definition'""",
                 {"fp": file_path},
@@ -430,16 +427,16 @@ class SymbolIndex:
 
         affected_names = {d.name for d in file_defs}
 
-        imported_by = sorted(_get_edge_sources(db, file_path, "imports"))
+        imported_by = sorted(_get_edge_sources(file_path, "imports"))
 
         upstream = {}
         downstream = {}
 
         if direction in ("upstream", "both"):
-            upstream = _bfs_upstream(self, db, affected_names, max_depth)
+            upstream = _bfs_upstream(self, affected_names, max_depth)
 
         if direction in ("downstream", "both"):
-            downstream = _bfs_downstream(self, db, affected_names, max_depth)
+            downstream = _bfs_downstream(self, affected_names, max_depth)
 
         risk_level, risk_summary = _assess_risk(upstream, downstream, imported_by)
 
@@ -455,9 +452,8 @@ class SymbolIndex:
 
     def get_file_overview(self, file_path: str) -> dict:
         """Get all symbols, imports, and class structure for a file."""
-        db = get_surreal()
 
-        result = db.query(
+        result = query_surreal(
             """SELECT * FROM symbol
                WHERE filepath = $fp AND kind = 'definition'""",
             {"fp": file_path},
@@ -474,21 +470,21 @@ class SymbolIndex:
             for d in file_defs
         ]
 
-        imports = sorted(_get_edge_targets(db, file_path, "imports"))
-        imported_by = sorted(_get_edge_sources(db, file_path, "imports"))
+        imports = sorted(_get_edge_targets(file_path, "imports"))
+        imported_by = sorted(_get_edge_sources(file_path, "imports"))
 
         # Build class structure
         classes: dict[str, dict] = {}
         for d in file_defs:
             if d.category == "class":
                 classes[d.name] = {
-                    "inherits_from": sorted(_get_edge_targets(db, d.name, "inherits")),
+                    "inherits_from": sorted(_get_edge_targets(d.name, "inherits")),
                     "methods": [],
                 }
 
         # Assign methods to classes via scope resolution
         for d in file_defs:
-            scope = _resolve_scope(db, d)
+            scope = _resolve_scope(d)
             if scope and scope in classes:
                 classes[scope]["methods"].append(d.name)
 
@@ -533,22 +529,21 @@ class SymbolIndex:
             return {"changed_files": [], "error": str(e)}
 
         changed_ranges = _parse_git_diff(result.stdout)
-        db = get_surreal()
 
         changed_files = []
         for entry in changed_ranges:
             filepath = entry["file"]
             symbols: list[dict] = []
             for rng in entry["ranges"]:
-                symbols.extend(_get_symbols_in_range(db, filepath, rng[0], rng[1]))
+                symbols.extend(_get_symbols_in_range(filepath, rng[0], rng[1]))
 
             if not symbols:
                 continue
 
             affected_names = {s["name"] for s in symbols}
-            imported_by = sorted(_get_edge_sources(db, filepath, "imports"))
-            upstream = _bfs_upstream(self, db, affected_names, max_depth=3)
-            downstream = _bfs_downstream(self, db, affected_names, max_depth=3)
+            imported_by = sorted(_get_edge_sources(filepath, "imports"))
+            upstream = _bfs_upstream(self, affected_names, max_depth=3)
+            downstream = _bfs_downstream(self, affected_names, max_depth=3)
             risk_level, risk_summary = _assess_risk(upstream, downstream, imported_by)
 
             changed_files.append(
@@ -590,7 +585,6 @@ class SymbolIndex:
             Dict with entry_point, entry_definition, steps, call_chain,
             total_steps, max_depth_reached.
         """
-        db = get_surreal()
 
         # Resolve entry point
         definitions = self.find_definitions(entry_point)
@@ -630,7 +624,7 @@ class SymbolIndex:
             if depth >= max_depth:
                 continue
 
-            callees = sorted(_get_edge_targets(db, current_name, "calls"))
+            callees = sorted(_get_edge_targets(current_name, "calls"))
             for callee in callees:
                 if callee in visited:
                     continue
@@ -661,7 +655,7 @@ class SymbolIndex:
                     )
                 frontier.append((callee, depth + 1))
 
-        call_chain = _build_call_chain(db, entry_point, visited, max_depth)
+        call_chain = _build_call_chain(entry_point, visited, max_depth)
 
         return {
             "entry_point": entry_point,
@@ -679,7 +673,6 @@ class SymbolIndex:
 
 
 def _build_call_chain(
-    db,
     name: str,
     visited: set[str],
     max_depth: int,
@@ -697,11 +690,11 @@ def _build_call_chain(
         return {"name": name, "callees": [], "truncated": True}
 
     path_visited.add(name)
-    callees = sorted(_get_edge_targets(db, name, "calls"))
+    callees = sorted(_get_edge_targets(name, "calls"))
     result = {
         "name": name,
         "callees": [
-            _build_call_chain(db, c, visited, max_depth, depth + 1, path_visited)
+            _build_call_chain(c, visited, max_depth, depth + 1, path_visited)
             for c in callees
             if c in visited
         ],
@@ -941,7 +934,7 @@ def _lang_from_filepath(filepath: str) -> str:
     }.get(ext, "")
 
 
-def _upsert_symbols(db, tags: list[Tag]) -> None:
+def _upsert_symbols(tags: list[Tag]) -> None:
     """Batch upsert symbol records into SurrealDB, with in-batch dedup."""
     seen: set[tuple[str, str, str, str, int]] = set()
     batch: list[dict] = []
@@ -965,7 +958,7 @@ def _upsert_symbols(db, tags: list[Tag]) -> None:
         )
         if len(batch) >= 500:
             try:
-                db.query("INSERT INTO symbol $records", {"records": batch})
+                query_surreal("INSERT INTO symbol $records", {"records": batch})
             except Exception as e:
                 logger.error(
                     "Batch insert of %d symbols failed: %s. Data loss — these symbols will be missing from the index.",
@@ -976,7 +969,7 @@ def _upsert_symbols(db, tags: list[Tag]) -> None:
 
     if batch:
         try:
-            db.query("INSERT INTO symbol $records", {"records": batch})
+            query_surreal("INSERT INTO symbol $records", {"records": batch})
         except Exception as e:
             logger.error(
                 "Final batch insert of %d symbols failed: %s. Data loss — these symbols will be missing from the index.",
@@ -985,7 +978,7 @@ def _upsert_symbols(db, tags: list[Tag]) -> None:
             )
 
 
-def _upsert_relationships(db, relationships: list[Relationship]) -> None:
+def _upsert_relationships(relationships: list[Relationship]) -> None:
     """Batch upsert relationships as SurrealDB graph edges.
 
     Performs deduplicated batch lookups for sources and targets before
@@ -1007,7 +1000,7 @@ def _upsert_relationships(db, relationships: list[Relationship]) -> None:
     for key in src_keys:
         name, fp = key
         try:
-            result = db.query(
+            result = query_surreal(
                 "SELECT id FROM symbol WHERE name = $name AND filepath = $fp "
                 "AND kind = 'definition' LIMIT 1",
                 {"name": name, "fp": fp},
@@ -1032,7 +1025,7 @@ def _upsert_relationships(db, relationships: list[Relationship]) -> None:
     tgt_map: dict[tuple[str, str], str] = {}
     for name, fp in tgt_with_file:
         try:
-            result = db.query(
+            result = query_surreal(
                 "SELECT id FROM symbol WHERE name = $name AND kind = 'definition' "
                 "AND filepath = $fp LIMIT 1",
                 {"name": name, "fp": fp},
@@ -1044,7 +1037,7 @@ def _upsert_relationships(db, relationships: list[Relationship]) -> None:
             logger.warning("Target (file) lookup failed for %s:%s: %s", name, fp, e)
     for name in tgt_no_file:
         try:
-            result = db.query(
+            result = query_surreal(
                 "SELECT id FROM symbol WHERE name = $name AND kind = 'definition' LIMIT 1",
                 {"name": name},
             )
@@ -1071,7 +1064,7 @@ def _upsert_relationships(db, relationships: list[Relationship]) -> None:
             continue
 
         try:
-            db.query(
+            query_surreal(
                 f"RELATE $src->{rel.kind}->$tgt SET source_line = $line",
                 {"src": src_id, "tgt": tgt_id, "line": rel.source_line},
             )
@@ -1079,10 +1072,10 @@ def _upsert_relationships(db, relationships: list[Relationship]) -> None:
             logger.warning("Edge upsert failed: %s", e)
 
 
-def _get_edge_targets(db, name: str, edge_table: str) -> set[str]:
+def _get_edge_targets(name: str, edge_table: str) -> set[str]:
     """Get target names from a graph edge table."""
     try:
-        result = db.query(
+        result = query_surreal(
             f"SELECT out.name AS target FROM {edge_table} WHERE in.name = $name",  # nosec B608
             {"name": name},
         )
@@ -1098,10 +1091,10 @@ def _get_edge_targets(db, name: str, edge_table: str) -> set[str]:
         return set()
 
 
-def _get_edge_sources(db, name: str, edge_table: str) -> set[str]:
+def _get_edge_sources(name: str, edge_table: str) -> set[str]:
     """Get source names from a graph edge table."""
     try:
-        result = db.query(
+        result = query_surreal(
             f"SELECT in.name AS source FROM {edge_table} WHERE out.name = $name",  # nosec B608
             {"name": name},
         )
@@ -1117,10 +1110,10 @@ def _get_edge_sources(db, name: str, edge_table: str) -> set[str]:
         return set()
 
 
-def _resolve_scope(db, tag: Tag) -> str | None:
+def _resolve_scope(tag: Tag) -> str | None:
     """Resolve the enclosing class scope for a symbol using SurrealDB."""
     try:
-        result = db.query(
+        result = query_surreal(
             """SELECT out.name AS parent FROM contains_edge
                WHERE in.filepath = $fp AND in.line = $line
                AND in.name = $name""",
@@ -1146,7 +1139,7 @@ def _resolve_scope(db, tag: Tag) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def _bfs_upstream(symbol_index, db, seed_names: set[str], max_depth: int) -> dict:
+def _bfs_upstream(symbol_index, seed_names: set[str], max_depth: int) -> dict:
     """BFS traversal upstream — who depends on us (callers)."""
     impact: dict[int, list[dict]] = {}
     visited: set[str] = set(seed_names)
@@ -1157,7 +1150,7 @@ def _bfs_upstream(symbol_index, db, seed_names: set[str], max_depth: int) -> dic
         level_items: list[dict] = []
 
         for name in current:
-            for source in _get_edge_sources(db, name, "calls"):
+            for source in _get_edge_sources(name, "calls"):
                 if source not in visited:
                     visited.add(source)
                     next_level.add(source)
@@ -1180,7 +1173,7 @@ def _bfs_upstream(symbol_index, db, seed_names: set[str], max_depth: int) -> dic
     return impact
 
 
-def _bfs_downstream(symbol_index, db, seed_names: set[str], max_depth: int) -> dict:
+def _bfs_downstream(symbol_index, seed_names: set[str], max_depth: int) -> dict:
     """BFS traversal downstream — what we depend on (callees)."""
     impact: dict[int, list[dict]] = {}
     visited: set[str] = set(seed_names)
@@ -1191,7 +1184,7 @@ def _bfs_downstream(symbol_index, db, seed_names: set[str], max_depth: int) -> d
         level_items: list[dict] = []
 
         for name in current:
-            for target in _get_edge_targets(db, name, "calls"):
+            for target in _get_edge_targets(name, "calls"):
                 if target not in visited:
                     visited.add(target)
                     next_level.add(target)
@@ -1260,10 +1253,10 @@ def _assess_risk(
 # ---------------------------------------------------------------------------
 
 
-def _is_commit_indexed(db, commit_hash: str) -> bool:
+def _is_commit_indexed(commit_hash: str) -> bool:
     """Check if the given commit is already indexed with the current schema."""
     try:
-        result = db.query(
+        result = query_surreal(
             "SELECT version, repo_commit FROM _schema_meta WHERE repo_commit = $hash LIMIT 1",
             {"hash": commit_hash},
         )
@@ -1277,10 +1270,10 @@ def _is_commit_indexed(db, commit_hash: str) -> bool:
         return False
 
 
-def _mark_commit_indexed(db, commit_hash: str) -> None:
+def _mark_commit_indexed(commit_hash: str) -> None:
     """Record the indexed commit hash and schema version in metadata."""
     try:
-        db.query(
+        query_surreal(
             "UPDATE _schema_meta SET repo_commit = $hash, version = $ver",
             {"hash": commit_hash, "ver": SCHEMA_VERSION},
         )
@@ -1288,7 +1281,7 @@ def _mark_commit_indexed(db, commit_hash: str) -> None:
         logger.warning("Failed to mark commit indexed: %s", e)
 
 
-def _clear_repo_data(db) -> None:
+def _clear_repo_data() -> None:
     """Remove all code intelligence data for a fresh re-index.
 
     Only deletes graph definitions (records without embeddings) and graph
@@ -1298,12 +1291,12 @@ def _clear_repo_data(db) -> None:
     tables = ["calls", "imports", "inherits", "contains_edge"]
     for table in tables:
         try:
-            db.query(f"DELETE FROM {table}")  # nosec B608
+            query_surreal(f"DELETE FROM {table}")  # nosec B608
         except Exception as e:
             logger.warning("Failed to clear table '%s' during re-index: %s", table, e)
     # Only clear symbol records that are graph definitions (no embedding)
     try:
-        db.query("DELETE FROM symbol WHERE embedding IS NULL")
+        query_surreal("DELETE FROM symbol WHERE embedding IS NULL")
     except Exception as e:
         logger.warning("Failed to clear symbol definitions during re-index: %s", e)
 
@@ -1388,12 +1381,10 @@ def _parse_git_diff(diff_output: str) -> list[dict]:
     return changes
 
 
-def _get_symbols_in_range(
-    db, filepath: str, start_line: int, end_line: int
-) -> list[dict]:
+def _get_symbols_in_range(filepath: str, start_line: int, end_line: int) -> list[dict]:
     """Get symbol definitions that overlap with a line range."""
     try:
-        result = db.query(
+        result = query_surreal(
             """SELECT name, line, end_line, category FROM symbol
                WHERE filepath = $fp AND kind = 'definition'
                AND line <= $el AND end_line >= $sl""",

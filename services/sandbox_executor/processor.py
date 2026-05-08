@@ -532,7 +532,7 @@ class JobProcessor:
                     self.job_queue.redis
                 ).get_session(session_token)
                 run_count = int(
-                    session_meta.get("run_count", "1") if session_meta else 1
+                    str(session_meta.get("run_count", "1")) if session_meta else "1"
                 )
                 await self.streaming_bridge.publish(
                     "run_start",

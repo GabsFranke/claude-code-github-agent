@@ -14,12 +14,15 @@ def _mock_surrealdb():
     """Mock SurrealDB for all tests — no real connection needed."""
     fake_db = FakeSurrealDB()
 
+    def fake_query(query, vars=None):
+        return fake_db.query(query, vars)
+
     with (
         patch("shared.surrealdb_client.is_initialized", return_value=True),
         patch("shared.surrealdb_client.get_surreal", return_value=fake_db),
         patch("shared.surrealdb_client.init_surrealdb"),
         patch("shared.surrealdb_client.apply_schema"),
-        patch("shared.code_graph.get_surreal", return_value=fake_db),
+        patch("shared.surrealdb_client.query_surreal", side_effect=fake_query),
         patch("shared.code_graph.is_initialized", return_value=True),
         patch("shared.code_graph.apply_schema"),
     ):
@@ -351,10 +354,9 @@ class TestParseGitDiff:
 
 class TestGetSymbolsInRange:
     def test_returns_empty_for_nonexistent_file(self, symbol_index):
-        from shared.code_graph import _get_symbols_in_range, get_surreal
+        from shared.code_graph import _get_symbols_in_range
 
-        db = get_surreal()
-        symbols = _get_symbols_in_range(db, "nonexistent.py", 1, 10)
+        symbols = _get_symbols_in_range("nonexistent.py", 1, 10)
         assert symbols == []
 
 

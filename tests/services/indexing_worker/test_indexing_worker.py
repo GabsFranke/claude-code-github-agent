@@ -313,7 +313,6 @@ class TestEnsureSurrealDB:
             patch(
                 "services.indexing_worker.indexing_worker.init_surrealdb"
             ) as mock_init,
-            patch("services.indexing_worker.indexing_worker.get_surreal") as mock_get,
             patch(
                 "services.indexing_worker.indexing_worker.apply_schema"
             ) as mock_apply,
@@ -321,7 +320,6 @@ class TestEnsureSurrealDB:
             await ensure_surrealdb()
 
         mock_init.assert_called_once()
-        mock_get.assert_called_once()
         mock_apply.assert_called_once()
 
 

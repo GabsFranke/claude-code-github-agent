@@ -31,6 +31,9 @@ _surreal: Any = None
 _async_surreal: Any = None
 _initialized: bool = False
 
+# Stored credentials for re-authentication when sessions expire
+_surreal_creds: dict[str, str] = {}
+
 # Thread-safety locks for initialization
 _init_lock = threading.Lock()
 _async_init_lock: asyncio.Lock | None = None
@@ -93,6 +96,9 @@ def init_surrealdb(
         _surreal = Surreal(_url)
         _surreal.signin({"username": _user, "password": _pass})
         _surreal.use(_ns, _db)
+        _surreal_creds.update(
+            {"url": _url, "user": _user, "password": _pass, "ns": _ns, "db": _db}
+        )
         _initialized = True
         logger.info("SurrealDB connected: %s ns=%s db=%s", _url, _ns, _db)
         return _surreal
@@ -134,6 +140,15 @@ async def init_async_surrealdb(
         _async_surreal = AsyncSurreal(_url)
         await _async_surreal.signin({"username": _user, "password": _pass})
         await _async_surreal.use(_ns, _db)
+        _surreal_creds.update(
+            {
+                "async_url": _url,
+                "async_user": _user,
+                "async_password": _pass,
+                "async_ns": _ns,
+                "async_db": _db,
+            }
+        )
         logger.info("SurrealDB async connected: %s ns=%s db=%s", _url, _ns, _db)
         return _async_surreal
 
@@ -168,6 +183,48 @@ async def get_async_surreal() -> Any:
     return _async_surreal
 
 
+def reauthenticate_surreal() -> None:
+    """Re-authenticate the SurrealDB client after a session token expiry.
+
+    Call this when a SurrealDB operation returns 401 Unauthorized.
+    Re-signs in using the stored credentials and re-selects the namespace/database.
+    """
+    global _surreal
+
+    if _surreal is None or not _surreal_creds:
+        raise RuntimeError("SurrealDB not initialized. Call init_surrealdb() first.")
+
+    logger.info("Re-authenticating SurrealDB connection (session expired)")
+    _surreal.signin(
+        {
+            "username": _surreal_creds["user"],
+            "password": _surreal_creds["password"],
+        }
+    )
+    _surreal.use(_surreal_creds["ns"], _surreal_creds["db"])
+
+
+def query_surreal(query: str, vars: dict | None = None) -> Any:
+    """Execute a SurrealDB query with automatic re-authentication on 401.
+
+    Wraps db.query() with retry logic: if the query fails with a 401
+    Unauthorized error, re-authenticates and retries once.
+    """
+    db = get_surreal()
+    try:
+        return db.query(query, vars)
+    except Exception as e:
+        err_msg = str(e)
+        if "401" in err_msg or "Unauthorized" in err_msg:
+            logger.warning(
+                "SurrealDB query failed with 401, re-authenticating: %s", err_msg
+            )
+            reauthenticate_surreal()
+            db = get_surreal()
+            return db.query(query, vars)
+        raise
+
+
 def is_initialized() -> bool:
     """Check whether a SurrealDB connection has been established."""
     return _initialized and _surreal is not None
@@ -175,7 +232,7 @@ def is_initialized() -> bool:
 
 def close_surreal() -> None:
     """Close all singleton SurrealDB clients."""
-    global _surreal, _async_surreal, _initialized  # noqa: PLW0603
+    global _surreal, _async_surreal, _initialized, _surreal_creds  # noqa: PLW0603
 
     if _surreal is not None:
         try:
@@ -186,6 +243,7 @@ def close_surreal() -> None:
     if _async_surreal is not None:
         _async_surreal = None
     _initialized = False
+    _surreal_creds = {}
 
 
 # ---------------------------------------------------------------------------
@@ -256,17 +314,14 @@ DEFINE INDEX idx_tool_server ON tool_def FIELDS server_name;
 """
 
 
-def apply_schema(db: Any = None) -> None:
+def apply_schema() -> None:
     """Apply the code intelligence schema to SurrealDB.
 
     Idempotent — skips if schema version already matches SCHEMA_VERSION.
     """
-    if db is None:
-        db = get_surreal()
-
     # Check existing schema version
     try:
-        result = db.query("SELECT version FROM _schema_meta LIMIT 1")
+        result = query_surreal("SELECT version FROM _schema_meta LIMIT 1")
         rows = _raw_result_rows(result)
         if rows and len(rows) > 0 and rows[0].get("version") == SCHEMA_VERSION:
             return
@@ -278,9 +333,9 @@ def apply_schema(db: Any = None) -> None:
         for statement in SCHEMA_SURREALQL.strip().split(";\n"):
             stmt = statement.strip()
             if stmt:
-                db.query(stmt + ";")
+                query_surreal(stmt + ";")
 
-        db.query(
+        query_surreal(
             "INSERT INTO _schema_meta { version: $ver, created_at: time::now() };",
             {"ver": SCHEMA_VERSION},
         )
@@ -289,11 +344,8 @@ def apply_schema(db: Any = None) -> None:
         logger.warning("Schema application failed: %s", e)
 
 
-def reset_schema(db: Any = None) -> None:
+def reset_schema() -> None:
     """Drop all code intelligence tables. Used in tests."""
-    if db is None:
-        db = get_surreal()
-
     tables = [
         "symbol",
         "calls",
@@ -306,7 +358,7 @@ def reset_schema(db: Any = None) -> None:
     ]
     for table in tables:
         try:
-            db.query(f"REMOVE TABLE {table}")
+            query_surreal(f"REMOVE TABLE {table}")
         except Exception:
             pass
 

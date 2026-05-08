@@ -22,9 +22,9 @@ from shared.code_graph import SymbolIndex
 from shared.file_tree import EXCLUDE_DIRS
 from shared.surrealdb_client import (
     _raw_result_rows,
-    get_surreal,
     init_surrealdb,
     is_initialized as _sdb_is_initialized,
+    query_surreal,
 )
 from shared.ts_languages import EXTENSION_MAP, get_language
 
@@ -121,8 +121,7 @@ def warmup_surrealdb() -> None:
     try:
         if not _sdb_is_initialized():
             return
-        db = get_surreal()
-        db.query("SELECT count() FROM symbol LIMIT 1")
+        query_surreal("SELECT count() FROM symbol LIMIT 1")
         logger.info("SurrealDB warmup complete")
     except Exception as e:
         logger.warning("SurrealDB warmup query failed: %s", e)
@@ -574,13 +573,12 @@ def _semantic_search(
 
         if not _sdb_is_initialized():
             init_surrealdb()
-        db = get_surreal()
 
         # Warm up SurrealDB — first query after startup may need to load
         # HNSW index pages into memory. Without this, the k-NN below can
         # return 0 rows even though the index has matching embeddings.
         try:
-            db.query("SELECT count() FROM symbol LIMIT 1")
+            query_surreal("SELECT count() FROM symbol LIMIT 1")
         except Exception:
             pass
 
@@ -604,7 +602,7 @@ def _semantic_search(
         if conditions:
             kind_condition = "AND " + " AND ".join(conditions)
 
-        result = db.query(
+        result = query_surreal(
             f"""SELECT name, kind, filepath, line, end_line, content,
                        vector::distance::knn() AS score
                 FROM symbol

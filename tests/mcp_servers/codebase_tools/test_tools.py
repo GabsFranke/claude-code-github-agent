@@ -27,16 +27,18 @@ def _mock_surrealdb():
     """Mock SurrealDB for all tests — no real connection needed."""
     fake_db = FakeSurrealDB()
 
+    def fake_query(query, vars=None):
+        return fake_db.query(query, vars)
+
     with (
         patch("shared.surrealdb_client.is_initialized", return_value=True),
         patch("shared.surrealdb_client.get_surreal", return_value=fake_db),
         patch("shared.surrealdb_client.init_surrealdb"),
         patch("shared.surrealdb_client.apply_schema"),
+        patch("shared.surrealdb_client.query_surreal", side_effect=fake_query),
         patch("shared.code_graph.is_initialized", return_value=True),
-        patch("shared.code_graph.get_surreal", return_value=fake_db),
         patch("shared.code_graph.apply_schema"),
         patch("mcp_servers.codebase_tools.tools.init_surrealdb"),
-        patch("mcp_servers.codebase_tools.tools.get_surreal", return_value=fake_db),
     ):
         yield fake_db
 
