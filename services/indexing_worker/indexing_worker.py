@@ -488,25 +488,25 @@ async def _get_previous_commit(redis_client, repo: str, ref: str) -> str | None:
     return None
 
 
-def _build_code_graph(worktree: str) -> None:
+def _build_code_graph(worktree: str, repo: str) -> None:
     """Build the code graph (definitions + relationships) from a worktree."""
-    idx = SymbolIndex(repo_path=Path(worktree))
+    idx = SymbolIndex(repo_path=Path(worktree), repo=repo)
     idx.build(force=True)
 
 
-def _build_route_maps(worktree: str) -> None:
+def _build_route_maps(worktree: str, repo: str) -> None:
     """Extract and persist API routes + MCP tool definitions from a worktree."""
     repo_path = Path(worktree)
     db = get_surreal()
 
     routes = extract_routes(repo_path)
     if routes:
-        _upsert_routes(db, routes)
+        _upsert_routes(db, routes, repo)
         logger.info("Indexed %d API routes from %s", len(routes), worktree)
 
     tools = _extract_mcp_tools(repo_path)
     if tools:
-        _upsert_tools(db, tools)
+        _upsert_tools(db, tools, repo)
         logger.info("Indexed %d MCP tool defs from %s", len(tools), worktree)
 
 
@@ -608,7 +608,7 @@ async def process_indexing_job(message: dict, redis_client=None) -> None:
         # before chunking so that graph edges are pre-built for MCP tools.
         # The graph build is fast (AST parsing only, no API calls).
         try:
-            await asyncio.to_thread(_build_code_graph, worktree)
+            await asyncio.to_thread(_build_code_graph, worktree, repo)
         except Exception as e:
             logger.warning(
                 "Code graph build failed for %s: %s (chunking will continue)", repo, e
@@ -616,7 +616,7 @@ async def process_indexing_job(message: dict, redis_client=None) -> None:
 
         # Extract and persist API routes + MCP tool definitions
         try:
-            await asyncio.to_thread(_build_route_maps, worktree)
+            await asyncio.to_thread(_build_route_maps, worktree, repo)
         except Exception as e:
             logger.warning(
                 "Route maps build failed for %s: %s (chunking will continue)", repo, e

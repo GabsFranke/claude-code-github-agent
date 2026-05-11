@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _repo_path: Path | None = None
+_repo: str = ""
 _symbol_index: SymbolIndex | None = None
 _ast_cache: dict[tuple[str, float], tuple[Any, bytes]] = {}
 _AST_CACHE_MAX_SIZE = 500
@@ -84,9 +85,10 @@ def init_repo(repo_path: str) -> None:
     Args:
         repo_path: Absolute path to the git worktree.
     """
-    global _repo_path, _symbol_index
+    global _repo_path, _repo, _symbol_index
 
     _repo_path = Path(repo_path).resolve()
+    _repo = os.getenv("GITHUB_REPOSITORY", "")
 
     if not _repo_path.is_dir():
         raise ValueError(f"Repo path does not exist: {_repo_path}")
@@ -96,10 +98,10 @@ def init_repo(repo_path: str) -> None:
     init_surrealdb(surrealdb_url)
 
     # Build the symbol index (SurrealDB-backed, skips if already indexed)
-    _symbol_index = SymbolIndex(repo_path=_repo_path)
+    _symbol_index = SymbolIndex(repo_path=_repo_path, repo=_repo)
     _symbol_index.build()
     _index_ready.set()
-    logger.info("Symbol index ready for %s", _repo_path)
+    logger.info("Symbol index ready for %s (repo=%s)", _repo_path, _repo)
 
 
 def is_ready() -> bool:
@@ -235,7 +237,7 @@ def find_definitions(symbol_name: str) -> dict[str, Any]:
 
     MAX_DEFINITIONS = 50
 
-    tags = _symbol_index.find_definitions(symbol_name)
+    tags = _symbol_index.find_definitions(symbol_name, repo=_repo)
     seen: set[tuple[str, int, str]] = set()
     results: list[dict[str, Any]] = []
 
@@ -286,7 +288,7 @@ def find_references(symbol_name: str) -> list[dict[str, Any]]:
     # Collect definition locations to exclude from results
     definition_lines: set[tuple[str, int]] = set()
     if _symbol_index is not None:
-        for tag in _symbol_index.find_definitions(symbol_name):
+        for tag in _symbol_index.find_definitions(symbol_name, repo=_repo):
             definition_lines.add((tag.filepath, tag.line))
 
     # Search for exact word-boundary matches of the symbol name
@@ -597,6 +599,10 @@ def _semantic_search(
         if kind_filter:
             conditions.append("kind = $kind")
             params["kind"] = kind_filter
+
+        if _repo:
+            conditions.append("repo = $repo")
+            params["repo"] = _repo
 
         kind_condition = ""
         if conditions:
@@ -992,7 +998,7 @@ def get_context(symbol_name: str, file_hint: str | None = None) -> dict[str, Any
     if _symbol_index is None:
         return {"symbol": symbol_name, "error": "Symbol index not initialized"}
 
-    result = _symbol_index.get_context(symbol_name, file_hint=file_hint)
+    result = _symbol_index.get_context(symbol_name, file_hint=file_hint, repo=_repo)
 
     # Cap unbounded call graph sets
     for field in ("calls", "called_by"):
@@ -1046,6 +1052,7 @@ def get_impact(
         end_line,
         max_depth=max_depth,
         direction=direction,
+        repo=_repo,
     )
 
     # Cap items per depth level in upstream/downstream impact
@@ -1081,7 +1088,7 @@ def get_file_overview(file_path: str) -> dict[str, Any]:
     # Validate the file path
     _resolve_and_validate(file_path)
 
-    result = _symbol_index.get_file_overview(file_path)
+    result = _symbol_index.get_file_overview(file_path, repo=_repo)
 
     imported_by = result.get("imported_by")
     if isinstance(imported_by, list) and len(imported_by) > 50:
@@ -1157,6 +1164,7 @@ def trace_flow(
         entry_point,
         file_hint=file_hint,
         max_depth=max_depth,
+        repo=_repo,
     )
 
     steps = result.get("steps")
@@ -1188,7 +1196,7 @@ def get_routes_map(framework: str | None = None) -> list[dict[str, Any]]:
     """
     from shared.route_maps import get_routes_map as _get_routes_map
 
-    return _get_routes_map(repo_path=_repo_path, framework=framework)
+    return _get_routes_map(repo_path=_repo_path, framework=framework, repo=_repo)
 
 
 # ---------------------------------------------------------------------------
@@ -1208,7 +1216,7 @@ def get_tools_map() -> list[dict[str, Any]]:
     """
     from shared.route_maps import get_tools_map as _get_tools_map
 
-    return _get_tools_map(repo_path=_repo_path)
+    return _get_tools_map(repo_path=_repo_path, repo=_repo)
 
 
 # ---------------------------------------------------------------------------

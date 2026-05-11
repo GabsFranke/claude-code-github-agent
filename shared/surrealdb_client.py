@@ -55,7 +55,7 @@ DEFAULT_NS = os.getenv("SURREALDB_NS", "bot")
 DEFAULT_DB = os.getenv("SURREALDB_DB", "codebase")
 
 # Schema version — bump when schema changes
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def init_surrealdb(
@@ -300,8 +300,10 @@ DEFINE FIELD filepath ON route TYPE string;
 DEFINE FIELD line ON route TYPE int;
 DEFINE FIELD framework ON route TYPE string;
 DEFINE FIELD description ON route TYPE option<string>;
+DEFINE FIELD repo ON route TYPE option<string>;
 DEFINE INDEX idx_route_framework ON route FIELDS framework;
 DEFINE INDEX idx_route_filepath ON route FIELDS filepath;
+DEFINE INDEX idx_route_repo ON route FIELDS repo;
 
 -- MCP tool definitions (extracted from MCP server JSON schemas)
 DEFINE TABLE tool_def SCHEMAFULL;
@@ -310,7 +312,9 @@ DEFINE FIELD description ON tool_def TYPE string;
 DEFINE FIELD server_file ON tool_def TYPE string;
 DEFINE FIELD server_name ON tool_def TYPE string;
 DEFINE FIELD required_params ON tool_def TYPE option<array<string>>;
+DEFINE FIELD repo ON tool_def TYPE option<string>;
 DEFINE INDEX idx_tool_server ON tool_def FIELDS server_name;
+DEFINE INDEX idx_tool_repo ON tool_def FIELDS repo;
 """
 
 

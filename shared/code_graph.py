@@ -54,6 +54,7 @@ class SymbolIndex:
     """
 
     repo_path: Path = field(default_factory=Path)
+    repo: str = ""
     _built: bool = field(default=False, repr=False)
 
     def build(
@@ -86,7 +87,7 @@ class SymbolIndex:
             return
 
         # Clear old data for this repo
-        _clear_repo_data()
+        _clear_repo_data(self.repo)
 
         # Extract tags
         rm = RepoMap(self.repo_path)
@@ -101,7 +102,7 @@ class SymbolIndex:
             return
 
         # Upsert symbols
-        _upsert_symbols(tags)
+        _upsert_symbols(tags, self.repo)
         logger.debug("Upserted %d symbols to SurrealDB", len(tags))
 
         # Extract and upsert relationships as graph edges
@@ -109,7 +110,7 @@ class SymbolIndex:
         logger.debug(
             "Extracted %d relationships, upserting to SurrealDB", len(relationships)
         )
-        _upsert_relationships(relationships)
+        _upsert_relationships(relationships, self.repo)
 
         # Mark commit as indexed
         _mark_commit_indexed(commit_hash)
@@ -283,11 +284,13 @@ class SymbolIndex:
     # Query methods
     # ------------------------------------------------------------------
 
-    def find_definitions(self, name: str) -> list[Tag]:
+    def find_definitions(self, name: str, repo: str | None = None) -> list[Tag]:
         """Find all definitions of a symbol by name (deduplicated)."""
+        scope = repo or self.repo
         result = query_surreal(
-            "SELECT * FROM symbol WHERE name = $name AND kind = 'definition'",
-            {"name": name},
+            "SELECT name, kind, category, filepath, line, end_line FROM symbol"
+            " WHERE name = $name AND kind = 'definition' AND repo = $repo",
+            {"name": name, "repo": scope},
         )
         tags = _rows_to_tags(_raw_result_rows(result))
         seen: set[tuple[str, int, str]] = set()
@@ -299,14 +302,19 @@ class SymbolIndex:
                 deduped.append(t)
         return deduped
 
-    def find_references(self, name: str) -> list[Tag]:
+    def find_references(self, name: str, repo: str | None = None) -> list[Tag]:
         """Find all references to a symbol (both definitions and references)."""
+        scope = repo or self.repo
         result = query_surreal(
-            "SELECT * FROM symbol WHERE name = $name", {"name": name}
+            "SELECT name, kind, category, filepath, line, end_line FROM symbol"
+            " WHERE name = $name AND repo = $repo",
+            {"name": name, "repo": scope},
         )
         return _rows_to_tags(_raw_result_rows(result))
 
-    def get_context(self, symbol_name: str, file_hint: str | None = None) -> dict:
+    def get_context(
+        self, symbol_name: str, file_hint: str | None = None, repo: str | None = None
+    ) -> dict:
         """Get a 360-degree view of a symbol: definition, callers, callees,
         inheritance, and scope.
 
@@ -314,7 +322,8 @@ class SymbolIndex:
         disambiguation list so the agent can narrow down. Pass ``file_hint``
         to select a specific definition when the name exists in multiple files.
         """
-        definitions = self.find_definitions(symbol_name)
+        scope = repo or self.repo
+        definitions = self.find_definitions(symbol_name, repo=scope)
 
         if not definitions:
             return {"symbol": symbol_name, "error": "Symbol not found"}
@@ -354,14 +363,18 @@ class SymbolIndex:
                         "end_line": d.end_line,
                     }
                 ],
-                "scope": _resolve_scope(d),
+                "scope": _resolve_scope(d, scope),
             }
 
         # Use SurrealQL graph traversal for relationships
-        result["calls"] = sorted(_get_edge_targets(symbol_name, "calls"))
-        result["called_by"] = sorted(_get_edge_sources(symbol_name, "calls"))
-        result["inherits_from"] = sorted(_get_edge_targets(symbol_name, "inherits"))
-        result["inherited_by"] = sorted(_get_edge_sources(symbol_name, "inherits"))
+        result["calls"] = sorted(_get_edge_targets(symbol_name, "calls", scope))
+        result["called_by"] = sorted(_get_edge_sources(symbol_name, "calls", scope))
+        result["inherits_from"] = sorted(
+            _get_edge_targets(symbol_name, "inherits", scope)
+        )
+        result["inherited_by"] = sorted(
+            _get_edge_sources(symbol_name, "inherits", scope)
+        )
 
         return result
 
@@ -372,6 +385,7 @@ class SymbolIndex:
         end_line: int | None = None,
         max_depth: int = 3,
         direction: str = "both",
+        repo: str | None = None,
     ) -> dict:
         """Get the blast radius of changes to a file or line range.
 
@@ -391,26 +405,27 @@ class SymbolIndex:
             imported_by, risk_level, risk_summary.
         """
         max_depth = min(max(1, max_depth), 10)
+        scope = repo or self.repo
 
         if start_line is not None and end_line is not None:
             result = query_surreal(
-                """SELECT * FROM symbol
-                   WHERE filepath = $fp AND kind = 'definition'
+                """SELECT name, kind, category, filepath, line, end_line FROM symbol
+                   WHERE filepath = $fp AND kind = 'definition' AND repo = $repo
                    AND line >= $sl AND end_line <= $el""",
-                {"fp": file_path, "sl": start_line, "el": end_line},
+                {"fp": file_path, "sl": start_line, "el": end_line, "repo": scope},
             )
         elif start_line is not None:
             result = query_surreal(
-                """SELECT * FROM symbol
-                   WHERE filepath = $fp AND kind = 'definition'
+                """SELECT name, kind, category, filepath, line, end_line FROM symbol
+                   WHERE filepath = $fp AND kind = 'definition' AND repo = $repo
                    AND line >= $sl""",
-                {"fp": file_path, "sl": start_line},
+                {"fp": file_path, "sl": start_line, "repo": scope},
             )
         else:
             result = query_surreal(
-                """SELECT * FROM symbol
-                   WHERE filepath = $fp AND kind = 'definition'""",
-                {"fp": file_path},
+                """SELECT name, kind, category, filepath, line, end_line FROM symbol
+                   WHERE filepath = $fp AND kind = 'definition' AND repo = $repo""",
+                {"fp": file_path, "repo": scope},
             )
 
         file_defs = _rows_to_tags(_raw_result_rows(result))
@@ -427,16 +442,16 @@ class SymbolIndex:
 
         affected_names = {d.name for d in file_defs}
 
-        imported_by = sorted(_get_edge_sources(file_path, "imports"))
+        imported_by = sorted(_get_edge_sources(file_path, "imports", scope))
 
         upstream = {}
         downstream = {}
 
         if direction in ("upstream", "both"):
-            upstream = _bfs_upstream(self, affected_names, max_depth)
+            upstream = _bfs_upstream(self, affected_names, max_depth, scope)
 
         if direction in ("downstream", "both"):
-            downstream = _bfs_downstream(self, affected_names, max_depth)
+            downstream = _bfs_downstream(self, affected_names, max_depth, scope)
 
         risk_level, risk_summary = _assess_risk(upstream, downstream, imported_by)
 
@@ -450,13 +465,14 @@ class SymbolIndex:
             "risk_summary": risk_summary,
         }
 
-    def get_file_overview(self, file_path: str) -> dict:
+    def get_file_overview(self, file_path: str, repo: str | None = None) -> dict:
         """Get all symbols, imports, and class structure for a file."""
+        scope = repo or self.repo
 
         result = query_surreal(
-            """SELECT * FROM symbol
-               WHERE filepath = $fp AND kind = 'definition'""",
-            {"fp": file_path},
+            """SELECT name, kind, category, filepath, line, end_line FROM symbol
+               WHERE filepath = $fp AND kind = 'definition' AND repo = $repo""",
+            {"fp": file_path, "repo": scope},
         )
         file_defs = _rows_to_tags(_raw_result_rows(result))
 
@@ -470,23 +486,25 @@ class SymbolIndex:
             for d in file_defs
         ]
 
-        imports = sorted(_get_edge_targets(file_path, "imports"))
-        imported_by = sorted(_get_edge_sources(file_path, "imports"))
+        imports = sorted(_get_edge_targets(file_path, "imports", scope))
+        imported_by = sorted(_get_edge_sources(file_path, "imports", scope))
 
         # Build class structure
         classes: dict[str, dict] = {}
         for d in file_defs:
             if d.category == "class":
                 classes[d.name] = {
-                    "inherits_from": sorted(_get_edge_targets(d.name, "inherits")),
+                    "inherits_from": sorted(
+                        _get_edge_targets(d.name, "inherits", scope)
+                    ),
                     "methods": [],
                 }
 
         # Assign methods to classes via scope resolution
         for d in file_defs:
-            scope = _resolve_scope(d)
-            if scope and scope in classes:
-                classes[scope]["methods"].append(d.name)
+            cls_scope = _resolve_scope(d, scope)
+            if cls_scope and cls_scope in classes:
+                classes[cls_scope]["methods"].append(d.name)
 
         return {
             "file": file_path,
@@ -535,15 +553,19 @@ class SymbolIndex:
             filepath = entry["file"]
             symbols: list[dict] = []
             for rng in entry["ranges"]:
-                symbols.extend(_get_symbols_in_range(filepath, rng[0], rng[1]))
+                symbols.extend(
+                    _get_symbols_in_range(filepath, rng[0], rng[1], self.repo)
+                )
 
             if not symbols:
                 continue
 
             affected_names = {s["name"] for s in symbols}
-            imported_by = sorted(_get_edge_sources(filepath, "imports"))
-            upstream = _bfs_upstream(self, affected_names, max_depth=3)
-            downstream = _bfs_downstream(self, affected_names, max_depth=3)
+            imported_by = sorted(_get_edge_sources(filepath, "imports", self.repo))
+            upstream = _bfs_upstream(self, affected_names, max_depth=3, repo=self.repo)
+            downstream = _bfs_downstream(
+                self, affected_names, max_depth=3, repo=self.repo
+            )
             risk_level, risk_summary = _assess_risk(upstream, downstream, imported_by)
 
             changed_files.append(
@@ -569,6 +591,7 @@ class SymbolIndex:
         entry_point: str,
         file_hint: str | None = None,
         max_depth: int = 20,
+        repo: str | None = None,
     ) -> dict:
         """Trace the execution flow from an entry-point symbol.
 
@@ -580,14 +603,16 @@ class SymbolIndex:
             file_hint: Optional file path to disambiguate when the
                 symbol exists in multiple files.
             max_depth: Maximum traversal depth (1-50, default 20).
+            repo: Optional repo scope to avoid cross-repo ambiguity.
 
         Returns:
             Dict with entry_point, entry_definition, steps, call_chain,
             total_steps, max_depth_reached.
         """
+        scope = repo or self.repo
 
         # Resolve entry point
-        definitions = self.find_definitions(entry_point)
+        definitions = self.find_definitions(entry_point, repo=scope)
         if not definitions:
             return {"entry_point": entry_point, "error": "Symbol not found"}
 
@@ -624,12 +649,12 @@ class SymbolIndex:
             if depth >= max_depth:
                 continue
 
-            callees = sorted(_get_edge_targets(current_name, "calls"))
+            callees = sorted(_get_edge_targets(current_name, "calls", scope))
             for callee in callees:
                 if callee in visited:
                     continue
                 visited.add(callee)
-                callee_defs = self.find_definitions(callee)
+                callee_defs = self.find_definitions(callee, repo=scope)
                 if callee_defs:
                     cd = callee_defs[0]
                     steps.append(
@@ -655,7 +680,7 @@ class SymbolIndex:
                     )
                 frontier.append((callee, depth + 1))
 
-        call_chain = _build_call_chain(entry_point, visited, max_depth)
+        call_chain = _build_call_chain(entry_point, visited, max_depth, repo=scope)
 
         return {
             "entry_point": entry_point,
@@ -678,6 +703,7 @@ def _build_call_chain(
     max_depth: int,
     depth: int = 0,
     path_visited: set[str] | None = None,
+    repo: str = "",
 ) -> dict:
     """Recursively build a nested call chain for trace_flow.
 
@@ -690,11 +716,11 @@ def _build_call_chain(
         return {"name": name, "callees": [], "truncated": True}
 
     path_visited.add(name)
-    callees = sorted(_get_edge_targets(name, "calls"))
+    callees = sorted(_get_edge_targets(name, "calls", repo))
     result = {
         "name": name,
         "callees": [
-            _build_call_chain(c, visited, max_depth, depth + 1, path_visited)
+            _build_call_chain(c, visited, max_depth, depth + 1, path_visited, repo)
             for c in callees
             if c in visited
         ],
@@ -934,7 +960,7 @@ def _lang_from_filepath(filepath: str) -> str:
     }.get(ext, "")
 
 
-def _upsert_symbols(tags: list[Tag]) -> None:
+def _upsert_symbols(tags: list[Tag], repo: str = "") -> None:
     """Batch upsert symbol records into SurrealDB, with in-batch dedup."""
     seen: set[tuple[str, str, str, str, int]] = set()
     batch: list[dict] = []
@@ -953,6 +979,7 @@ def _upsert_symbols(tags: list[Tag]) -> None:
                 "line": t.line,
                 "end_line": t.end_line or t.line,
                 "language": _lang_from_filepath(t.filepath),
+                "repo": repo,
                 "content": "",
             }
         )
@@ -978,7 +1005,7 @@ def _upsert_symbols(tags: list[Tag]) -> None:
             )
 
 
-def _upsert_relationships(relationships: list[Relationship]) -> None:
+def _upsert_relationships(relationships: list[Relationship], repo: str = "") -> None:
     """Batch upsert relationships as SurrealDB graph edges.
 
     Performs deduplicated batch lookups for sources and targets before
@@ -1002,8 +1029,8 @@ def _upsert_relationships(relationships: list[Relationship]) -> None:
         try:
             result = query_surreal(
                 "SELECT id FROM symbol WHERE name = $name AND filepath = $fp "
-                "AND kind = 'definition' LIMIT 1",
-                {"name": name, "fp": fp},
+                "AND kind = 'definition' AND repo = $repo LIMIT 1",
+                {"name": name, "fp": fp, "repo": repo},
             )
             rows = _raw_result_rows(result)
             if rows:
@@ -1027,8 +1054,8 @@ def _upsert_relationships(relationships: list[Relationship]) -> None:
         try:
             result = query_surreal(
                 "SELECT id FROM symbol WHERE name = $name AND kind = 'definition' "
-                "AND filepath = $fp LIMIT 1",
-                {"name": name, "fp": fp},
+                "AND filepath = $fp AND repo = $repo LIMIT 1",
+                {"name": name, "fp": fp, "repo": repo},
             )
             rows = _raw_result_rows(result)
             if rows:
@@ -1038,8 +1065,9 @@ def _upsert_relationships(relationships: list[Relationship]) -> None:
     for name in tgt_no_file:
         try:
             result = query_surreal(
-                "SELECT id FROM symbol WHERE name = $name AND kind = 'definition' LIMIT 1",
-                {"name": name},
+                "SELECT id FROM symbol WHERE name = $name AND kind = 'definition' "
+                "AND repo = $repo LIMIT 1",
+                {"name": name, "repo": repo},
             )
             rows = _raw_result_rows(result)
             if rows:
@@ -1072,12 +1100,12 @@ def _upsert_relationships(relationships: list[Relationship]) -> None:
             logger.warning("Edge upsert failed: %s", e)
 
 
-def _get_edge_targets(name: str, edge_table: str) -> set[str]:
-    """Get target names from a graph edge table."""
+def _get_edge_targets(name: str, edge_table: str, repo: str = "") -> set[str]:
+    """Get target names from a graph edge table, scoped by repo."""
     try:
         result = query_surreal(
-            f"SELECT out.name AS target FROM {edge_table} WHERE in.name = $name",  # nosec B608
-            {"name": name},
+            f"SELECT out.name AS target FROM {edge_table} WHERE in.name = $name AND in.repo = $repo",  # nosec B608
+            {"name": name, "repo": repo},
         )
         rows = _raw_result_rows(result)
         return {r.get("target", "") for r in rows if r.get("target")}
@@ -1091,12 +1119,12 @@ def _get_edge_targets(name: str, edge_table: str) -> set[str]:
         return set()
 
 
-def _get_edge_sources(name: str, edge_table: str) -> set[str]:
-    """Get source names from a graph edge table."""
+def _get_edge_sources(name: str, edge_table: str, repo: str = "") -> set[str]:
+    """Get source names from a graph edge table, scoped by repo."""
     try:
         result = query_surreal(
-            f"SELECT in.name AS source FROM {edge_table} WHERE out.name = $name",  # nosec B608
-            {"name": name},
+            f"SELECT in.name AS source FROM {edge_table} WHERE out.name = $name AND out.repo = $repo",  # nosec B608
+            {"name": name, "repo": repo},
         )
         rows = _raw_result_rows(result)
         return {r.get("source", "") for r in rows if r.get("source")}
@@ -1110,14 +1138,14 @@ def _get_edge_sources(name: str, edge_table: str) -> set[str]:
         return set()
 
 
-def _resolve_scope(tag: Tag) -> str | None:
+def _resolve_scope(tag: Tag, repo: str = "") -> str | None:
     """Resolve the enclosing class scope for a symbol using SurrealDB."""
     try:
         result = query_surreal(
             """SELECT out.name AS parent FROM contains_edge
                WHERE in.filepath = $fp AND in.line = $line
-               AND in.name = $name""",
-            {"fp": tag.filepath, "line": tag.line, "name": tag.name},
+               AND in.name = $name AND in.repo = $repo""",
+            {"fp": tag.filepath, "line": tag.line, "name": tag.name, "repo": repo},
         )
         rows = _raw_result_rows(result)
         if rows:
@@ -1139,7 +1167,9 @@ def _resolve_scope(tag: Tag) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def _bfs_upstream(symbol_index, seed_names: set[str], max_depth: int) -> dict:
+def _bfs_upstream(
+    symbol_index, seed_names: set[str], max_depth: int, repo: str = ""
+) -> dict:
     """BFS traversal upstream — who depends on us (callers)."""
     impact: dict[int, list[dict]] = {}
     visited: set[str] = set(seed_names)
@@ -1150,11 +1180,11 @@ def _bfs_upstream(symbol_index, seed_names: set[str], max_depth: int) -> dict:
         level_items: list[dict] = []
 
         for name in current:
-            for source in _get_edge_sources(name, "calls"):
+            for source in _get_edge_sources(name, "calls", repo):
                 if source not in visited:
                     visited.add(source)
                     next_level.add(source)
-                    for d in symbol_index.find_definitions(source):
+                    for d in symbol_index.find_definitions(source, repo=repo):
                         level_items.append(
                             {
                                 "name": source,
@@ -1173,7 +1203,9 @@ def _bfs_upstream(symbol_index, seed_names: set[str], max_depth: int) -> dict:
     return impact
 
 
-def _bfs_downstream(symbol_index, seed_names: set[str], max_depth: int) -> dict:
+def _bfs_downstream(
+    symbol_index, seed_names: set[str], max_depth: int, repo: str = ""
+) -> dict:
     """BFS traversal downstream — what we depend on (callees)."""
     impact: dict[int, list[dict]] = {}
     visited: set[str] = set(seed_names)
@@ -1184,11 +1216,11 @@ def _bfs_downstream(symbol_index, seed_names: set[str], max_depth: int) -> dict:
         level_items: list[dict] = []
 
         for name in current:
-            for target in _get_edge_targets(name, "calls"):
+            for target in _get_edge_targets(name, "calls", repo):
                 if target not in visited:
                     visited.add(target)
                     next_level.add(target)
-                    for d in symbol_index.find_definitions(target):
+                    for d in symbol_index.find_definitions(target, repo=repo):
                         level_items.append(
                             {
                                 "name": target,
@@ -1281,22 +1313,28 @@ def _mark_commit_indexed(commit_hash: str) -> None:
         logger.warning("Failed to mark commit indexed: %s", e)
 
 
-def _clear_repo_data() -> None:
-    """Remove all code intelligence data for a fresh re-index.
+def _clear_repo_data(repo: str = "") -> None:
+    """Remove code intelligence data for a specific repo.
 
     Only deletes graph definitions (records without embeddings) and graph
-    edges. Search chunks with embeddings are preserved — they're owned by
-    the indexing worker.
+    edges scoped to the given repo. Search chunks with embeddings are
+    preserved — they're owned by the indexing worker.
     """
     tables = ["calls", "imports", "inherits", "contains_edge"]
     for table in tables:
         try:
-            query_surreal(f"DELETE FROM {table}")  # nosec B608
+            query_surreal(
+                f"DELETE FROM {table} WHERE in.repo = $repo",  # nosec B608
+                {"repo": repo},
+            )
         except Exception as e:
             logger.warning("Failed to clear table '%s' during re-index: %s", table, e)
     # Only clear symbol records that are graph definitions (no embedding)
     try:
-        query_surreal("DELETE FROM symbol WHERE embedding IS NULL")
+        query_surreal(
+            "DELETE FROM symbol WHERE embedding IS NULL AND repo = $repo",
+            {"repo": repo},
+        )
     except Exception as e:
         logger.warning("Failed to clear symbol definitions during re-index: %s", e)
 
@@ -1381,14 +1419,16 @@ def _parse_git_diff(diff_output: str) -> list[dict]:
     return changes
 
 
-def _get_symbols_in_range(filepath: str, start_line: int, end_line: int) -> list[dict]:
+def _get_symbols_in_range(
+    filepath: str, start_line: int, end_line: int, repo: str = ""
+) -> list[dict]:
     """Get symbol definitions that overlap with a line range."""
     try:
         result = query_surreal(
             """SELECT name, line, end_line, category FROM symbol
                WHERE filepath = $fp AND kind = 'definition'
-               AND line <= $el AND end_line >= $sl""",
-            {"fp": filepath, "sl": start_line, "el": end_line},
+               AND line <= $el AND end_line >= $sl AND repo = $repo""",
+            {"fp": filepath, "sl": start_line, "el": end_line, "repo": repo},
         )
         rows = _raw_result_rows(result)
         return [

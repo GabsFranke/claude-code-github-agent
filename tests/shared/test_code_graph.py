@@ -68,7 +68,7 @@ def python_repo(tmp_path: Path) -> Path:
 @pytest.fixture
 def symbol_index(python_repo: Path) -> SymbolIndex:
     """Build a SymbolIndex from the Python repo."""
-    idx = SymbolIndex(repo_path=python_repo)
+    idx = SymbolIndex(repo_path=python_repo, repo="test-repo")
     idx.build()
     return idx
 
@@ -194,7 +194,7 @@ class TestSymbolIndexEmptyRepo:
         (empty / ".git").mkdir()
         (empty / ".git" / "HEAD").write_text("abc123\n")
 
-        idx = SymbolIndex(repo_path=empty)
+        idx = SymbolIndex(repo_path=empty, repo="test-repo")
         idx.build()
 
         defs = idx.find_definitions("anything")
@@ -216,7 +216,7 @@ class TestCrossFileImportResolution:
         (tmp_path / ".git").mkdir()
         (tmp_path / ".git" / "HEAD").write_text("abc123\n")
 
-        idx = SymbolIndex(repo_path=tmp_path)
+        idx = SymbolIndex(repo_path=tmp_path, repo="test-repo")
         idx.build()
 
         defs = idx.find_definitions("Database")
@@ -234,7 +234,7 @@ class TestCrossFileImportResolution:
         (tmp_path / ".git").mkdir()
         (tmp_path / ".git" / "HEAD").write_text("abc123\n")
 
-        idx = SymbolIndex(repo_path=tmp_path)
+        idx = SymbolIndex(repo_path=tmp_path, repo="test-repo")
         idx.build()
 
         defs = idx.find_definitions("Engine")
@@ -247,7 +247,7 @@ class TestCrossFileImportResolution:
         (tmp_path / ".git").mkdir()
         (tmp_path / ".git" / "HEAD").write_text("abc123\n")
 
-        idx = SymbolIndex(repo_path=tmp_path)
+        idx = SymbolIndex(repo_path=tmp_path, repo="test-repo")
         idx.build()
 
         # Without file_hint: ambiguous (both files have Config)
@@ -271,7 +271,7 @@ class TestCrossFileImportResolution:
         (tmp_path / ".git").mkdir()
         (tmp_path / ".git" / "HEAD").write_text("abc123\n")
 
-        idx = SymbolIndex(repo_path=tmp_path)
+        idx = SymbolIndex(repo_path=tmp_path, repo="test-repo")
         idx.build()
 
         ctx = idx.get_context("Config", file_hint="nonexistent.py")
@@ -356,7 +356,7 @@ class TestGetSymbolsInRange:
     def test_returns_empty_for_nonexistent_file(self, symbol_index):
         from shared.code_graph import _get_symbols_in_range
 
-        symbols = _get_symbols_in_range("nonexistent.py", 1, 10)
+        symbols = _get_symbols_in_range("nonexistent.py", 1, 10, repo="test-repo")
         assert symbols == []
 
 

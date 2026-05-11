@@ -4,6 +4,7 @@ Tests find_definitions, find_references, search_codebase, and read_file_summary
 using a temporary Python repo fixture.
 """
 
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -142,6 +143,8 @@ def initialized_repo(python_repo: Path):
 
     tools._repo_path = None
     tools._symbol_index = None
+    tools._repo = ""
+    os.environ["GITHUB_REPOSITORY"] = "test-repo"
     init_repo(str(python_repo))
     return python_repo
 
@@ -153,6 +156,7 @@ def initialized_repo(python_repo: Path):
 
 class TestInitRepo:
     def test_initializes_with_valid_path(self, python_repo: Path):
+        os.environ["GITHUB_REPOSITORY"] = "test-repo"
         init_repo(str(python_repo))
         from mcp_servers.codebase_tools import tools
 
@@ -166,6 +170,7 @@ class TestInitRepo:
 
     def test_build_completes_successfully(self, python_repo: Path):
         """init_repo should build SymbolIndex and mark it as built."""
+        os.environ["GITHUB_REPOSITORY"] = "test-repo"
         init_repo(str(python_repo))
         from mcp_servers.codebase_tools import tools
 
@@ -305,6 +310,7 @@ class TestSearchCodebase:
 
     def test_python_fallback_works(self, python_repo: Path):
         """Test the Python regex fallback path."""
+        os.environ["GITHUB_REPOSITORY"] = "test-repo"
         init_repo(str(python_repo))
         from mcp_servers.codebase_tools import tools
 
@@ -349,6 +355,7 @@ def _populate_symbols(_mock_surrealdb: FakeSurrealDB):
             "line": 6,
             "end_line": 17,
             "language": "python",
+            "repo": "test-repo",
             "content": "class Database:\n    ...",
             "embedding": [0.1] * 1024,
         },
@@ -360,6 +367,7 @@ def _populate_symbols(_mock_surrealdb: FakeSurrealDB):
             "line": 7,
             "end_line": 20,
             "language": "python",
+            "repo": "test-repo",
             "content": "class Application:\n    ...",
             "embedding": [0.2] * 1024,
         },
@@ -371,6 +379,7 @@ def _populate_symbols(_mock_surrealdb: FakeSurrealDB):
             "line": 21,
             "end_line": 23,
             "language": "python",
+            "repo": "test-repo",
             "content": "def create_pool(size):\n    ...",
             "embedding": [0.3] * 1024,
         },

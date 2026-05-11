@@ -272,10 +272,10 @@ def extract_mcp_tools(repo_path: Path) -> list[ToolDef]:
 # ---------------------------------------------------------------------------
 
 
-def _upsert_routes(db, routes: list[RouteDef]) -> None:
-    """Upsert route definitions into SurrealDB."""
+def _upsert_routes(db, routes: list[RouteDef], repo: str = "") -> None:
+    """Upsert route definitions into SurrealDB, scoped by repo."""
     try:
-        db.query("DELETE FROM route")
+        db.query("DELETE FROM route WHERE repo = $repo", {"repo": repo})
     except Exception:
         pass
 
@@ -290,6 +290,7 @@ def _upsert_routes(db, routes: list[RouteDef]) -> None:
                     line: $line,
                     framework: $framework,
                     description: $description,
+                    repo: $repo,
                 }""",
                 {
                     "path": r.path,
@@ -299,16 +300,17 @@ def _upsert_routes(db, routes: list[RouteDef]) -> None:
                     "line": r.line,
                     "framework": r.framework,
                     "description": r.description,
+                    "repo": repo,
                 },
             )
         except Exception as e:
             logger.debug("Route upsert failed: %s", e)
 
 
-def _upsert_tools(db, tools: list[ToolDef]) -> None:
-    """Upsert tool definitions into SurrealDB."""
+def _upsert_tools(db, tools: list[ToolDef], repo: str = "") -> None:
+    """Upsert tool definitions into SurrealDB, scoped by repo."""
     try:
-        db.query("DELETE FROM tool_def")
+        db.query("DELETE FROM tool_def WHERE repo = $repo", {"repo": repo})
     except Exception:
         pass
 
@@ -321,6 +323,7 @@ def _upsert_tools(db, tools: list[ToolDef]) -> None:
                     server_file: $server_file,
                     server_name: $server_name,
                     required_params: $required_params,
+                    repo: $repo,
                 }""",
                 {
                     "name": t.name,
@@ -328,6 +331,7 @@ def _upsert_tools(db, tools: list[ToolDef]) -> None:
                     "server_file": t.server_file,
                     "server_name": t.server_name,
                     "required_params": t.required_params,
+                    "repo": repo,
                 },
             )
         except Exception as e:
@@ -337,6 +341,7 @@ def _upsert_tools(db, tools: list[ToolDef]) -> None:
 def get_routes_map(
     repo_path: Path | None = None,
     framework: str | None = None,
+    repo: str = "",
 ) -> list[dict]:
     """Get API routes from SurrealDB, optionally filtered by framework.
 
@@ -345,9 +350,14 @@ def get_routes_map(
     """
     db = get_surreal()
 
-    # Check if routes exist
+    # Check if routes exist for this repo
     try:
-        existing = _raw_result_rows(db.query("SELECT count() FROM route GROUP ALL"))
+        existing = _raw_result_rows(
+            db.query(
+                "SELECT count() FROM route WHERE repo = $repo GROUP ALL",
+                {"repo": repo},
+            )
+        )
         count = existing[0].get("count", 0) if existing else 0
     except Exception:
         count = 0
@@ -355,17 +365,20 @@ def get_routes_map(
     if count == 0 and repo_path:
         routes = extract_routes(repo_path)
         if routes:
-            _upsert_routes(db, routes)
+            _upsert_routes(db, routes, repo)
 
     # Query — handle missing table gracefully
     try:
         if framework:
             result = db.query(
-                "SELECT * FROM route WHERE framework = $fw ORDER BY path, method",
-                {"fw": framework},
+                "SELECT * FROM route WHERE framework = $fw AND repo = $repo ORDER BY path, method",
+                {"fw": framework, "repo": repo},
             )
         else:
-            result = db.query("SELECT * FROM route ORDER BY framework, path, method")
+            result = db.query(
+                "SELECT * FROM route WHERE repo = $repo ORDER BY framework, path, method",
+                {"repo": repo},
+            )
         rows = _raw_result_rows(result)
     except Exception:
         logger.debug("Failed to query route table (table may not exist)")
@@ -384,7 +397,7 @@ def get_routes_map(
     ]
 
 
-def get_tools_map(repo_path: Path | None = None) -> list[dict]:
+def get_tools_map(repo_path: Path | None = None, repo: str = "") -> list[dict]:
     """Get MCP tool definitions from SurrealDB.
 
     If no tools exist in the database and repo_path is provided, extracts
@@ -392,9 +405,14 @@ def get_tools_map(repo_path: Path | None = None) -> list[dict]:
     """
     db = get_surreal()
 
-    # Check if tools exist
+    # Check if tools exist for this repo
     try:
-        existing = _raw_result_rows(db.query("SELECT count() FROM tool_def GROUP ALL"))
+        existing = _raw_result_rows(
+            db.query(
+                "SELECT count() FROM tool_def WHERE repo = $repo GROUP ALL",
+                {"repo": repo},
+            )
+        )
         count = existing[0].get("count", 0) if existing else 0
     except Exception:
         count = 0
@@ -402,10 +420,13 @@ def get_tools_map(repo_path: Path | None = None) -> list[dict]:
     if count == 0 and repo_path:
         tools = extract_mcp_tools(repo_path)
         if tools:
-            _upsert_tools(db, tools)
+            _upsert_tools(db, tools, repo)
 
     try:
-        result = db.query("SELECT * FROM tool_def ORDER BY server_name, name")
+        result = db.query(
+            "SELECT * FROM tool_def WHERE repo = $repo ORDER BY server_name, name",
+            {"repo": repo},
+        )
         rows = _raw_result_rows(result)
     except Exception:
         logger.debug("Failed to query tool_def table (table may not exist)")

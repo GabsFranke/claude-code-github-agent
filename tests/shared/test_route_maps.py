@@ -228,11 +228,11 @@ class TestExtractRoutes:
 
 class TestGetRoutesMap:
     def test_returns_list_from_db(self):
-        routes = get_routes_map()
+        routes = get_routes_map(repo="test-repo")
         assert isinstance(routes, list)
 
     def test_filter_by_framework(self):
-        routes = get_routes_map(framework="fastapi")
+        routes = get_routes_map(framework="fastapi", repo="test-repo")
         assert isinstance(routes, list)
         for r in routes:
             assert r.get("framework", "fastapi") == "fastapi"
@@ -245,5 +245,5 @@ class TestGetRoutesMap:
 
 class TestGetToolsMap:
     def test_returns_list_from_db(self):
-        tools = get_tools_map()
+        tools = get_tools_map(repo="test-repo")
         assert isinstance(tools, list)

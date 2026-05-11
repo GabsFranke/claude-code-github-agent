@@ -257,20 +257,22 @@ class FakeSurrealDB:
         # Look up in/out symbol names from the symbol table
         sym_table = self._ensure_table("symbol")
 
-        def _get_name(rid):
+        def _get_field(rid, field_name):
             if not rid:
                 return ""
             for s in sym_table:
                 if s.get("id") == rid:
-                    return s.get("name", "")
+                    return s.get(field_name, "")
             return rid if isinstance(rid, str) else ""
 
-        # Annotate edges with in.name and out.name for filtering
+        # Annotate edges with in.name, out.name, in.repo, out.repo for filtering
         annotated = []
         for r in results:
             ann = dict(r)
-            ann["in.name"] = _get_name(r.get("in"))
-            ann["out.name"] = _get_name(r.get("out"))
+            ann["in.name"] = _get_field(r.get("in"), "name")
+            ann["out.name"] = _get_field(r.get("out"), "name")
+            ann["in.repo"] = _get_field(r.get("in"), "repo")
+            ann["out.repo"] = _get_field(r.get("out"), "repo")
             annotated.append(ann)
 
         # Parse WHERE in.field = $param or WHERE out.field = $param
