@@ -296,9 +296,10 @@ class TestParseGitDiff:
             "@@ -0,0 +10,5 @@\n"
         )
         result = _parse_git_diff(diff)
-        assert len(result) == 1
-        assert result[0]["file"] == "app.py"
-        assert result[0]["ranges"] == [(10, 14)]
+        changes = result["changes"]
+        assert len(changes) == 1
+        assert changes[0]["file"] == "app.py"
+        assert changes[0]["ranges"] == [(10, 14)]
 
     def test_parses_multiple_files(self):
         from shared.code_graph import _parse_git_diff
@@ -314,9 +315,10 @@ class TestParseGitDiff:
             "@@ -10,0 +20,1 @@\n"
         )
         result = _parse_git_diff(diff)
-        assert len(result) == 2
-        assert result[0]["file"] == "app.py"
-        assert result[1]["file"] == "db.py"
+        changes = result["changes"]
+        assert len(changes) == 2
+        assert changes[0]["file"] == "app.py"
+        assert changes[1]["file"] == "db.py"
 
     def test_parses_multiple_hunks_same_file(self):
         from shared.code_graph import _parse_git_diff
@@ -329,15 +331,17 @@ class TestParseGitDiff:
             "@@ -30,0 +45,5 @@\n"
         )
         result = _parse_git_diff(diff)
-        assert len(result) == 1
-        assert result[0]["file"] == "app.py"
-        assert result[0]["ranges"] == [(10, 12), (45, 49)]
+        changes = result["changes"]
+        assert len(changes) == 1
+        assert changes[0]["file"] == "app.py"
+        assert changes[0]["ranges"] == [(10, 12), (45, 49)]
 
     def test_empty_diff(self):
         from shared.code_graph import _parse_git_diff
 
         result = _parse_git_diff("")
-        assert result == []
+        assert result["changes"] == []
+        assert result["stale_files"] == []
 
     def test_single_line_hunk(self):
         from shared.code_graph import _parse_git_diff
@@ -349,7 +353,7 @@ class TestParseGitDiff:
             "@@ -0,0 +7 @@\n"
         )
         result = _parse_git_diff(diff)
-        assert result[0]["ranges"] == [(7, 7)]
+        assert result["changes"][0]["ranges"] == [(7, 7)]
 
 
 class TestGetSymbolsInRange:

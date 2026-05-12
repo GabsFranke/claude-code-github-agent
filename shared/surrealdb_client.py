@@ -254,7 +254,7 @@ SCHEMA_SURREALQL = """
 -- Schema version tracking
 DEFINE TABLE _schema_meta SCHEMAFULL;
 DEFINE FIELD version ON _schema_meta TYPE int;
-DEFINE FIELD created_at ON _schema_meta TYPE string;
+DEFINE FIELD created_at ON _schema_meta TYPE option<string>;
 DEFINE FIELD repo_commit ON _schema_meta TYPE option<string>;
 
 -- Symbol definitions (functions, classes, methods, variables)
@@ -332,20 +332,40 @@ def apply_schema() -> None:
     except Exception as e:
         logger.warning("Schema version check failed, will re-apply schema: %s", e)
 
-    # Apply schema statement by statement
-    try:
-        for statement in SCHEMA_SURREALQL.strip().split(";\n"):
-            stmt = statement.strip()
-            if stmt:
+    # Apply each DDL statement individually — ignore "already exists" errors
+    # since tables/fields/indexes from a prior version may already be present.
+    for statement in SCHEMA_SURREALQL.strip().split(";\n"):
+        stmt = statement.strip()
+        if stmt:
+            try:
                 query_surreal(stmt + ";")
+            except Exception as e:
+                # Already-exists errors are harmless during idempotent re-apply
+                err_msg = str(e).lower()
+                if "already exists" not in err_msg and "duplicate" not in err_msg:
+                    logger.warning("Schema DDL failed: %s", e)
 
+    # Migrate created_at from TYPE string to TYPE option<string> (v3→v4)
+    try:
         query_surreal(
-            "INSERT INTO _schema_meta { version: $ver, created_at: time::now() };",
+            "REMOVE FIELD created_at ON _schema_meta;"
+            "DEFINE FIELD created_at ON _schema_meta TYPE option<string>;"
+        )
+    except Exception:
+        pass  # Field may not exist yet on fresh DBs
+
+    # Always write the version record (upsert semantics using a fixed ID
+    # so there is exactly one row per schema version).
+    try:
+        query_surreal(
+            "INSERT INTO _schema_meta {id: 'version', version: $ver}"
+            " ON DUPLICATE KEY UPDATE version = $ver;",
             {"ver": SCHEMA_VERSION},
         )
-        logger.info("Applied schema version %d", SCHEMA_VERSION)
     except Exception as e:
-        logger.warning("Schema application failed: %s", e)
+        logger.warning("Failed to write schema version: %s", e)
+
+    logger.info("Applied schema version %d", SCHEMA_VERSION)
 
 
 def reset_schema() -> None:
@@ -368,15 +388,41 @@ def reset_schema() -> None:
 
 
 def _raw_result_rows(result: object) -> list[dict]:
-    """Extract rows from a SurrealDB query result across known response shapes."""
+    """Extract rows from a SurrealDB query result across known response shapes.
+
+    The SurrealDB Python SDK returns a list of response objects, one per
+    statement.  Each response object has ``{"result": [...], "status": "OK"}``.
+    We need to unwrap the inner ``result`` array to get actual data rows.
+
+    Handles three formats:
+      - SDK format:  [{"result": [rows...], "status": "OK"}]
+      - Direct rows: [row_dict, ...]
+      - Single dict: {"result": [rows...]}
+    """
     if result is None:
         return []
-    if isinstance(result, list):
-        items = result
-    elif isinstance(result, dict) and "result" in result:
+
+    # SDK format: list of response objects, each with a "result" key
+    if isinstance(result, list) and result:
+        first = result[0]
+        # Response objects have "result" + "status"/"time" keys
+        if (
+            isinstance(first, dict)
+            and "result" in first
+            and ("status" in first or "time" in first)
+        ):
+            data = first["result"]
+            if isinstance(data, list):
+                return [r for r in data if isinstance(r, dict)]
+            return []
+        # Direct list of data rows (no wrapper)
+        return [r for r in result if isinstance(r, dict)]
+
+    # Single response object
+    if isinstance(result, dict) and "result" in result:
         items = result["result"]
-    else:
+        if isinstance(items, list):
+            return [r for r in items if isinstance(r, dict)]
         return []
-    if isinstance(items, list):
-        return [r for r in items if isinstance(r, dict)]
-    return []  # type: ignore[unreachable]
+
+    return []

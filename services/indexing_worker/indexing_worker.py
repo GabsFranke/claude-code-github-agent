@@ -488,10 +488,23 @@ async def _get_previous_commit(redis_client, repo: str, ref: str) -> str | None:
     return None
 
 
-def _build_code_graph(worktree: str, repo: str) -> None:
-    """Build the code graph (definitions + relationships) from a worktree."""
+def _build_code_graph(
+    worktree: str,
+    repo: str,
+    *,
+    changed_files: list[str] | None = None,
+) -> None:
+    """Build the code graph (definitions + relationships) from a worktree.
+
+    If changed_files is provided, does an incremental build on just those
+    files. Otherwise, does a full build (or skips if the commit is already
+    indexed via _is_commit_indexed).
+    """
     idx = SymbolIndex(repo_path=Path(worktree), repo=repo)
-    idx.build(force=True)
+    if changed_files:
+        idx.build_incremental(changed_files)
+    else:
+        idx.build()
 
 
 def _build_route_maps(worktree: str, repo: str) -> None:
@@ -604,24 +617,6 @@ async def process_indexing_job(message: dict, redis_client=None) -> None:
             logger.error(f"Cannot index {repo}: {e}")
             return
 
-        # Build the code graph (definitions + call/import/inheritance edges)
-        # before chunking so that graph edges are pre-built for MCP tools.
-        # The graph build is fast (AST parsing only, no API calls).
-        try:
-            await asyncio.to_thread(_build_code_graph, worktree, repo)
-        except Exception as e:
-            logger.warning(
-                "Code graph build failed for %s: %s (chunking will continue)", repo, e
-            )
-
-        # Extract and persist API routes + MCP tool definitions
-        try:
-            await asyncio.to_thread(_build_route_maps, worktree, repo)
-        except Exception as e:
-            logger.warning(
-                "Route maps build failed for %s: %s (chunking will continue)", repo, e
-            )
-
         # Check for previous index to determine incremental vs full
         previous_commit = await _get_previous_commit(redis_client, repo, ref)
         full_index = True
@@ -655,6 +650,29 @@ async def process_indexing_job(message: dict, redis_client=None) -> None:
             )
         else:
             logger.info(f"Full index for {repo} on {ref} (commit {commit_hash[:8]})")
+
+        # Build the code graph (definitions + call/import/inheritance edges)
+        # before chunking so that graph edges are pre-built for MCP tools.
+        # For incremental runs, only rebuild if the commit changed.
+        try:
+            await asyncio.to_thread(
+                _build_code_graph,
+                worktree,
+                repo,
+                changed_files=changed_files if not full_index else None,
+            )
+        except Exception as e:
+            logger.warning(
+                "Code graph build failed for %s: %s (chunking will continue)", repo, e
+            )
+
+        # Extract and persist API routes + MCP tool definitions
+        try:
+            await asyncio.to_thread(_build_route_maps, worktree, repo)
+        except Exception as e:
+            logger.warning(
+                "Route maps build failed for %s: %s (chunking will continue)", repo, e
+            )
 
         # Chunk the repo (full or incremental)
         chunks = await asyncio.to_thread(chunk_repo, Path(worktree), changed_files)

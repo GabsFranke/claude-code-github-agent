@@ -1059,7 +1059,7 @@ def get_impact(
     for direction_key in ("upstream_impact", "downstream_impact"):
         impact = result.get(direction_key)
         if isinstance(impact, dict):
-            for depth_key, items in impact.items():
+            for depth_key, items in list(impact.items()):
                 if isinstance(items, list) and len(items) > 50:
                     impact[depth_key] = items[:50]
                     impact[f"{depth_key}_partial"] = True

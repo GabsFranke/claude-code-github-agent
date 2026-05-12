@@ -7,6 +7,8 @@ provides a thin query layer over SurrealDB, replacing the in-memory lookup
 dicts and JSON file cache from the first phase.
 """
 
+import bisect
+import hashlib
 import logging
 import re
 from collections import deque
@@ -30,6 +32,12 @@ from .ts_languages import EXTENSION_MAP, get_language, get_language_config
 logger = logging.getLogger(__name__)
 
 RelationshipKind = Literal["calls", "imports", "inherits"]
+
+# Whitelist of valid edge table names — guards against accidental injection
+# surfaces when table names are interpolated into SurrealQL f-strings.
+_VALID_EDGE_TABLES: frozenset[str] = frozenset(
+    {"calls", "imports", "inherits", "contains_edge"}
+)
 
 
 @dataclass
@@ -56,9 +64,74 @@ class SymbolIndex:
     repo_path: Path = field(default_factory=Path)
     repo: str = ""
     _built: bool = field(default=False, repr=False)
+    _edge_cache: dict[str, dict[str, set[str]]] | None = field(default=None, repr=False)
+    _edge_cache_rev: dict[str, dict[str, set[str]]] | None = field(
+        default=None, repr=False
+    )
+    _scope_cache: dict[tuple[str, int, str], str] | None = field(
+        default=None, repr=False
+    )
+    _def_cache: dict[str, list[Tag]] | None = field(default=None, repr=False)
+
+    def _load_edge_cache(self, repo: str) -> None:
+        """Bulk-fetch all edge tables into memory."""
+        self._edge_cache = {}
+        self._edge_cache_rev = {}
+        for table in ("calls", "imports", "inherits"):
+            forward = _get_all_repo_edges(table, repo)
+            self._edge_cache[table] = forward
+            reverse: dict[str, set[str]] = {}
+            for src, targets in forward.items():
+                for tgt in targets:
+                    reverse.setdefault(tgt, set()).add(src)
+            self._edge_cache_rev[table] = reverse
+
+    def _get_edge_cache(self, repo: str) -> tuple[dict, dict]:
+        """Load forward+reverse edge caches. Returns (forward, reverse)."""
+        if self._edge_cache is None:
+            self._load_edge_cache(repo)
+        return self._edge_cache, self._edge_cache_rev  # type: ignore[return-value]
+
+    def _get_scope_cache(self, repo: str) -> dict:
+        """Load scope containment cache. Returns {(filepath, line, name): parent}."""
+        if self._scope_cache is None:
+            self._scope_cache = _get_all_scope_edges(repo)
+        return self._scope_cache  # type: ignore[return-value]
+
+    def _get_def_cache(self, repo: str) -> dict[str, list[Tag]]:
+        """Bulk-fetch all definition Tags into memory. Returns {name: [Tag, ...]}.
+
+        Populated lazily on first call and invalidated by _invalidate_caches,
+        so BFS traversals (which visit many symbols) avoid per-symbol DB queries.
+        """
+        if self._def_cache is None:
+            try:
+                result = query_surreal(
+                    "SELECT name, kind, category, filepath, line, end_line"
+                    " FROM symbol WHERE kind = 'definition' AND repo = $repo",
+                    {"repo": repo},
+                )
+                cache: dict[str, list[Tag]] = {}
+                for tag in _rows_to_tags(_raw_result_rows(result)):
+                    cache.setdefault(tag.name, []).append(tag)
+                self._def_cache = cache
+            except Exception as e:
+                logger.warning("Bulk definition fetch failed: %s", e)
+                self._def_cache = {}
+        return self._def_cache
+
+    def _invalidate_caches(self) -> None:
+        """Drop all in-memory caches (call after build/incremental build)."""
+        self._edge_cache = None
+        self._edge_cache_rev = None
+        self._scope_cache = None
+        self._def_cache = None
 
     def build(
-        self, pre_extracted_tags: list[Tag] | None = None, force: bool = False
+        self,
+        pre_extracted_tags: list[Tag] | None = None,
+        pre_extracted_relationships: list[Relationship] | None = None,
+        force: bool = False,
     ) -> None:
         """Build the symbol index by extracting tags and relationships.
 
@@ -68,18 +141,27 @@ class SymbolIndex:
         Args:
             pre_extracted_tags: Optional pre-extracted tags to use instead
                 of performing a fresh extraction.
+            pre_extracted_relationships: Optional pre-extracted relationships
+                to use instead of calling _extract_relationships(). Ignored
+                when pre_extracted_tags is None.
             force: If True, rebuild even if the commit is already indexed.
         """
+        import time
+
+        t0 = time.monotonic()
+
         if not is_initialized():
             logger.warning("SurrealDB not initialized, skipping build")
             return
 
-        apply_schema()
-
         commit_hash = _get_head_commit(self.repo_path)
 
         # Skip if already indexed for this commit
-        if not force and not pre_extracted_tags and _is_commit_indexed(commit_hash):
+        if (
+            not force
+            and not pre_extracted_tags
+            and _is_commit_indexed(commit_hash, self.repo)
+        ):
             logger.info(
                 "Commit %s already indexed, reusing SurrealDB data", commit_hash
             )
@@ -106,32 +188,118 @@ class SymbolIndex:
         logger.debug("Upserted %d symbols to SurrealDB", len(tags))
 
         # Extract and upsert relationships as graph edges
-        relationships = self._extract_relationships()
+        if pre_extracted_relationships is not None:
+            relationships = pre_extracted_relationships
+        else:
+            relationships = self._extract_relationships()
         logger.debug(
             "Extracted %d relationships, upserting to SurrealDB", len(relationships)
         )
         _upsert_relationships(relationships, self.repo)
 
         # Mark commit as indexed
-        _mark_commit_indexed(commit_hash)
+        _mark_commit_indexed(commit_hash, self.repo)
+        self._invalidate_caches()
         self._built = True
         logger.info(
-            "SymbolIndex built: %d symbols, %d relationships, commit=%s",
+            "SymbolIndex built: %d symbols, %d relationships, commit=%s (%.1fs)",
             len(tags),
             len(relationships),
             commit_hash,
+            time.monotonic() - t0,
         )
 
-    def _extract_relationships(self) -> list[Relationship]:
+    def build_incremental(self, changed_files: list[str]) -> None:
+        """Re-index only the changed files, preserving existing data.
+
+        Deletes symbols and edges for the changed files, then re-extracts
+        and re-inserts only those files. Much faster than a full rebuild
+        for small changes.
+
+        Args:
+            changed_files: Relative file paths that changed.
+        """
+        import time
+
+        t0 = time.monotonic()
+
+        if not is_initialized():
+            logger.warning("SurrealDB not initialized, skipping incremental build")
+            return
+
+        if not changed_files:
+            logger.info("No changed files, skipping incremental build")
+            self._built = True
+            return
+
+        apply_schema()
+
+        # Delete old symbols + edges for just these files
+        _clear_repo_files(self.repo, changed_files)
+
+        # Re-extract tags for changed files only
+        rm = RepoMap(self.repo_path)
+        tags = rm.extract_tags(only_files=changed_files)
+        logger.debug(
+            "Incremental: extracted %d tags from %d changed files",
+            len(tags),
+            len(changed_files),
+        )
+
+        if not tags:
+            logger.warning("No tags extracted from changed files")
+            self._built = True
+            return
+
+        # Upsert new symbols
+        _upsert_symbols(tags, self.repo)
+        logger.debug("Incremental: upserted %d symbols", len(tags))
+
+        # Re-extract relationships for changed files only
+        relationships = self._extract_relationships(only_files=changed_files)
+        logger.debug(
+            "Incremental: extracted %d relationships from changed files",
+            len(relationships),
+        )
+        _upsert_relationships(relationships, self.repo)
+
+        # Update commit hash
+        commit_hash = _get_head_commit(self.repo_path)
+        _mark_commit_indexed(commit_hash, self.repo)
+        self._invalidate_caches()
+        self._built = True
+        logger.info(
+            "Incremental build: %d symbols, %d relationships from %d files (%.1fs)",
+            len(tags),
+            len(relationships),
+            len(changed_files),
+            time.monotonic() - t0,
+        )
+
+    def _extract_relationships(
+        self, only_files: list[str] | None = None
+    ) -> list[Relationship]:
         """Extract call, import, and inheritance relationships from source files.
 
         Uses tree-sitter QueryCursor directly to capture @target / @node, then
         resolves the enclosing definition (source_name) by byte-range containment
         against a definition map built from the AST.
+
+        Args:
+            only_files: If provided, only extract relationships from these
+                files (relative paths). Useful for incremental re-indexing.
         """
         relationships: list[Relationship] = []
         ignore_spec = load_ignore_spec(self.repo_path)
         source_files = list(walk_source_files(self.repo_path, ignore_spec))
+
+        if only_files is not None:
+            only_set = set(only_files)
+            source_files = [
+                f
+                for f in source_files
+                if str(f.relative_to(self.repo_path)).replace("\\", "/") in only_set
+            ]
 
         for filepath in source_files:
             rel_path = str(filepath.relative_to(self.repo_path)).replace("\\", "/")
@@ -238,8 +406,17 @@ class SymbolIndex:
                         )
                     )
 
+            # For multi-line parenthesised imports the name nodes appear on lines
+            # *after* the module node (e.g. `from foo import (\n  bar,\n  baz\n)`).
+            # Use a nearest-prior-line bisect fallback so bar/baz still resolve
+            # to the correct module even though their line numbers don't match.
+            sorted_module_lines = sorted(modules_by_line)
             for line, names in names_by_line.items():
                 module = modules_by_line.get(line)
+                if module is None and sorted_module_lines:
+                    pos = bisect.bisect_right(sorted_module_lines, line) - 1
+                    if pos >= 0 and line - sorted_module_lines[pos] <= 20:
+                        module = modules_by_line[sorted_module_lines[pos]]
                 resolved_file = None
                 if module:
                     resolved_file = _resolve_module(
@@ -442,16 +619,24 @@ class SymbolIndex:
 
         affected_names = {d.name for d in file_defs}
 
-        imported_by = sorted(_get_edge_sources(file_path, "imports", scope))
+        # Use edge cache for imports and BFS lookups
+        edge_fwd, edge_rev = self._get_edge_cache(scope)
+        imports_rev = edge_rev.get("imports", {})
+
+        imported_by = sorted(imports_rev.get(file_path, set()))
 
         upstream = {}
         downstream = {}
 
         if direction in ("upstream", "both"):
-            upstream = _bfs_upstream(self, affected_names, max_depth, scope)
+            upstream = _bfs_upstream(
+                self, affected_names, max_depth, scope, edge_rev=edge_rev
+            )
 
         if direction in ("downstream", "both"):
-            downstream = _bfs_downstream(self, affected_names, max_depth, scope)
+            downstream = _bfs_downstream(
+                self, affected_names, max_depth, scope, edge_fwd=edge_fwd
+            )
 
         risk_level, risk_summary = _assess_risk(upstream, downstream, imported_by)
 
@@ -486,25 +671,31 @@ class SymbolIndex:
             for d in file_defs
         ]
 
-        imports = sorted(_get_edge_targets(file_path, "imports", scope))
-        imported_by = sorted(_get_edge_sources(file_path, "imports", scope))
+        # Use bulk edge cache instead of per-symbol queries
+        edge_fwd, edge_rev = self._get_edge_cache(scope)
+        scope_cache = self._get_scope_cache(scope)
+
+        imports_fwd = edge_fwd.get("imports", {})
+        imports_rev = edge_rev.get("imports", {})
+        inherits_fwd = edge_fwd.get("inherits", {})
+
+        imports = sorted(imports_fwd.get(file_path, set()))
+        imported_by = sorted(imports_rev.get(file_path, set()))
 
         # Build class structure
         classes: dict[str, dict] = {}
         for d in file_defs:
             if d.category == "class":
                 classes[d.name] = {
-                    "inherits_from": sorted(
-                        _get_edge_targets(d.name, "inherits", scope)
-                    ),
+                    "inherits_from": sorted(inherits_fwd.get(d.name, set())),
                     "methods": [],
                 }
 
-        # Assign methods to classes via scope resolution
+        # Assign methods to classes via scope resolution (cache lookup)
         for d in file_defs:
-            cls_scope = _resolve_scope(d, scope)
-            if cls_scope and cls_scope in classes:
-                classes[cls_scope]["methods"].append(d.name)
+            parent = scope_cache.get((d.filepath, d.line, d.name))
+            if parent and parent in classes:
+                classes[parent]["methods"].append(d.name)
 
         return {
             "file": file_path,
@@ -543,10 +734,20 @@ class SymbolIndex:
                     "changed_files": [],
                     "error": f"git diff failed: {result.stderr}",
                 }
-        except Exception as e:
-            return {"changed_files": [], "error": str(e)}
 
-        changed_ranges = _parse_git_diff(result.stdout)
+            diff_data = _parse_git_diff(result.stdout)
+            changed_ranges = diff_data["changes"]
+            stale_files = diff_data["stale_files"]
+        except Exception as e:
+            return {"changed_files": [], "error": f"Failed to parse diff: {e}"}
+
+        # Clear data for deleted/renamed files to prevent stale symbols
+        if stale_files:
+            _clear_repo_files(self.repo, stale_files)
+
+        # Load edge cache once for all changed files
+        edge_fwd, edge_rev = self._get_edge_cache(self.repo)
+        imports_rev = edge_rev.get("imports", {})
 
         changed_files = []
         for entry in changed_ranges:
@@ -561,10 +762,20 @@ class SymbolIndex:
                 continue
 
             affected_names = {s["name"] for s in symbols}
-            imported_by = sorted(_get_edge_sources(filepath, "imports", self.repo))
-            upstream = _bfs_upstream(self, affected_names, max_depth=3, repo=self.repo)
+            imported_by = sorted(imports_rev.get(filepath, set()))
+            upstream = _bfs_upstream(
+                self,
+                affected_names,
+                max_depth=3,
+                repo=self.repo,
+                edge_rev=edge_rev,
+            )
             downstream = _bfs_downstream(
-                self, affected_names, max_depth=3, repo=self.repo
+                self,
+                affected_names,
+                max_depth=3,
+                repo=self.repo,
+                edge_fwd=edge_fwd,
             )
             risk_level, risk_summary = _assess_risk(upstream, downstream, imported_by)
 
@@ -639,6 +850,11 @@ class SymbolIndex:
 
         max_depth = max(1, min(max_depth, 50))
 
+        # Load edge cache for O(1) callees lookup; def cache for O(1) def lookup.
+        edge_fwd, _ = self._get_edge_cache(scope)
+        calls_fwd = edge_fwd.get("calls", {})
+        def_cache = self._get_def_cache(scope)
+
         # BFS traversal to build call chain
         visited: set[str] = {entry_point}
         steps: list[dict] = []
@@ -649,12 +865,12 @@ class SymbolIndex:
             if depth >= max_depth:
                 continue
 
-            callees = sorted(_get_edge_targets(current_name, "calls", scope))
+            callees = sorted(calls_fwd.get(current_name, set()))
             for callee in callees:
                 if callee in visited:
                     continue
                 visited.add(callee)
-                callee_defs = self.find_definitions(callee, repo=scope)
+                callee_defs = def_cache.get(callee, [])
                 if callee_defs:
                     cd = callee_defs[0]
                     steps.append(
@@ -680,7 +896,9 @@ class SymbolIndex:
                     )
                 frontier.append((callee, depth + 1))
 
-        call_chain = _build_call_chain(entry_point, visited, max_depth, repo=scope)
+        call_chain = _build_call_chain(
+            entry_point, visited, max_depth, calls_fwd=calls_fwd
+        )
 
         return {
             "entry_point": entry_point,
@@ -697,6 +915,50 @@ class SymbolIndex:
 # ---------------------------------------------------------------------------
 
 
+def _assert_valid_table(table: str) -> None:
+    """Guard against unexpected edge-table names before SurrealQL interpolation.
+
+    All callers use constants from *_VALID_EDGE_TABLES*, but this check makes
+    the constraint explicit so future refactoring can't accidentally open an
+    injection surface without the linter noticing.
+    """
+    if table not in _VALID_EDGE_TABLES:
+        raise ValueError(
+            f"Unknown edge table {table!r}. Must be one of: {sorted(_VALID_EDGE_TABLES)}"
+        )
+
+
+def _query_with_retry(
+    query: str,
+    params: dict,
+    retries: int = 3,
+    backoff: float = 0.5,
+):
+    """Execute a SurrealDB query with exponential back-off on transient failures.
+
+    Retries up to *retries* times, doubling the sleep after each attempt.
+    Raises the last exception if all retries are exhausted.
+    """
+    import time as _time
+
+    last_exc: Exception | None = None
+    for attempt in range(retries):
+        try:
+            return query_surreal(query, params)
+        except Exception as exc:
+            last_exc = exc
+            if attempt < retries - 1:
+                _time.sleep(backoff * (2**attempt))
+            else:
+                logger.warning(
+                    "Query failed after %d attempt(s): %s — %s",
+                    retries,
+                    query[:80],
+                    exc,
+                )
+    raise last_exc  # type: ignore[misc]
+
+
 def _build_call_chain(
     name: str,
     visited: set[str],
@@ -704,6 +966,7 @@ def _build_call_chain(
     depth: int = 0,
     path_visited: set[str] | None = None,
     repo: str = "",
+    calls_fwd: dict[str, set[str]] | None = None,
 ) -> dict:
     """Recursively build a nested call chain for trace_flow.
 
@@ -716,11 +979,22 @@ def _build_call_chain(
         return {"name": name, "callees": [], "truncated": True}
 
     path_visited.add(name)
-    callees = sorted(_get_edge_targets(name, "calls", repo))
+    if calls_fwd is not None:
+        callees = sorted(calls_fwd.get(name, set()))
+    else:
+        callees = sorted(_get_edge_targets(name, "calls", repo))
     result = {
         "name": name,
         "callees": [
-            _build_call_chain(c, visited, max_depth, depth + 1, path_visited, repo)
+            _build_call_chain(
+                c,
+                visited,
+                max_depth,
+                depth + 1,
+                path_visited,
+                repo,
+                calls_fwd=calls_fwd,
+            )
             for c in callees
             if c in visited
         ],
@@ -892,30 +1166,21 @@ def _find_enclosing_def(
     node_start = node.start_byte
     node_end = node.end_byte
 
-    # Binary search to find the first candidate whose start ≤ node_start
-    import bisect
-
+    # Binary search to find the rightmost candidate whose start ≤ node_start
     starts = [e[0] for e in def_map]
     idx = bisect.bisect_right(starts, node_start) - 1
 
-    best_name = None
-    best_size = None
+    best_name: str | None = None
+    best_size: int | None = None
 
-    # Scan backwards — enclosing defs must have start ≤ node_start
+    # Scan backwards — enclosing defs must have start ≤ node_start. A def with
+    # an earlier start byte could still span a larger range, so we cannot break
+    # early: we keep decrementing until idx < 0.
     while idx >= 0:
         def_start, def_end, name = def_map[idx]
-        if def_end < node_end:
-            # No further candidate can contain us (starts are monotonic, but
-            # a def with an earlier start could still have a later end).  We
-            # must keep scanning.
-            idx -= 1
-            continue
         if def_start <= node_start and node_end <= def_end:
             size = def_end - def_start
-            if best_size is None:
-                best_size = size
-                best_name = name
-            elif size < best_size:  # type: ignore[unreachable]
+            if best_size is None or size < best_size:
                 best_size = size
                 best_name = name
         idx -= 1
@@ -961,7 +1226,11 @@ def _lang_from_filepath(filepath: str) -> str:
 
 
 def _upsert_symbols(tags: list[Tag], repo: str = "") -> None:
-    """Batch upsert symbol records into SurrealDB, with in-batch dedup."""
+    """Upsert symbol records into SurrealDB, with in-batch dedup.
+
+    Uses UPSERT with deterministic record IDs so re-indexing the same
+    commit updates existing rows instead of creating duplicates.
+    """
     seen: set[tuple[str, str, str, str, int]] = set()
     batch: list[dict] = []
     for t in tags:
@@ -970,8 +1239,16 @@ def _upsert_symbols(tags: list[Tag], repo: str = "") -> None:
             continue
         seen.add(key)
 
+        # Deterministic ID: SHA-256 of the composite key guarantees uniqueness
+        # even for paths that differ only in separators (e.g. src/foo.py vs
+        # src_foo_py). The first 40 hex chars give 160-bit collision resistance.
+        # DO NOT revert to string-replacement: it silently collides on paths
+        # that share a common prefix after separator normalisation.
+        raw_key = f"{repo}:{t.filepath}:{t.kind}:{t.name}:{t.line}"
+        record_id = hashlib.sha256(raw_key.encode()).hexdigest()[:40]
         batch.append(
             {
+                "id": record_id,
                 "name": t.name,
                 "kind": t.kind,
                 "category": t.category,
@@ -985,123 +1262,155 @@ def _upsert_symbols(tags: list[Tag], repo: str = "") -> None:
         )
         if len(batch) >= 500:
             try:
-                query_surreal("INSERT INTO symbol $records", {"records": batch})
-            except Exception as e:
-                logger.error(
-                    "Batch insert of %d symbols failed: %s. Data loss — these symbols will be missing from the index.",
-                    len(batch),
-                    e,
+                _query_with_retry(
+                    "INSERT INTO symbol $records ON DUPLICATE KEY UPDATE "
+                    "name = $input.name, kind = $input.kind, "
+                    "category = $input.category, filepath = $input.filepath, "
+                    "line = $input.line, end_line = $input.end_line, "
+                    "language = $input.language, repo = $input.repo, "
+                    "content = $input.content",
+                    {"records": batch},
                 )
+            except Exception as e:
+                logger.error("Batch upsert of %d symbols failed: %s", len(batch), e)
             batch.clear()
 
     if batch:
         try:
-            query_surreal("INSERT INTO symbol $records", {"records": batch})
-        except Exception as e:
-            logger.error(
-                "Final batch insert of %d symbols failed: %s. Data loss — these symbols will be missing from the index.",
-                len(batch),
-                e,
+            _query_with_retry(
+                "INSERT INTO symbol $records ON DUPLICATE KEY UPDATE "
+                "name = $input.name, kind = $input.kind, "
+                "category = $input.category, filepath = $input.filepath, "
+                "line = $input.line, end_line = $input.end_line, "
+                "language = $input.language, repo = $input.repo, "
+                "content = $input.content",
+                {"records": batch},
             )
+        except Exception as e:
+            logger.error("Final batch upsert of %d symbols failed: %s", len(batch), e)
 
 
 def _upsert_relationships(relationships: list[Relationship], repo: str = "") -> None:
     """Batch upsert relationships as SurrealDB graph edges.
 
-    Performs deduplicated batch lookups for sources and targets before
-    issuing RELATE statements, avoiding the previous N+1 query pattern.
+    Fetches all definition IDs in a single query, then resolves edges
+    in-memory and inserts them in batches.
     """
+    import time
+
     if not relationships:
         return
 
-    # -- 1. Batch source lookup -------------------------------------------
-    src_keys: list[tuple[str, str]] = []
-    src_set: set[tuple[str, str]] = set()
-    for rel in relationships:
-        key = (rel.source_name, rel.source_file)
-        if key not in src_set:
-            src_set.add(key)
-            src_keys.append(key)
+    t0 = time.monotonic()
 
-    src_map: dict[tuple[str, str], str] = {}
-    for key in src_keys:
-        name, fp = key
-        try:
-            result = query_surreal(
-                "SELECT id FROM symbol WHERE name = $name AND filepath = $fp "
-                "AND kind = 'definition' AND repo = $repo LIMIT 1",
-                {"name": name, "fp": fp, "repo": repo},
-            )
-            rows = _raw_result_rows(result)
-            if rows:
-                src_map[key] = rows[0]["id"]
-        except Exception as e:
-            logger.warning("Source lookup failed for %s: %s", key, e)
+    # -- 1. Fetch all definitions for this repo in one query ---------------
+    t1 = time.monotonic()
+    try:
+        result = query_surreal(
+            "SELECT id, name, filepath FROM symbol "
+            "WHERE kind = 'definition' AND repo = $repo",
+            {"repo": repo},
+        )
+        rows = _raw_result_rows(result)
+    except Exception as e:
+        logger.warning("Failed to fetch definitions for edge resolution: %s", e)
+        return
+    logger.debug("Fetched %d definitions in %.1fs", len(rows), time.monotonic() - t1)
 
-    # -- 2. Batch target lookup -------------------------------------------
-    tgt_with_file: set[tuple[str, str]] = set()
-    tgt_no_file: set[str] = set()
-    for rel in relationships:
-        key = (rel.source_name, rel.source_file)
-        if key not in src_map:
-            continue  # skip edges whose source was never found
-        if rel.target_file:
-            tgt_with_file.add((rel.target_name, rel.target_file))
-        tgt_no_file.add(rel.target_name)
+    # Build lookup: (name, filepath) -> id  and  name -> id (first match)
+    by_name_file: dict[tuple[str, str], str] = {}
+    by_name_only: dict[str, str] = {}
+    for row in rows:
+        rid = row.get("id")
+        name = row.get("name", "")
+        filepath = row.get("filepath", "")
+        if not rid or not name:
+            continue
+        by_name_file[(name, filepath)] = rid
+        if name not in by_name_only:
+            by_name_only[name] = rid
 
-    tgt_map: dict[tuple[str, str], str] = {}
-    for name, fp in tgt_with_file:
-        try:
-            result = query_surreal(
-                "SELECT id FROM symbol WHERE name = $name AND kind = 'definition' "
-                "AND filepath = $fp AND repo = $repo LIMIT 1",
-                {"name": name, "fp": fp, "repo": repo},
-            )
-            rows = _raw_result_rows(result)
-            if rows:
-                tgt_map[(name, fp)] = rows[0]["id"]
-        except Exception as e:
-            logger.warning("Target (file) lookup failed for %s:%s: %s", name, fp, e)
-    for name in tgt_no_file:
-        try:
-            result = query_surreal(
-                "SELECT id FROM symbol WHERE name = $name AND kind = 'definition' "
-                "AND repo = $repo LIMIT 1",
-                {"name": name, "repo": repo},
-            )
-            rows = _raw_result_rows(result)
-            if rows:
-                tgt_map[(name, "")] = rows[0]["id"]
-        except Exception as e:
-            logger.warning("Target (name) lookup failed for %s: %s", name, e)
-
-    # -- 3. Issue RELATE statements --------------------------------------
+    # -- 2. Resolve edges and group by kind --------------------------------
+    by_kind: dict[str, list[dict]] = {}
+    skipped_no_src = 0
+    skipped_no_tgt = 0
+    skipped_self = 0
     for rel in relationships:
         src_key = (rel.source_name, rel.source_file)
-        src_id = src_map.get(src_key)
+        src_id = by_name_file.get(src_key)
         if not src_id:
+            skipped_no_src += 1
             continue
 
         tgt_id: str | None = None
         if rel.target_file:
-            tgt_id = tgt_map.get((rel.target_name, rel.target_file))
+            tgt_id = by_name_file.get((rel.target_name, rel.target_file))
         if tgt_id is None:
-            tgt_id = tgt_map.get((rel.target_name, ""))
+            tgt_id = by_name_only.get(rel.target_name)
 
-        if not tgt_id or src_id == tgt_id:
+        if not tgt_id:
+            skipped_no_tgt += 1
+            continue
+        if src_id == tgt_id:
+            skipped_self += 1
             continue
 
-        try:
-            query_surreal(
-                f"RELATE $src->{rel.kind}->$tgt SET source_line = $line",
-                {"src": src_id, "tgt": tgt_id, "line": rel.source_line},
-            )
-        except Exception as e:
-            logger.warning("Edge upsert failed: %s", e)
+        edge = {"in": src_id, "out": tgt_id, "source_line": rel.source_line}
+        by_kind.setdefault(rel.kind, []).append(edge)
+
+    total_edges = sum(len(v) for v in by_kind.values())
+    logger.debug(
+        "Resolved %d edges (%d no-src, %d no-tgt, %d self-loop) in %.1fs",
+        total_edges,
+        skipped_no_src,
+        skipped_no_tgt,
+        skipped_self,
+        time.monotonic() - t0,
+    )
+
+    # -- 3. Batch insert edges per kind ------------------------------------
+    t2 = time.monotonic()
+    batch_size = 500
+    for kind, edges in by_kind.items():
+        _assert_valid_table(kind)
+        for i in range(0, len(edges), batch_size):
+            batch = edges[i : i + batch_size]
+            try:
+                _query_with_retry(
+                    f"INSERT RELATION INTO {kind} $records",
+                    {"records": batch},
+                )
+            except Exception as e:
+                logger.warning(
+                    "Batch insert of %d %s edges failed: %s. Falling back to individual inserts.",
+                    len(batch),
+                    kind,
+                    e,
+                )
+                for edge in batch:
+                    try:
+                        _query_with_retry(
+                            f"RELATE $src->{kind}->$tgt SET source_line = $line",
+                            {
+                                "src": edge["in"],
+                                "tgt": edge["out"],
+                                "line": edge["source_line"],
+                            },
+                        )
+                    except Exception as e2:
+                        logger.warning("Individual edge upsert failed: %s", e2)
+
+    logger.info(
+        "Upserted %d edges in %.1fs (total: %.1fs)",
+        total_edges,
+        time.monotonic() - t2,
+        time.monotonic() - t0,
+    )
 
 
 def _get_edge_targets(name: str, edge_table: str, repo: str = "") -> set[str]:
     """Get target names from a graph edge table, scoped by repo."""
+    _assert_valid_table(edge_table)
     try:
         result = query_surreal(
             f"SELECT out.name AS target FROM {edge_table} WHERE in.name = $name AND in.repo = $repo",  # nosec B608
@@ -1121,6 +1430,7 @@ def _get_edge_targets(name: str, edge_table: str, repo: str = "") -> set[str]:
 
 def _get_edge_sources(name: str, edge_table: str, repo: str = "") -> set[str]:
     """Get source names from a graph edge table, scoped by repo."""
+    _assert_valid_table(edge_table)
     try:
         result = query_surreal(
             f"SELECT in.name AS source FROM {edge_table} WHERE out.name = $name AND out.repo = $repo",  # nosec B608
@@ -1136,6 +1446,58 @@ def _get_edge_sources(name: str, edge_table: str, repo: str = "") -> set[str]:
             e,
         )
         return set()
+
+
+def _get_all_repo_edges(edge_table: str, repo: str) -> dict[str, set[str]]:
+    """Bulk-fetch ALL edges for an edge table scoped to a repo.
+
+    Returns a forward mapping: {source_name: {target_name, ...}}.
+    Build the reverse mapping in-memory from the same data.
+    """
+    _assert_valid_table(edge_table)
+    try:
+        result = query_surreal(
+            f"SELECT in.name AS src, out.name AS tgt FROM {edge_table}"  # nosec B608
+            " WHERE in.repo = $repo",
+            {"repo": repo},
+        )
+        rows = _raw_result_rows(result)
+        forward: dict[str, set[str]] = {}
+        for r in rows:
+            src = r.get("src", "")
+            tgt = r.get("tgt", "")
+            if src and tgt:
+                forward.setdefault(src, set()).add(tgt)
+        return forward
+    except Exception as e:
+        logger.warning("Bulk edge fetch failed for '%s': %s", edge_table, e)
+        return {}
+
+
+def _get_all_scope_edges(repo: str) -> dict[tuple[str, int, str], str]:
+    """Bulk-fetch ALL contains_edge records for a repo.
+
+    Returns {(filepath, line, name): parent_name}.
+    """
+    try:
+        result = query_surreal(
+            "SELECT in.name AS child, in.filepath AS fp, in.line AS line,"
+            " out.name AS parent FROM contains_edge WHERE in.repo = $repo",
+            {"repo": repo},
+        )
+        rows = _raw_result_rows(result)
+        scope_map: dict[tuple[str, int, str], str] = {}
+        for r in rows:
+            child = r.get("child", "")
+            fp = r.get("fp", "")
+            line = r.get("line")
+            parent = r.get("parent", "")
+            if child and fp and line is not None and parent:
+                scope_map[(fp, int(line), child)] = parent
+        return scope_map
+    except Exception as e:
+        logger.warning("Bulk scope fetch failed: %s", e)
+        return {}
 
 
 def _resolve_scope(tag: Tag, repo: str = "") -> str | None:
@@ -1168,23 +1530,32 @@ def _resolve_scope(tag: Tag, repo: str = "") -> str | None:
 
 
 def _bfs_upstream(
-    symbol_index, seed_names: set[str], max_depth: int, repo: str = ""
+    symbol_index,
+    seed_names: set[str],
+    max_depth: int,
+    repo: str = "",
+    edge_rev: dict[str, dict[str, set[str]]] | None = None,
 ) -> dict:
     """BFS traversal upstream — who depends on us (callers)."""
+    if edge_rev is None:
+        edge_rev = symbol_index._get_edge_cache(repo)[1]
+    callers_rev = edge_rev.get("calls", {})
+
     impact: dict[int, list[dict]] = {}
     visited: set[str] = set(seed_names)
     current = set(seed_names)
+    def_cache = symbol_index._get_def_cache(repo)
 
     for depth in range(1, max_depth + 1):
         next_level: set[str] = set()
         level_items: list[dict] = []
 
         for name in current:
-            for source in _get_edge_sources(name, "calls", repo):
+            for source in callers_rev.get(name, set()):
                 if source not in visited:
                     visited.add(source)
                     next_level.add(source)
-                    for d in symbol_index.find_definitions(source, repo=repo):
+                    for d in def_cache.get(source, []):
                         level_items.append(
                             {
                                 "name": source,
@@ -1204,23 +1575,32 @@ def _bfs_upstream(
 
 
 def _bfs_downstream(
-    symbol_index, seed_names: set[str], max_depth: int, repo: str = ""
+    symbol_index,
+    seed_names: set[str],
+    max_depth: int,
+    repo: str = "",
+    edge_fwd: dict[str, dict[str, set[str]]] | None = None,
 ) -> dict:
     """BFS traversal downstream — what we depend on (callees)."""
+    if edge_fwd is None:
+        edge_fwd = symbol_index._get_edge_cache(repo)[0]
+    calls_fwd = edge_fwd.get("calls", {})
+
     impact: dict[int, list[dict]] = {}
     visited: set[str] = set(seed_names)
     current = set(seed_names)
+    def_cache = symbol_index._get_def_cache(repo)
 
     for depth in range(1, max_depth + 1):
         next_level: set[str] = set()
         level_items: list[dict] = []
 
         for name in current:
-            for target in _get_edge_targets(name, "calls", repo):
+            for target in calls_fwd.get(name, set()):
                 if target not in visited:
                     visited.add(target)
                     next_level.add(target)
-                    for d in symbol_index.find_definitions(target, repo=repo):
+                    for d in def_cache.get(target, []):
                         level_items.append(
                             {
                                 "name": target,
@@ -1285,29 +1665,34 @@ def _assess_risk(
 # ---------------------------------------------------------------------------
 
 
-def _is_commit_indexed(commit_hash: str) -> bool:
-    """Check if the given commit is already indexed with the current schema."""
+def _is_commit_indexed(commit_hash: str, repo: str = "") -> bool:
+    """Check if the given commit is already indexed for this repo."""
+    if not commit_hash or not repo:
+        return False
     try:
         result = query_surreal(
-            "SELECT version, repo_commit FROM _schema_meta WHERE repo_commit = $hash LIMIT 1",
+            "SELECT repo_commit FROM _schema_meta WHERE repo_commit = $hash LIMIT 1",
             {"hash": commit_hash},
         )
         rows = _raw_result_rows(result)
-        if rows:
-            row = rows[0]
-            return bool(row.get("version") == SCHEMA_VERSION)
-        return False
+        return bool(rows and rows[0].get("repo_commit") == commit_hash)
     except Exception as e:
-        logger.warning("Failed to check if commit %s is indexed: %s", commit_hash, e)
+        logger.debug("Commit index check failed for %s: %s", commit_hash, e)
         return False
 
 
-def _mark_commit_indexed(commit_hash: str) -> None:
-    """Record the indexed commit hash and schema version in metadata."""
+def _mark_commit_indexed(commit_hash: str, repo: str = "") -> None:
+    """Record the indexed commit hash in a repo-specific metadata record."""
+    if not commit_hash or not repo:
+        return
     try:
-        query_surreal(
-            "UPDATE _schema_meta SET repo_commit = $hash, version = $ver",
-            {"hash": commit_hash, "ver": SCHEMA_VERSION},
+        # Deterministic record ID — one row per repo, upserted on re-index.
+        record_id = repo.replace("/", "_").replace(".", "_").replace("-", "_")
+        _query_with_retry(
+            "INSERT INTO _schema_meta {id: $rid, version: $ver, "
+            "repo_commit: $hash}"
+            " ON DUPLICATE KEY UPDATE repo_commit = $hash, version = $ver",
+            {"rid": record_id, "ver": SCHEMA_VERSION, "hash": commit_hash},
         )
     except Exception as e:
         logger.warning("Failed to mark commit indexed: %s", e)
@@ -1316,27 +1701,73 @@ def _mark_commit_indexed(commit_hash: str) -> None:
 def _clear_repo_data(repo: str = "") -> None:
     """Remove code intelligence data for a specific repo.
 
-    Only deletes graph definitions (records without embeddings) and graph
-    edges scoped to the given repo. Search chunks with embeddings are
-    preserved — they're owned by the indexing worker.
+    Deletes all graph edges and symbol definitions scoped to the given repo.
     """
-    tables = ["calls", "imports", "inherits", "contains_edge"]
-    for table in tables:
+    import time
+
+    t0 = time.monotonic()
+
+    # Clear edges using dot-notation (fast on SurrealDB v2).
+    edge_tables = ["calls", "imports", "inherits", "contains_edge"]
+    for table in edge_tables:
+        _assert_valid_table(table)
         try:
-            query_surreal(
+            result = _query_with_retry(
                 f"DELETE FROM {table} WHERE in.repo = $repo",  # nosec B608
                 {"repo": repo},
             )
+            rows = _raw_result_rows(result)
+            count = len(rows)
+            logger.debug("Cleared %d edges from %s for repo %s", count, table, repo)
         except Exception as e:
             logger.warning("Failed to clear table '%s' during re-index: %s", table, e)
-    # Only clear symbol records that are graph definitions (no embedding)
+
+    # Clear ALL symbols for this repo
     try:
-        query_surreal(
-            "DELETE FROM symbol WHERE embedding IS NULL AND repo = $repo",
+        result = _query_with_retry(
+            "DELETE FROM symbol WHERE repo = $repo",
             {"repo": repo},
         )
+        rows = _raw_result_rows(result)
+        count = len(rows)
+        logger.debug("Cleared %d symbols for repo %s", count, repo)
     except Exception as e:
-        logger.warning("Failed to clear symbol definitions during re-index: %s", e)
+        logger.warning("Failed to clear symbols during re-index: %s", e)
+
+    logger.info("Cleared repo data for %s in %.1fs", repo, time.monotonic() - t0)
+
+
+def _clear_repo_files(repo: str, files: list[str]) -> None:
+    """Remove code intelligence data for specific files within a repo.
+
+    Used for incremental re-indexing: only deletes data for the changed
+    files, leaving everything else intact.
+    """
+    edge_tables = ["calls", "imports", "inherits", "contains_edge"]
+    for filepath in files:
+        # Delete edges where the source symbol is in this file
+        for table in edge_tables:
+            _assert_valid_table(table)
+            try:
+                _query_with_retry(
+                    f"DELETE FROM {table} WHERE in.filepath = $fp AND in.repo = $repo",  # nosec B608
+                    {"fp": filepath, "repo": repo},
+                )
+            except Exception as e:
+                logger.debug(
+                    "Edge delete from %s for file %s failed: %s", table, filepath, e
+                )
+
+        # Delete symbol definitions for this file (no embedding)
+        try:
+            _query_with_retry(
+                "DELETE FROM symbol WHERE filepath = $fp AND repo = $repo",
+                {"fp": filepath, "repo": repo},
+            )
+        except Exception as e:
+            logger.debug("Symbol delete for file %s failed: %s", filepath, e)
+
+    logger.info("Cleared %d files for repo %s", len(files), repo)
 
 
 # ---------------------------------------------------------------------------
@@ -1345,7 +1776,30 @@ def _clear_repo_data(repo: str = "") -> None:
 
 
 def _get_head_commit(repo_path: Path) -> str:
-    """Get the HEAD commit hash from a git worktree."""
+    """Get the HEAD commit hash from a git worktree.
+
+    Tries ``git rev-parse HEAD`` first (correct for worktrees, shallow clones,
+    and packed refs) and falls back to direct file-reading only when the git
+    subprocess is unavailable.
+    """
+    import subprocess
+
+    # Fast, always-correct path: ask git directly
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            cwd=str(repo_path),
+            timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except Exception as e:
+        logger.debug("git rev-parse HEAD unavailable, falling back to file read: %s", e)
+
+    # Fallback: read git internals directly (fast but fragile on worktrees,
+    # shallow clones, and repos with packed refs)
     head_file = repo_path / ".git" / "HEAD"
     try:
         if head_file.is_file():
@@ -1368,23 +1822,9 @@ def _get_head_commit(repo_path: Path) -> str:
     except (OSError, ValueError):
         pass
 
-    try:
-        import subprocess
-
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            cwd=str(repo_path),
-            timeout=5,
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except Exception as e:
-        logger.warning("Failed to resolve HEAD commit via git command: %s", e)
-
     logger.warning(
-        "Could not resolve HEAD commit hash — returning 'unknown'. This may trigger unnecessary full re-indexing."
+        "Could not resolve HEAD commit hash — returning 'unknown'."
+        " This may trigger unnecessary full re-indexing."
     )
     return "unknown"
 
@@ -1394,29 +1834,52 @@ def _safe_repo_name(repo: str) -> str:
     return sanitize_repo_key(repo)
 
 
-def _parse_git_diff(diff_output: str) -> list[dict]:
-    """Parse git diff --unified=0 output to extract changed file + line ranges."""
+def _parse_git_diff(diff_output: str) -> dict:
+    """Parse git diff --unified=0 output to extract changed file + line ranges.
+
+    Also detects deleted or renamed files by tracking '--- a/' vs '+++ b/'.
+    Returns:
+        dict: {
+            "changes": [{"file": str, "ranges": [(int, int), ...]}],
+            "stale_files": [str, ...]
+        }
+    """
     changes: list[dict] = []
-    current_file: str | None = None
+    stale_files: list[str] = []
+    current_src_file: str | None = None
+    current_dst_file: str | None = None
     ranges: list[tuple[int, int]] = []
 
+    def flush():
+        nonlocal current_dst_file, ranges
+        if current_dst_file and ranges:
+            changes.append({"file": current_dst_file, "ranges": ranges})
+        current_dst_file = None
+        ranges = []
+
     for line in diff_output.splitlines():
-        if line.startswith("+++ b/"):
-            if current_file and ranges:
-                changes.append({"file": current_file, "ranges": ranges})
-            current_file = line[6:]
-            ranges = []
-        elif line.startswith("@@") and current_file:
+        if line.startswith("--- a/"):
+            flush()
+            current_src_file = line[6:]
+        elif line.startswith("+++ b/"):
+            current_dst_file = line[6:]
+            # If the source file differs from destination, the source is stale
+            if current_src_file and current_src_file != current_dst_file:
+                stale_files.append(current_src_file)
+            current_src_file = None
+        elif line.startswith("@@") and current_dst_file:
             m = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", line)
             if m:
                 start = int(m.group(1))
                 count = int(m.group(2)) if m.group(2) else 1
                 ranges.append((start, start + count - 1))
 
-    if current_file and ranges:
-        changes.append({"file": current_file, "ranges": ranges})
+    flush()
+    # Handle the case where a file was deleted but not renamed (no +++ b/ line)
+    if current_src_file and not current_dst_file:
+        stale_files.append(current_src_file)
 
-    return changes
+    return {"changes": changes, "stale_files": stale_files}
 
 
 def _get_symbols_in_range(
