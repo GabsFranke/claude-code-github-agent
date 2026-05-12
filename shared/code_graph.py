@@ -470,6 +470,35 @@ class SymbolIndex:
             {"name": name, "repo": scope},
         )
         tags = _rows_to_tags(_raw_result_rows(result))
+
+        # Fallback: if no rows with kind='definition', try without the
+        # kind filter and select definitions by category instead.  This
+        # handles cases where the indexing path stored the symbol without
+        # the expected kind value.
+        if not tags:
+            result = query_surreal(
+                "SELECT name, kind, category, filepath, line, end_line FROM symbol"
+                " WHERE name = $name AND repo = $repo",
+                {"name": name, "repo": scope},
+            )
+            all_tags = _rows_to_tags(_raw_result_rows(result))
+            def_categories = {"class", "function", "method", "variable", "decorator"}
+            tags = [t for t in all_tags if t.category in def_categories]
+            if tags:
+                logger.info(
+                    "find_definitions fallback for %r: found %d defs "
+                    "(kind column may be inconsistent, categories: %s)",
+                    name,
+                    len(tags),
+                    {t.category for t in tags},
+                )
+
+        logger.debug(
+            "find_definitions(name=%r, repo=%r) → %d results",
+            name,
+            scope,
+            len(tags),
+        )
         seen: set[tuple[str, int, str]] = set()
         deduped: list[Tag] = []
         for t in tags:

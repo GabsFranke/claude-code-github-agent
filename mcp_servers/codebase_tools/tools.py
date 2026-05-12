@@ -40,6 +40,8 @@ _symbol_index: SymbolIndex | None = None
 _ast_cache: dict[tuple[str, float], tuple[Any, bytes]] = {}
 _AST_CACHE_MAX_SIZE = 500
 _index_ready = threading.Event()
+_SEMANTIC_MAX_DISTANCE = float(os.getenv("SEMANTIC_MAX_DISTANCE", "0.5"))
+_RRF_K = 60
 
 # File type aliases for ripgrep
 _FILE_TYPE_MAP: dict[str, str] = {
@@ -112,10 +114,8 @@ def is_ready() -> bool:
 def warmup_surrealdb() -> None:
     """Pre-load SurrealDB HNSW index pages into memory.
 
-    Running a lightweight query forces SurrealDB to load index segments
-    into the page cache, avoiding a cold-start scenario where the first
-    k-NN search returns 0 rows or mutates internal structures during
-    iteration.
+    Running a k-NN probe forces SurrealDB to load HNSW index segments,
+    avoiding a cold-start where the first real search returns 0 rows.
 
     Safe to call before init — it is a no-op if SurrealDB is not
     connected.
@@ -123,7 +123,12 @@ def warmup_surrealdb() -> None:
     try:
         if not _sdb_is_initialized():
             return
-        query_surreal("SELECT count() FROM symbol LIMIT 1")
+        dim = int(os.getenv("EMBEDDING_DIMENSION", "1024"))
+        query_surreal(
+            "SELECT id FROM symbol WHERE embedding IS NOT NULL "
+            "AND embedding <|1,128|> $qvec LIMIT 1",
+            {"qvec": [0.0] * dim},
+        )
         logger.info("SurrealDB warmup complete")
     except Exception as e:
         logger.warning("SurrealDB warmup query failed: %s", e)
@@ -576,11 +581,13 @@ def _semantic_search(
         if not _sdb_is_initialized():
             init_surrealdb()
 
-        # Warm up SurrealDB — first query after startup may need to load
-        # HNSW index pages into memory. Without this, the k-NN below can
-        # return 0 rows even though the index has matching embeddings.
+        # Warm up SurrealDB — k-NN probe forces HNSW index page loading.
         try:
-            query_surreal("SELECT count() FROM symbol LIMIT 1")
+            query_surreal(
+                "SELECT id FROM symbol WHERE embedding IS NOT NULL "
+                "AND embedding <|1,128|> $qvec LIMIT 1",
+                {"qvec": [0.0] * embedding_dim},
+            )
         except Exception:
             pass
 
@@ -630,6 +637,16 @@ def _semantic_search(
 
         output: list[dict[str, Any]] = []
         for row in rows:
+            score = row.get("score")
+            if score is not None and score > _SEMANTIC_MAX_DISTANCE:
+                logger.debug(
+                    "Skipping low-relevance hit: %s (distance=%.3f > %.3f)",
+                    row.get("name", "?"),
+                    score,
+                    _SEMANTIC_MAX_DISTANCE,
+                )
+                continue
+
             content = row.get("content", "")
             content_truncated = False
             if content and len(content) > 2000:
@@ -643,7 +660,7 @@ def _semantic_search(
                     "line": row.get("line", 0),
                     "end_line": row.get("end_line", 0),
                     "content": content,
-                    "score": row.get("score"),
+                    "score": score,
                 }
             )
             if content_truncated:
@@ -671,41 +688,40 @@ def _hybrid_search(
     max_results: int,
     kind_filter: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Hybrid search combining text + semantic with deduplication.
+    """Hybrid search combining text + semantic via Reciprocal Rank Fusion.
 
-    Runs both search modes independently and merges results. Semantic results
-    are prioritized since they capture meaning, not just literal matches.
-    Deduplicates by (file, line) key. Errors from semantic search (e.g.
-    SurrealDB unreachable) are surfaced in the result list.
+    Runs both search modes independently and merges with RRF scoring.
+    Items found by both sources are marked ``"source": "hybrid"``.
+    Errors from semantic search are surfaced in the result list.
     """
     text_results = _fallback_text_search(pattern, file_type, max_results)
     semantic_results = _semantic_search(pattern, file_type, max_results, kind_filter)
 
-    # Separate error results from valid semantic results
     errors = [r for r in semantic_results if "error" in r]
     valid_semantic = [r for r in semantic_results if "error" not in r]
 
-    seen: set[tuple[str, int]] = set()
-    merged: list[dict[str, Any]] = []
+    rrf_scores: dict[tuple[str, int], float] = {}
+    item_map: dict[tuple[str, int], dict[str, Any]] = {}
 
-    # Add semantic results first (ranked by relevance)
-    for r in valid_semantic:
+    for rank, r in enumerate(valid_semantic, 1):
         key = (r["file"], r["line"])
-        if key not in seen:
-            seen.add(key)
-            r["source"] = "semantic"
-            merged.append(r)
+        rrf_scores[key] = rrf_scores.get(key, 0) + 1.0 / (_RRF_K + rank)
+        r["source"] = "semantic"
+        item_map[key] = r
 
-    # Add non-overlapping text results
-    for r in text_results:
+    for rank, r in enumerate(text_results, 1):
         key = (r["file"], r["line"])
-        if key not in seen:
-            seen.add(key)
+        rrf_scores[key] = rrf_scores.get(key, 0) + 1.0 / (_RRF_K + rank)
+        if key not in item_map:
             r["source"] = "text"
-            merged.append(r)
+            item_map[key] = r
+        else:
+            item_map[key]["source"] = "hybrid"
 
-    # Prepend any error dicts so the caller knows semantic search had issues
-    return errors + merged[:max_results]
+    sorted_keys = sorted(rrf_scores, key=lambda k: rrf_scores[k], reverse=True)
+    merged = [item_map[k] for k in sorted_keys[:max_results]]
+
+    return errors + merged
 
 
 def _fallback_text_search(

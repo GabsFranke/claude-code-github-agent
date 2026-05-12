@@ -5,6 +5,7 @@ definitions from the codebase. Stores extracted records in SurrealDB
 for querying by agents.
 """
 
+import ast
 import logging
 import re
 from dataclasses import dataclass, field
@@ -205,6 +206,138 @@ def extract_routes(repo_path: Path) -> list[RouteDef]:
 # ---------------------------------------------------------------------------
 
 
+def _extract_required_params_from_ast(schema_node: ast.AST) -> list[str]:
+    """Extract required params list from an inputSchema dict node."""
+    if not isinstance(schema_node, ast.Dict):
+        return []
+    for key, value in zip(schema_node.keys, schema_node.values):
+        if (
+            isinstance(key, ast.Constant)
+            and key.value == "required"
+            and isinstance(value, ast.List)
+        ):
+            return [
+                elt.value
+                for elt in value.elts
+                if isinstance(elt, ast.Constant) and isinstance(elt.value, str)
+            ]
+    return []
+
+
+def _extract_tools_from_ast(
+    source: str, server_file: str, server_name: str
+) -> list[ToolDef]:
+    """Extract tool definitions by parsing the Python AST.
+
+    Handles both parenthesized concatenated descriptions and plain strings.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+
+    tools: list[ToolDef] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict):
+            continue
+
+        name = None
+        description = None
+        required_params: list[str] = []
+
+        for key, value in zip(node.keys, node.values):
+            if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
+                continue
+            if (
+                key.value == "name"
+                and isinstance(value, ast.Constant)
+                and isinstance(value.value, str)
+            ):
+                name = value.value
+            elif (
+                key.value == "description"
+                and isinstance(value, ast.Constant)
+                and isinstance(value.value, str)
+            ):
+                description = value.value
+            elif key.value == "inputSchema":
+                required_params = _extract_required_params_from_ast(value)
+
+        if name and description:
+            tools.append(
+                ToolDef(
+                    name=name,
+                    description=description[:300],
+                    server_file=server_file,
+                    server_name=server_name,
+                    required_params=required_params,
+                )
+            )
+    return tools
+
+
+def _extract_tools_regex(
+    source: str, server_file: str, server_name: str
+) -> list[ToolDef]:
+    """Fallback regex extraction for when AST parsing fails."""
+    tools: list[ToolDef] = []
+    seen_names: set[str] = set()
+
+    # Pattern A: plain string description  ("description": "...")
+    for m in re.finditer(
+        r'\{\s*"name"\s*:\s*"(\w+)"\s*,\s*"description"\s*:\s*"([^"]{1,300})"',
+        source,
+    ):
+        name, desc = m.group(1), m.group(2)
+        tools.append(
+            ToolDef(
+                name=name,
+                description=desc,
+                server_file=server_file,
+                server_name=server_name,
+            )
+        )
+        seen_names.add(name)
+
+    # Pattern B: parenthesized description  ("description": ("..." "..."))
+    for m in re.finditer(
+        r'\{\s*"name"\s*:\s*"(\w+)"\s*,\s*"description"\s*:\s*\(\s*(.*?)\s*\)',
+        source,
+        re.DOTALL,
+    ):
+        name = m.group(1)
+        if name in seen_names:
+            continue
+        # Extract all quoted fragments from inside the parens
+        fragments = re.findall(r'"([^"]*)"', m.group(2))
+        desc = "".join(fragments)[:300]
+        if desc:
+            tools.append(
+                ToolDef(
+                    name=name,
+                    description=desc,
+                    server_file=server_file,
+                    server_name=server_name,
+                )
+            )
+            seen_names.add(name)
+
+    # Extract required params from nearby context for each tool
+    for tool in tools:
+        escaped = re.escape(tool.name)
+        ctx = re.search(
+            rf'"{escaped}".*?"required"\s*:\s*\[([^\]]*)\]',
+            source,
+            re.DOTALL,
+        )
+        if ctx:
+            tool.required_params = [
+                p.strip().strip('"') for p in ctx.group(1).split(",") if p.strip()
+            ]
+
+    return tools
+
+
 def extract_mcp_tools(repo_path: Path) -> list[ToolDef]:
     """Extract MCP tool definitions from MCP server files."""
     tools: list[ToolDef] = []
@@ -227,42 +360,14 @@ def extract_mcp_tools(repo_path: Path) -> list[ToolDef]:
         except OSError:
             continue
 
-        # Find all tool name blocks
-        # Each tool definition in the JSON schema looks like:
-        # {"name": "tool_name", "description": "...", ...}
-        tool_blocks = re.finditer(
-            r'\{\s*"name"\s*:\s*"(\w+)"\s*,'
-            r'\s*"description"\s*:\s*\(\s*"([^"]*(?:"[^"]*"[^"]*)*)"\s*\)',
-            source,
-            re.DOTALL,
-        )
+        server_rel = str(server_file.relative_to(repo_path)).replace("\\", "/")
 
-        for block in tool_blocks:
-            name = block.group(1)
-            description = block.group(2)[:300]
+        extracted = _extract_tools_from_ast(source, server_rel, server_name)
+        if extracted:
+            tools.extend(extracted)
+            continue
 
-            # Find required params in the nearby context
-            block_start = block.start()
-            context = source[block_start : block_start + 2000]
-            req_match = _MCP_REQUIRED_RE.search(context)
-            required = []
-            if req_match:
-                params = req_match.group(1)
-                required = [
-                    p.strip().strip('"') for p in params.split(",") if p.strip()
-                ]
-
-            tools.append(
-                ToolDef(
-                    name=name,
-                    description=description,
-                    server_file=str(server_file.relative_to(repo_path)).replace(
-                        "\\", "/"
-                    ),
-                    server_name=server_name,
-                    required_params=required,
-                )
-            )
+        tools.extend(_extract_tools_regex(source, server_rel, server_name))
 
     return tools
 
