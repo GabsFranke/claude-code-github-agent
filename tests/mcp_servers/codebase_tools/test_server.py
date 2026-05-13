@@ -29,6 +29,7 @@ def _mock_surrealdb():
         patch("shared.surrealdb_client.query_surreal", side_effect=fake_query),
         patch("shared.code_graph.is_initialized", return_value=True),
         patch("shared.code_graph.apply_schema"),
+        patch("shared.code_graph.query_surreal", side_effect=fake_query),
         patch("mcp_servers.codebase_tools.tools.init_surrealdb"),
     ):
         yield fake_db
