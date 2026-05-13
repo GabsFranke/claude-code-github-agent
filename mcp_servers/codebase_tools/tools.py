@@ -143,10 +143,20 @@ def init_repo(repo_path: str) -> None:
     surrealdb_url = os.getenv("SURREALDB_URL", "ws://localhost:8000/rpc")
     init_surrealdb(surrealdb_url)
 
-    # Initialize symbol index for querying. Skip build — the indexing
-    # worker is responsible for populating SurrealDB. We just need the
-    # SymbolIndex instance for query methods (find_definitions, etc.).
+    # Initialize symbol index and build from source files so that
+    # query methods (find_definitions, trace_flow, etc.) return results.
+    # The indexing worker handles incremental updates; this initial build
+    # ensures the index is usable immediately after init.
     _symbol_index = SymbolIndex(repo_path=_repo_path, repo=_repo)
+    try:
+        _symbol_index.build()
+    except Exception:
+        logger.warning(
+            "Symbol index build failed for %s (repo=%s); "
+            "queries will return empty results until rebuilt.",
+            _repo_path,
+            _repo,
+        )
     _index_ready.set()
     logger.info("Symbol index ready for %s (repo=%s)", _repo_path, _repo)
 
