@@ -409,9 +409,13 @@ class TestSemanticSearch:
             )
             assert isinstance(results, list)
             assert len(results) >= 1
-            assert results[0]["name"] == "Database"
-            assert results[0]["kind"] == "definition"
-            assert "score" in results[0]
+            # FakeSurrealDB doesn't compute vector distances, so result order
+            # is not deterministic — check that Database appears somewhere.
+            names = [r["name"] for r in results]
+            assert "Database" in names
+            db_result = next(r for r in results if r["name"] == "Database")
+            assert db_result["kind"] == "definition"
+            assert "score" in db_result
 
     def test_semantic_search_filters_by_file_type(
         self, initialized_repo: Path, _populate_symbols: None, monkeypatch
@@ -499,7 +503,7 @@ class TestHybridSearch:
             # Each result should have a "source" field
             for r in results:
                 assert "source" in r
-                assert r["source"] in ("semantic", "text")
+                assert r["source"] in ("semantic", "text", "hybrid")
             # At least one semantic result
             assert any(r["source"] == "semantic" for r in results)
 

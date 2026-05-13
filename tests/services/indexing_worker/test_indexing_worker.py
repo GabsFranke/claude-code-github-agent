@@ -8,7 +8,6 @@ symbol ID generation, git diff, metadata read/write, and worktree management.
 
 import hashlib
 import json
-import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -530,12 +529,13 @@ class TestEmbedTexts:
 
 class TestSymbolId:
     def test_deterministic(self):
-        """Same inputs should always produce the same UUID."""
+        """Same inputs should always produce the same ID."""
         id1 = _symbol_id("src/app.py", 10, "function", "hello")
         id2 = _symbol_id("src/app.py", 10, "function", "hello")
         assert id1 == id2
-        # Should be a valid UUID
-        uuid.UUID(id1)
+        # Should be a 40-char hex string (SHA-256 truncated), not a UUID
+        assert len(id1) == 40
+        assert all(c in "0123456789abcdef" for c in id1)
 
     def test_different_for_different_inputs(self):
         """Different inputs should produce different UUIDs."""

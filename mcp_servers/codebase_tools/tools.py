@@ -81,6 +81,50 @@ _PY_DOCSTRING_QUERY = ("(expression_statement (string)) @node",)
 # ---------------------------------------------------------------------------
 
 
+def _derive_repo_from_git(repo_path: Path) -> str:
+    """Derive 'owner/name' repo slug from git remote or environment.
+
+    Resolution order:
+      1. GITHUB_REPOSITORY env var (backward compat, e.g. CI)
+      2. git remote get-url origin → parse owner/name
+      3. Empty string with warning
+    """
+    from_env = os.getenv("GITHUB_REPOSITORY", "")
+    if from_env:
+        return from_env
+
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            cwd=str(repo_path),
+        )
+        if result.returncode == 0:
+            url = result.stdout.strip()
+            # SSH: git@github.com:owner/name.git
+            if ":" in url and "@" in url:
+                path = url.split(":", 1)[1]
+                if path.endswith(".git"):
+                    path = path[:-4]
+                return path
+            # HTTPS: https://github.com/owner/name.git
+            if "://" in url:
+                from urllib.parse import urlparse
+
+                parsed = urlparse(url)
+                path = parsed.path.strip("/")
+                if path.endswith(".git"):
+                    path = path[:-4]
+                return path
+    except Exception:
+        pass
+
+    logger.warning("Could not derive repo from git remote for %s", repo_path)
+    return ""
+
+
 def init_repo(repo_path: str) -> None:
     """Initialize module state. Called once at server startup.
 
@@ -90,7 +134,7 @@ def init_repo(repo_path: str) -> None:
     global _repo_path, _repo, _symbol_index
 
     _repo_path = Path(repo_path).resolve()
-    _repo = os.getenv("GITHUB_REPOSITORY", "")
+    _repo = _derive_repo_from_git(_repo_path)
 
     if not _repo_path.is_dir():
         raise ValueError(f"Repo path does not exist: {_repo_path}")
@@ -125,7 +169,7 @@ def warmup_surrealdb() -> None:
             return
         dim = int(os.getenv("EMBEDDING_DIMENSION", "1024"))
         query_surreal(
-            "SELECT id FROM symbol WHERE embedding IS NOT NULL "
+            "SELECT id FROM symbol WHERE embedding != NONE "
             "AND embedding <|1,128|> $qvec LIMIT 1",
             {"qvec": [0.0] * dim},
         )
@@ -607,9 +651,8 @@ def _semantic_search(
             conditions.append("kind = $kind")
             params["kind"] = kind_filter
 
-        if _repo:
-            conditions.append("repo = $repo")
-            params["repo"] = _repo
+        conditions.append("repo = $repo")
+        params["repo"] = _repo
 
         kind_condition = ""
         if conditions:
@@ -619,7 +662,7 @@ def _semantic_search(
             f"""SELECT name, kind, filepath, line, end_line, content,
                        vector::distance::knn() AS score
                 FROM symbol
-                WHERE embedding IS NOT NULL {kind_condition}
+                WHERE embedding != NONE {kind_condition}
                 AND embedding <|{max_results},128|> $qvec
                 ORDER BY score
                 LIMIT {max_results}""",

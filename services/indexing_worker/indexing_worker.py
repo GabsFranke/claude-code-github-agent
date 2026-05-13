@@ -16,7 +16,6 @@ import os
 import shutil
 import sys
 import tempfile
-import uuid
 from pathlib import Path
 
 from shared import dlq as _dlq_mod, setup_graceful_shutdown
@@ -298,10 +297,17 @@ async def batch_embed(texts: list[str], redis_client=None) -> list[list[float]]:
 # ---------------------------------------------------------------------------
 
 
-def _symbol_id(filepath: str, start_line: int, kind: str, name: str) -> str:
-    """Deterministic UUID v5 record ID for deduplication."""
-    raw = f"{filepath}:{start_line}:{kind}:{name}"
-    return uuid.uuid5(uuid.NAMESPACE_URL, raw).hex
+def _symbol_id(
+    filepath: str, start_line: int, kind: str, name: str, repo: str = ""
+) -> str:
+    """Deterministic record ID matching code_graph._upsert_symbols.
+
+    Uses SHA-256 of the composite key so that UPSERT updates existing
+    symbol records (created by code_graph.build) instead of creating
+    duplicates. The ID format must match code_graph._upsert_symbols.
+    """
+    raw_key = f"{repo}:{filepath}:{kind}:{name}:{start_line}"
+    return hashlib.sha256(raw_key.encode()).hexdigest()[:40]
 
 
 async def upsert_chunks(
@@ -339,10 +345,15 @@ async def upsert_chunks(
                     "Failed to delete symbols for removed file %s: %s", filepath, e
                 )
 
-    # Upsert each chunk individually via its deterministic record ID
+    # Upsert each chunk individually via its deterministic record ID.
+    # Use MERGE (not CONTENT) so that existing fields from code_graph
+    # (category, kind, etc.) are preserved and only embedding + content
+    # are added.
     count = 0
     for chunk, embedding in zip(chunks, embeddings):
-        record_id = _symbol_id(chunk.filepath, chunk.start_line, chunk.kind, chunk.name)
+        record_id = _symbol_id(
+            chunk.filepath, chunk.start_line, chunk.kind, chunk.name, repo=repo
+        )
         record = {
             "name": chunk.name,
             "kind": "definition",
@@ -356,7 +367,7 @@ async def upsert_chunks(
             "content": chunk.content[:2000],
         }
         try:
-            db.query(f"UPSERT symbol:{record_id} CONTENT $record", {"record": record})
+            db.query(f"UPSERT symbol:{record_id} MERGE $record", {"record": record})
             count += 1
         except Exception as e:
             logger.warning(

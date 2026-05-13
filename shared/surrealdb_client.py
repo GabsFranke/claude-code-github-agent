@@ -38,6 +38,11 @@ _surreal_creds: dict[str, str] = {}
 _init_lock = threading.Lock()
 _async_init_lock: asyncio.Lock | None = None
 
+# Circuit breaker: track consecutive re-auth failures to break infinite loops
+_reauth_failure_count: int = 0
+_max_reauth_failures: int = 3
+_reauth_lock = threading.Lock()
+
 
 def _get_async_init_lock() -> asyncio.Lock:
     """Lazily create the async init lock (cannot be created before an event loop exists)."""
@@ -186,33 +191,77 @@ async def get_async_surreal() -> Any:
 def reauthenticate_surreal() -> None:
     """Re-authenticate the SurrealDB client after a session token expiry.
 
-    Call this when a SurrealDB operation returns 401 Unauthorized.
-    Re-signs in using the stored credentials and re-selects the namespace/database.
+    Closes the stale connection and creates a fresh one, rather than
+    just re-signing in on the old connection (which can leave the
+    WebSocket in an invalid state).  Uses a circuit breaker to prevent
+    infinite re-auth loops when the server is persistently unavailable.
     """
-    global _surreal
+    global _surreal, _reauth_failure_count
 
     if _surreal is None or not _surreal_creds:
         raise RuntimeError("SurrealDB not initialized. Call init_surrealdb() first.")
 
-    logger.info("Re-authenticating SurrealDB connection (session expired)")
-    _surreal.signin(
-        {
-            "username": _surreal_creds["user"],
-            "password": _surreal_creds["password"],
-        }
-    )
-    _surreal.use(_surreal_creds["ns"], _surreal_creds["db"])
+    with _reauth_lock:
+        # Circuit breaker: stop retrying if re-auth keeps failing
+        if _reauth_failure_count >= _max_reauth_failures:
+            raise RuntimeError(
+                f"SurrealDB re-authentication failed {_reauth_failure_count} "
+                f"consecutive times. Circuit breaker tripped — giving up."
+            )
+
+        logger.info("Re-authenticating SurrealDB connection (session expired)")
+        try:
+            # Close the old connection first — a stale WebSocket may not
+            # accept a new signin, so we must create a fresh client.
+            try:
+                _surreal.close()
+            except Exception:
+                pass
+
+            _surreal = Surreal(_surreal_creds["url"])
+            _surreal.signin(
+                {
+                    "username": _surreal_creds["user"],
+                    "password": _surreal_creds["password"],
+                }
+            )
+            _surreal.use(_surreal_creds["ns"], _surreal_creds["db"])
+            _reauth_failure_count = 0  # Reset on success
+        except Exception as e:
+            _reauth_failure_count += 1
+            logger.error(
+                "SurrealDB re-authentication failed (attempt %d/%d): %s",
+                _reauth_failure_count,
+                _max_reauth_failures,
+                e,
+            )
+            raise
 
 
 def query_surreal(query: str, vars: dict | None = None) -> Any:
     """Execute a SurrealDB query with automatic re-authentication on 401.
 
     Wraps db.query() with retry logic: if the query fails with a 401
-    Unauthorized error, re-authenticates and retries once.
+    Unauthorized error, re-authenticates and retries once.  A circuit
+    breaker prevents infinite re-auth loops when the server is
+    persistently unavailable.
     """
+    global _reauth_failure_count
+
+    # Circuit breaker already tripped — fail fast
+    if _reauth_failure_count >= _max_reauth_failures:
+        raise RuntimeError(
+            f"SurrealDB circuit breaker open — {_reauth_failure_count} "
+            f"consecutive re-auth failures. Will not retry."
+        )
+
     db = get_surreal()
     try:
-        return db.query(query, vars)
+        result = db.query(query, vars)
+        # Reset circuit breaker on successful query
+        if _reauth_failure_count > 0:
+            _reauth_failure_count = 0
+        return result
     except Exception as e:
         err_msg = str(e)
         if "401" in err_msg or "Unauthorized" in err_msg:
@@ -230,9 +279,19 @@ def is_initialized() -> bool:
     return _initialized and _surreal is not None
 
 
+def reset_circuit_breaker() -> None:
+    """Reset the re-auth circuit breaker.
+
+    Call this after fixing the SurrealDB connection (e.g. after a restart)
+    to allow queries to resume.
+    """
+    global _reauth_failure_count
+    _reauth_failure_count = 0
+
+
 def close_surreal() -> None:
-    """Close all singleton SurrealDB clients."""
-    global _surreal, _async_surreal, _initialized, _surreal_creds  # noqa: PLW0603
+    """Close all singleton SurrealDB clients and reset state."""
+    global _surreal, _async_surreal, _initialized, _surreal_creds, _reauth_failure_count  # noqa: PLW0603
 
     if _surreal is not None:
         try:
@@ -244,6 +303,7 @@ def close_surreal() -> None:
         _async_surreal = None
     _initialized = False
     _surreal_creds = {}
+    _reauth_failure_count = 0
 
 
 # ---------------------------------------------------------------------------

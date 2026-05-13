@@ -315,6 +315,11 @@ class FakeSurrealDB:
             field = m.group(1).lower()
             results = [r for r in results if r.get(field) is not None]
 
+        # Parse != NONE / != NULL conditions: WHERE field != NONE
+        for m in re.finditer(r"(\w+)\s*!=\s*(?:NONE|NULL)", sql, re.IGNORECASE):
+            field = m.group(1).lower()
+            results = [r for r in results if r.get(field) is not None]
+
         # LIMIT
         limit_m = re.search(r"LIMIT\s+(\d+)", sql, re.IGNORECASE)
         if limit_m:

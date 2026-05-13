@@ -966,6 +966,9 @@ def _query_with_retry(
     """Execute a SurrealDB query with exponential back-off on transient failures.
 
     Retries up to *retries* times, doubling the sleep after each attempt.
+    Does NOT retry 401/authentication errors — query_surreal already
+    handles those with re-authentication, so persistent 401s indicate
+    a problem that retrying won't fix.
     Raises the last exception if all retries are exhausted.
     """
     import time as _time
@@ -974,8 +977,19 @@ def _query_with_retry(
     for attempt in range(retries):
         try:
             return query_surreal(query, params)
+        except RuntimeError:
+            # Circuit breaker tripped or init error — retrying won't help
+            raise
         except Exception as exc:
             last_exc = exc
+            err_msg = str(exc)
+            # Don't retry auth errors — query_surreal already tried re-auth
+            if (
+                "401" in err_msg
+                or "Unauthorized" in err_msg
+                or "circuit breaker" in err_msg.lower()
+            ):
+                raise
             if attempt < retries - 1:
                 _time.sleep(backoff * (2**attempt))
             else:
