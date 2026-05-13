@@ -49,7 +49,7 @@ The agent runs Claude SDK with the full Claude Code feature set. Because `~/.cla
 
 - **Plugins** — Install with `/plugin` in Claude Code CLI (choose user scope). Built-in plugins include PR review, CI failure analysis, and retrospector. User-installed plugins in `~/.claude/plugins/` are picked up automatically.
 - **Skills** — Any `~/.claude/skills/<skill-name>/SKILL.md` is discovered by the SDK and invokable via the `Skill` tool. Create your own or install from the community.
-- **MCP servers** — Servers installed with `claude mcp add --scope user` are available inside Docker when `ALLOW_HOST_MCP=true` (default). The MCP proxy bridges them over SSE.
+- **MCP servers** — When `ALLOW_HOST_MCP=true` (default), tool permissions for host MCP servers are auto-discovered from `~/.claude.json`. Only HTTP-based servers reachable from inside Docker (e.g., via `host.docker.internal`) will work — stdio-based host servers are not proxied.
 - **Memory** — Persistent per-repo knowledge across sessions. The `@memory-extractor` subagent reads session transcripts after each run and updates memory files.
 - **Hooks** — Event-driven scripts on `Stop`, `SubagentStop`, and other lifecycle events. Used for Langfuse tracing and transcript persistence.
 - **Subagents** — Delegate to specialized agents via the `Task` tool. Each plugin contributes its own agents (12 built in across 4 plugins).

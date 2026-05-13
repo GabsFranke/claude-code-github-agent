@@ -118,11 +118,11 @@ ANTHROPIC_VERTEX_REGION=us-central1
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ALLOW_HOST_MCP` | `true` | Discover MCP servers from host's `~/.claude.json` inside Docker containers |
+| `ALLOW_HOST_MCP` | `true` | Auto-discover host MCP server names from `~/.claude.json` and add their tool permissions. Only grants tool access — does NOT bridge stdio servers through the MCP proxy. Host servers must be independently reachable from inside Docker (e.g., HTTP servers via `host.docker.internal`). |
 | `WORKER_SESSION_PERSIST` | `true` | Persist conversation state so users can continue multi-turn sessions |
 | `SESSION_PROXY_URL` | `http://localhost:10001` | URL for the session proxy WebSocket service. Used by worker and sandbox services to generate live-view links |
 
-When `ALLOW_HOST_MCP=true`, the sandbox worker reads MCP server definitions from your host `~/.claude.json` (the same file Claude Code CLI uses). This means any MCP server you install with `claude mcp add --scope user` on the host is automatically available to the agent inside Docker — no manual configuration needed.
+When `ALLOW_HOST_MCP=true`, the SDK builder reads MCP server names from your host `~/.claude.json` and adds their tool patterns (`mcp__{name}__*`) to the agent's allowed tool list. This grants **tool permissions only** — it does not bridge those servers through the MCP proxy. For host MCP servers to actually work inside Docker, they must be independently reachable from the container. HTTP-based servers work if they're accessible via `host.docker.internal`, but stdio-based host servers will not work unless separately proxied.
 
 The `~/.claude/` directory is bind-mounted read-write, so plugins and skills installed on the host via Claude Code CLI are also discovered automatically. On first run, built-in plugins and skills are seeded into `~/.claude/` (without overwriting existing files).
 

@@ -300,7 +300,7 @@ Services: webhook, worker, sandbox_worker, mcp_proxy, repo_sync, memory_worker, 
 
 Volumes: repo-cache, agent-memory, transcripts, surrealdb-data
 
-**Host `~/.claude/` integration**: The sandbox worker bind-mounts `~/.claude/` from your host. This means MCP servers, plugins, and skills you install with Claude Code CLI on the host are automatically available inside Docker. See [CONFIGURATION.md](CONFIGURATION.md) for `ALLOW_HOST_MCP` details.
+**Host `~/.claude/` integration**: The sandbox worker bind-mounts `~/.claude/` from your host. Plugins and skills installed with Claude Code CLI on the host are automatically discovered inside Docker. MCP server tool permissions are also auto-discovered when `ALLOW_HOST_MCP=true`, but only HTTP-based host servers reachable via `host.docker.internal` will function — stdio-based host MCP servers are not proxied. See [CONFIGURATION.md](CONFIGURATION.md) for details.
 
 **Full** (with Langfuse observability):
 

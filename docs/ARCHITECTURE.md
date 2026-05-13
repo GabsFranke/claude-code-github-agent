@@ -58,7 +58,7 @@ flowchart LR
     AGENT --> MEM_MCP[Memory<br/>MCP]
     AGENT --> |SSE| MCPPROXY[MCP Proxy<br/>:18000]
     MCPPROXY --> LOCAL_MCP[Local MCP<br/>Servers]
-    MCPPROXY --> |host ~/.claude.json| HOST_MCP[Host MCP<br/>Servers]
+    AGENT -.-> |ALLOW_HOST_MCP<br/>tool permissions only| HOST_MCP[Host MCP<br/>Servers]
 
     PP --> MEMQ[(Memory<br/>Queue)]
     PP --> RETROQ[(Retrospector<br/>Queue)]
@@ -594,15 +594,15 @@ Plugins are auto-discovered from `~/.claude/plugins/` at SDK build time via `SDK
 
 **Location**: `services/mcp_proxy/`
 **Port**: 18000
-**Purpose**: Bridges stdio MCP servers to HTTP/SSE so Docker containers can access them
+**Purpose**: Bridges the app's stdio MCP servers to HTTP/SSE so Docker containers can access them
 
-The MCP proxy wraps each stdio MCP server (codebase_tools, github_actions) as an SSE endpoint at `http://mcp_proxy:18000/mcp/{server_name}/sse`. Workers connect via `socat` port forwarding (`localhost:18000 → mcp_proxy:18000`).
+The MCP proxy spawns each stdio MCP server (codebase_tools, github_actions) as a child process and exposes it as an SSE endpoint at `http://mcp_proxy:18000/mcp/{server_name}/sse`. Workers connect via `socat` port forwarding (`localhost:18000 → mcp_proxy:18000`).
 
 It also bridges host services into the Docker network:
 - `localhost:11434` → host Ollama (via `host.docker.internal:11434`)
 - `localhost:8000` → SurrealDB
 
-When `ALLOW_HOST_MCP=true`, MCP server definitions from the host's `~/.claude.json` are also available through the proxy, so any server installed with `claude mcp add --scope user` works inside Docker without extra configuration.
+**Host MCP servers** (`~/.claude.json`): When `ALLOW_HOST_MCP=true` (default), `_discover_host_mcp_names()` reads `~/.claude.json` for MCP server names and adds their tool patterns (`mcp__{name}__*`) to the agent's allowed tool list. This only grants permissions — it does NOT bridge those servers through the proxy. Host MCP servers must be independently reachable from inside the container (e.g., HTTP servers accessible via `host.docker.internal`). Stdio-based host servers will NOT work unless separately proxied.
 
 ### 14. Session Proxy Service
 
