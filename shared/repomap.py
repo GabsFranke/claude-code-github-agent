@@ -83,22 +83,48 @@ class RepoMap:
     # Tag extraction
     # ------------------------------------------------------------------
 
-    def extract_tags(self) -> list[Tag]:
-        """Extract tags from all source files in the repo.
+    def extract_tags(self, only_files: list[str] | None = None) -> list[Tag]:
+        """Extract tags from source files in the repo.
 
-        Public API for callers that need the raw tag list (e.g.,
-        codebase_tools MCP server for find_definitions/find_references).
+        Args:
+            only_files: If provided, only extract tags from these files
+                (relative paths). Useful for incremental re-indexing.
         """
-        return self._extract_all_tags()
+        return self._extract_all_tags(only_files=only_files)
 
-    def _extract_all_tags(self, priority_files: list[str] | None = None) -> list[Tag]:
+    def _extract_all_tags(
+        self,
+        priority_files: list[str] | None = None,
+        only_files: list[str] | None = None,
+    ) -> list[Tag]:
         """Extract tags from source files, processing priority files first.
 
-        Priority files (e.g., mentioned/changed files) are processed in full,
-        then background files are processed.
+        Args:
+            priority_files: Files to process first (unchanged files come after).
+            only_files: If provided, only process these files and skip all
+                others. Useful for incremental re-indexing.
         """
         priority_files = priority_files or []
         all_files = self._iter_source_files()
+
+        # If only_files is set, filter to just those files
+        if only_files is not None:
+            only_set = set(only_files)
+            all_files = [
+                f
+                for f in all_files
+                if str(f.relative_to(self.repo_path)).replace("\\", "/") in only_set
+            ]
+            tags: list[Tag] = []
+            for filepath in all_files:
+                tags.extend(self._get_tags(filepath))
+            logger.debug(
+                "Extracted %d tags from %d changed files in %s",
+                len(tags),
+                len(all_files),
+                self.repo_path,
+            )
+            return tags
 
         # Split into priority and background files
         priority_paths: list[Path] = []
@@ -110,7 +136,7 @@ class RepoMap:
             else:
                 background_paths.append(filepath)
 
-        tags: list[Tag] = []
+        tags = []
 
         # Priority pass: process mentioned/changed files in full
         for filepath in priority_paths:

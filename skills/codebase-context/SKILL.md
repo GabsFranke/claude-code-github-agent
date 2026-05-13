@@ -22,7 +22,7 @@ services/sandbox_executor/sandbox_worker.py:
   142│ function process_job
 ```
 
-Generated via tree-sitter parsing and PageRank ranking, so the most important/referenced definitions appear first. Use it to:
+Generated via tree-sitter parsing and reference graph ranking, so the most important/referenced definitions appear first. Use it to:
 
 - Quickly locate where things are defined before reading files
 - Understand the overall shape of the codebase
@@ -220,7 +220,7 @@ This progression minimizes token usage — you only read full files when you kno
 ## Technical Details
 
 - **Tree-sitter support**: 10 languages (Python, JavaScript, TypeScript, TSX, Go, Rust, Java, C, C++, Ruby) with regex fallback for others
-- **Repomap ranking**: PageRank on reference graph with personalization toward task-relevant files
+- **Repomap ranking**: reference graph ranking with personalization toward task-relevant files
 - **Code graph**: Relationships (calls, imports, inheritance) extracted from tree-sitter ASTs and stored as graph edges in SurrealDB
 - **Embedding model**: `gemini-embedding-001` with 1024-dimensional vectors stored in SurrealDB HNSW vector index
 - **Indexing**: Incremental via git diff with Redis embedding cache to avoid re-embedding unchanged content

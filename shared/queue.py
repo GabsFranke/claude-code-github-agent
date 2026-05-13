@@ -287,10 +287,14 @@ async def wait_for_repo_sync(
         logger.info(f"Repo {repo} already synced (cached)")
         return repo_dir
 
-    # If the repo directory exists on disk but the completion key expired,
-    # or if neither exists, request a fresh sync.
-    await _request_repo_sync(repo, ref, redis_client)
-    logger.info(f"Requested sync for {repo} (ref={ref})")
+    # Check if a sync is already in-flight for this repo
+    lock_key = f"agent:sync:lock:{repo}"
+    lock_held = await redis_client.exists(lock_key)
+    if not lock_held:
+        await _request_repo_sync(repo, ref, redis_client)
+        logger.info(f"Requested sync for {repo} (ref={ref})")
+    else:
+        logger.info(f"Sync already in-flight for {repo}, waiting for completion")
 
     # Subscribe to completion events
     completion_channel = "agent:sync:events"

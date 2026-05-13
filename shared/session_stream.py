@@ -48,14 +48,6 @@ from shared.streaming_session import _history_key, _inbox_key
 logger = logging.getLogger(__name__)
 
 
-def _msg_channel(token: str) -> str:
-    return MSG_CHANNEL.format(token)
-
-
-def _ctl_channel(token: str) -> str:
-    return CTL_CHANNEL.format(token)
-
-
 class SessionStreamBridge:
     """Publishes SDK messages to Redis pub/sub for cross-process streaming.
 
@@ -75,7 +67,7 @@ class SessionStreamBridge:
     def __init__(self, token: str, redis: Any) -> None:
         self._token = token
         self._redis = redis
-        self._channel = _msg_channel(token)
+        self._channel = MSG_CHANNEL.format(token)
         self._history_key = _history_key(token)
 
     async def publish(self, msg_type: str, data: dict) -> None:
@@ -200,7 +192,7 @@ class ControlChannel:
     ) -> None:
         self._token = token
         self._redis = redis
-        self._channel = _ctl_channel(token)
+        self._channel = CTL_CHANNEL.format(token)
         self._task: asyncio.Task | None = None
         self._stopped = False
         self._interrupt_event = interrupt_event
@@ -213,30 +205,65 @@ class ControlChannel:
         )
 
     async def _listen(self) -> None:
-        """Background task: subscribe and dispatch control messages."""
-        try:
-            pubsub = self._redis.pubsub()
-            self._pubsub = pubsub
-            await pubsub.subscribe(self._channel)
-            logger.info(f"[ControlChannel] Subscribed to {self._channel}")
+        """Background task: subscribe and dispatch control messages.
 
-            async for raw in pubsub.listen():
+        Automatically reconnects with exponential backoff if the Redis
+        pub/sub connection drops.  Gives up after 5 consecutive failures.
+        """
+        max_retries = 5
+        backoff_times = [1, 2, 4, 8, 16]
+
+        for attempt in range(max_retries + 1):
+            try:
+                pubsub = self._redis.pubsub()
+                self._pubsub = pubsub
+                await pubsub.subscribe(self._channel)
+                logger.info(f"[ControlChannel] Subscribed to {self._channel}")
+
+                async for raw in pubsub.listen():
+                    if self._stopped:
+                        return
+                    if raw["type"] != "message":
+                        continue
+                    try:
+                        msg = json.loads(raw["data"])
+                        await self._dispatch(msg)
+                    except Exception as e:
+                        logger.warning(
+                            f"[ControlChannel] Failed to parse control message: {e}"
+                        )
+
+                # pubsub.listen() exhausted — connection closed
                 if self._stopped:
-                    break
-                if raw["type"] != "message":
-                    continue
-                try:
-                    msg = json.loads(raw["data"])
-                    await self._dispatch(msg)
-                except Exception as e:
-                    logger.warning(
-                        f"[ControlChannel] Failed to parse control message: {e}"
+                    return
+                if attempt >= max_retries:
+                    logger.error(
+                        "[ControlChannel] Pub/sub closed, max retries exceeded"
                     )
+                    return
+                delay = backoff_times[attempt]
+                logger.info(
+                    f"[ControlChannel] Pub/sub closed (attempt {attempt + 1}/{max_retries}), "
+                    f"reconnecting in {delay}s..."
+                )
+                await asyncio.sleep(delay)
 
-        except Exception as e:
-            logger.error(f"[ControlChannel] Listener error: {e}")
-        finally:
-            logger.debug(f"[ControlChannel] Listener exiting for {self._token[:8]}")
+            except Exception as e:
+                if self._stopped:
+                    return
+                if attempt >= max_retries:
+                    logger.error(
+                        f"[ControlChannel] Failed after {max_retries} retries: {e}"
+                    )
+                    return
+                delay = backoff_times[attempt]
+                logger.warning(
+                    f"[ControlChannel] Connection lost (attempt {attempt + 1}/{max_retries}): {e}. "
+                    f"Reconnecting in {delay}s..."
+                )
+                await asyncio.sleep(delay)
+
+        logger.debug(f"[ControlChannel] Listener exiting for {self._token[:8]}")
 
     async def _dispatch(self, msg: dict) -> None:
         """Dispatch an incoming control message."""

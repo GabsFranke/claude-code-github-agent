@@ -1,6 +1,6 @@
 """Shared utility functions."""
 
-from typing import Any
+from typing import Any, Literal
 
 # ─── Thread type / URL segment mapping ──────────────────────────────────────
 
@@ -21,13 +21,15 @@ def thread_type_to_url_segment(thread_type: str) -> str:
     return _THREAD_TYPE_TO_URL.get(thread_type, "issues")
 
 
-def url_segment_to_thread_type(segment: str) -> str:
+def url_segment_to_thread_type(segment: str) -> Literal["pr", "issue", "discussion"]:
     """Map URL segment back to internal thread_type.
 
     "pull" → "pr", "issues" → "issue", "discussions" → "discussion".
     Defaults to "issue" for unknown segments.
     """
-    return _URL_SEGMENT_TO_THREAD_TYPE.get(segment, "issue")
+    result = _URL_SEGMENT_TO_THREAD_TYPE.get(segment, "issue")
+    assert result in ("pr", "issue", "discussion")
+    return result  # type: ignore[return-value]
 
 
 def build_session_url(

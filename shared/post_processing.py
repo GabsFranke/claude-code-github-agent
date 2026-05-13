@@ -11,22 +11,22 @@ import os
 
 logger = logging.getLogger(__name__)
 
-# Module-level Redis connection pool for reuse across hook invocations
-_redis_pool = None
+# Module-level Redis client singleton (matches session_proxy/main.py pattern)
+_redis = None
 
 
-async def get_redis_pool():
-    """Get or create the module-level Redis connection pool."""
-    global _redis_pool
-    if _redis_pool is None:
+def get_redis():
+    """Get or lazily initialize the module-level Redis client."""
+    global _redis
+    if _redis is None:
         import redis.asyncio as aioredis
 
         redis_url = os.getenv("REDIS_URL", "redis://redis:6379")
         redis_password = os.getenv("REDIS_PASSWORD")
-        _redis_pool = aioredis.ConnectionPool.from_url(
+        _redis = aioredis.Redis.from_url(
             redis_url, decode_responses=True, password=redis_password
         )
-    return _redis_pool
+    return _redis
 
 
 async def enqueue_memory_job(
@@ -39,25 +39,19 @@ async def enqueue_memory_job(
     """Enqueue a memory extraction job for an already-persisted transcript."""
     for attempt in range(2):
         try:
-            import redis.asyncio as aioredis
-
-            pool = await get_redis_pool()
-            rc = aioredis.Redis(connection_pool=pool)
-            try:
-                payload = json.dumps(
-                    {
-                        "repo": repo,
-                        "transcript_path": transcript_path,
-                        "hook_event": hook_event,
-                        "claude_md": claude_md,
-                        "memory_index": memory_index,
-                    }
-                )
-                await rc.rpush("agent:memory:requests", payload)  # type: ignore[misc]
-                logger.info("Enqueued memory job for %s [%s]", repo, hook_event)
-                return
-            finally:
-                await rc.aclose()  # type: ignore[attr-defined]
+            rc = get_redis()
+            payload = json.dumps(
+                {
+                    "repo": repo,
+                    "transcript_path": transcript_path,
+                    "hook_event": hook_event,
+                    "claude_md": claude_md,
+                    "memory_index": memory_index,
+                }
+            )
+            await rc.rpush("agent:memory:requests", payload)  # type: ignore[misc]
+            logger.info("Enqueued memory job for %s [%s]", repo, hook_event)
+            return
         except Exception as e:
             if attempt == 0:
                 logger.warning(
@@ -85,30 +79,24 @@ async def enqueue_retrospector_job(
     """Enqueue a retrospection job for an already-persisted transcript."""
     for attempt in range(2):
         try:
-            import redis.asyncio as aioredis
-
-            pool = await get_redis_pool()
-            rc = aioredis.Redis(connection_pool=pool)
-            try:
-                payload = json.dumps(
-                    {
-                        "repo": repo,
-                        "transcript_path": transcript_path,
-                        "hook_event": hook_event,
-                        "workflow_name": workflow_name,
-                        "session_meta": session_meta,
-                    }
-                )
-                await rc.rpush("agent:retrospector:requests", payload)  # type: ignore[misc]
-                logger.info(
-                    "Enqueued retrospector job for %s [%s] [%s]",
-                    repo,
-                    workflow_name or "unknown",
-                    hook_event,
-                )
-                return
-            finally:
-                await rc.aclose()  # type: ignore[attr-defined]
+            rc = get_redis()
+            payload = json.dumps(
+                {
+                    "repo": repo,
+                    "transcript_path": transcript_path,
+                    "hook_event": hook_event,
+                    "workflow_name": workflow_name,
+                    "session_meta": session_meta,
+                }
+            )
+            await rc.rpush("agent:retrospector:requests", payload)  # type: ignore[misc]
+            logger.info(
+                "Enqueued retrospector job for %s [%s] [%s]",
+                repo,
+                workflow_name or "unknown",
+                hook_event,
+            )
+            return
         except Exception as e:
             if attempt == 0:
                 logger.warning(
@@ -132,28 +120,22 @@ async def enqueue_indexing_job(
     """Enqueue a code indexing job for embedding-based semantic search."""
     for attempt in range(2):
         try:
-            import redis.asyncio as aioredis
-
-            pool = await get_redis_pool()
-            rc = aioredis.Redis(connection_pool=pool)
-            try:
-                payload = json.dumps(
-                    {
-                        "repo": repo,
-                        "ref": ref or "main",
-                        "trigger": f"job_{hook_event.lower()}",
-                    }
-                )
-                await rc.rpush("agent:indexing:requests", payload)  # type: ignore[misc]
-                logger.info(
-                    "Enqueued indexing job for %s [%s] ref=%s",
-                    repo,
-                    hook_event,
-                    ref,
-                )
-                return
-            finally:
-                await rc.aclose()  # type: ignore[attr-defined]
+            rc = get_redis()
+            payload = json.dumps(
+                {
+                    "repo": repo,
+                    "ref": ref or "main",
+                    "trigger": f"job_{hook_event.lower()}",
+                }
+            )
+            await rc.rpush("agent:indexing:requests", payload)  # type: ignore[misc]
+            logger.info(
+                "Enqueued indexing job for %s [%s] ref=%s",
+                repo,
+                hook_event,
+                ref,
+            )
+            return
         except Exception as e:
             if attempt == 0:
                 logger.warning(

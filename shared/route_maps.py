@@ -5,6 +5,7 @@ definitions from the codebase. Stores extracted records in SurrealDB
 for querying by agents.
 """
 
+import ast
 import logging
 import re
 from dataclasses import dataclass, field
@@ -205,6 +206,138 @@ def extract_routes(repo_path: Path) -> list[RouteDef]:
 # ---------------------------------------------------------------------------
 
 
+def _extract_required_params_from_ast(schema_node: ast.AST) -> list[str]:
+    """Extract required params list from an inputSchema dict node."""
+    if not isinstance(schema_node, ast.Dict):
+        return []
+    for key, value in zip(schema_node.keys, schema_node.values):
+        if (
+            isinstance(key, ast.Constant)
+            and key.value == "required"
+            and isinstance(value, ast.List)
+        ):
+            return [
+                elt.value
+                for elt in value.elts
+                if isinstance(elt, ast.Constant) and isinstance(elt.value, str)
+            ]
+    return []
+
+
+def _extract_tools_from_ast(
+    source: str, server_file: str, server_name: str
+) -> list[ToolDef]:
+    """Extract tool definitions by parsing the Python AST.
+
+    Handles both parenthesized concatenated descriptions and plain strings.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+
+    tools: list[ToolDef] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict):
+            continue
+
+        name = None
+        description = None
+        required_params: list[str] = []
+
+        for key, value in zip(node.keys, node.values):
+            if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
+                continue
+            if (
+                key.value == "name"
+                and isinstance(value, ast.Constant)
+                and isinstance(value.value, str)
+            ):
+                name = value.value
+            elif (
+                key.value == "description"
+                and isinstance(value, ast.Constant)
+                and isinstance(value.value, str)
+            ):
+                description = value.value
+            elif key.value == "inputSchema":
+                required_params = _extract_required_params_from_ast(value)
+
+        if name and description:
+            tools.append(
+                ToolDef(
+                    name=name,
+                    description=description[:300],
+                    server_file=server_file,
+                    server_name=server_name,
+                    required_params=required_params,
+                )
+            )
+    return tools
+
+
+def _extract_tools_regex(
+    source: str, server_file: str, server_name: str
+) -> list[ToolDef]:
+    """Fallback regex extraction for when AST parsing fails."""
+    tools: list[ToolDef] = []
+    seen_names: set[str] = set()
+
+    # Pattern A: plain string description  ("description": "...")
+    for m in re.finditer(
+        r'\{\s*"name"\s*:\s*"(\w+)"\s*,\s*"description"\s*:\s*"([^"]{1,300})"',
+        source,
+    ):
+        name, desc = m.group(1), m.group(2)
+        tools.append(
+            ToolDef(
+                name=name,
+                description=desc,
+                server_file=server_file,
+                server_name=server_name,
+            )
+        )
+        seen_names.add(name)
+
+    # Pattern B: parenthesized description  ("description": ("..." "..."))
+    for m in re.finditer(
+        r'\{\s*"name"\s*:\s*"(\w+)"\s*,\s*"description"\s*:\s*\(\s*(.*?)\s*\)',
+        source,
+        re.DOTALL,
+    ):
+        name = m.group(1)
+        if name in seen_names:
+            continue
+        # Extract all quoted fragments from inside the parens
+        fragments = re.findall(r'"([^"]*)"', m.group(2))
+        desc = "".join(fragments)[:300]
+        if desc:
+            tools.append(
+                ToolDef(
+                    name=name,
+                    description=desc,
+                    server_file=server_file,
+                    server_name=server_name,
+                )
+            )
+            seen_names.add(name)
+
+    # Extract required params from nearby context for each tool
+    for tool in tools:
+        escaped = re.escape(tool.name)
+        ctx = re.search(
+            rf'"{escaped}".*?"required"\s*:\s*\[([^\]]*)\]',
+            source,
+            re.DOTALL,
+        )
+        if ctx:
+            tool.required_params = [
+                p.strip().strip('"') for p in ctx.group(1).split(",") if p.strip()
+            ]
+
+    return tools
+
+
 def extract_mcp_tools(repo_path: Path) -> list[ToolDef]:
     """Extract MCP tool definitions from MCP server files."""
     tools: list[ToolDef] = []
@@ -227,42 +360,14 @@ def extract_mcp_tools(repo_path: Path) -> list[ToolDef]:
         except OSError:
             continue
 
-        # Find all tool name blocks
-        # Each tool definition in the JSON schema looks like:
-        # {"name": "tool_name", "description": "...", ...}
-        tool_blocks = re.finditer(
-            r'\{\s*"name"\s*:\s*"(\w+)"\s*,'
-            r'\s*"description"\s*:\s*\(\s*"([^"]*(?:"[^"]*"[^"]*)*)"\s*\)',
-            source,
-            re.DOTALL,
-        )
+        server_rel = str(server_file.relative_to(repo_path)).replace("\\", "/")
 
-        for block in tool_blocks:
-            name = block.group(1)
-            description = block.group(2)[:300]
+        extracted = _extract_tools_from_ast(source, server_rel, server_name)
+        if extracted:
+            tools.extend(extracted)
+            continue
 
-            # Find required params in the nearby context
-            block_start = block.start()
-            context = source[block_start : block_start + 2000]
-            req_match = _MCP_REQUIRED_RE.search(context)
-            required = []
-            if req_match:
-                params = req_match.group(1)
-                required = [
-                    p.strip().strip('"') for p in params.split(",") if p.strip()
-                ]
-
-            tools.append(
-                ToolDef(
-                    name=name,
-                    description=description,
-                    server_file=str(server_file.relative_to(repo_path)).replace(
-                        "\\", "/"
-                    ),
-                    server_name=server_name,
-                    required_params=required,
-                )
-            )
+        tools.extend(_extract_tools_regex(source, server_rel, server_name))
 
     return tools
 
@@ -272,10 +377,10 @@ def extract_mcp_tools(repo_path: Path) -> list[ToolDef]:
 # ---------------------------------------------------------------------------
 
 
-def _upsert_routes(db, routes: list[RouteDef]) -> None:
-    """Upsert route definitions into SurrealDB."""
+def _upsert_routes(db, routes: list[RouteDef], repo: str = "") -> None:
+    """Upsert route definitions into SurrealDB, scoped by repo."""
     try:
-        db.query("DELETE FROM route")
+        db.query("DELETE FROM route WHERE repo = $repo", {"repo": repo})
     except Exception:
         pass
 
@@ -290,6 +395,7 @@ def _upsert_routes(db, routes: list[RouteDef]) -> None:
                     line: $line,
                     framework: $framework,
                     description: $description,
+                    repo: $repo,
                 }""",
                 {
                     "path": r.path,
@@ -299,16 +405,17 @@ def _upsert_routes(db, routes: list[RouteDef]) -> None:
                     "line": r.line,
                     "framework": r.framework,
                     "description": r.description,
+                    "repo": repo,
                 },
             )
         except Exception as e:
             logger.debug("Route upsert failed: %s", e)
 
 
-def _upsert_tools(db, tools: list[ToolDef]) -> None:
-    """Upsert tool definitions into SurrealDB."""
+def _upsert_tools(db, tools: list[ToolDef], repo: str = "") -> None:
+    """Upsert tool definitions into SurrealDB, scoped by repo."""
     try:
-        db.query("DELETE FROM tool_def")
+        db.query("DELETE FROM tool_def WHERE repo = $repo", {"repo": repo})
     except Exception:
         pass
 
@@ -321,6 +428,7 @@ def _upsert_tools(db, tools: list[ToolDef]) -> None:
                     server_file: $server_file,
                     server_name: $server_name,
                     required_params: $required_params,
+                    repo: $repo,
                 }""",
                 {
                     "name": t.name,
@@ -328,6 +436,7 @@ def _upsert_tools(db, tools: list[ToolDef]) -> None:
                     "server_file": t.server_file,
                     "server_name": t.server_name,
                     "required_params": t.required_params,
+                    "repo": repo,
                 },
             )
         except Exception as e:
@@ -337,6 +446,7 @@ def _upsert_tools(db, tools: list[ToolDef]) -> None:
 def get_routes_map(
     repo_path: Path | None = None,
     framework: str | None = None,
+    repo: str = "",
 ) -> list[dict]:
     """Get API routes from SurrealDB, optionally filtered by framework.
 
@@ -345,9 +455,14 @@ def get_routes_map(
     """
     db = get_surreal()
 
-    # Check if routes exist
+    # Check if routes exist for this repo
     try:
-        existing = _raw_result_rows(db.query("SELECT count() FROM route GROUP ALL"))
+        existing = _raw_result_rows(
+            db.query(
+                "SELECT count() FROM route WHERE repo = $repo GROUP ALL",
+                {"repo": repo},
+            )
+        )
         count = existing[0].get("count", 0) if existing else 0
     except Exception:
         count = 0
@@ -355,17 +470,20 @@ def get_routes_map(
     if count == 0 and repo_path:
         routes = extract_routes(repo_path)
         if routes:
-            _upsert_routes(db, routes)
+            _upsert_routes(db, routes, repo)
 
     # Query — handle missing table gracefully
     try:
         if framework:
             result = db.query(
-                "SELECT * FROM route WHERE framework = $fw ORDER BY path, method",
-                {"fw": framework},
+                "SELECT * FROM route WHERE framework = $fw AND repo = $repo ORDER BY path, method",
+                {"fw": framework, "repo": repo},
             )
         else:
-            result = db.query("SELECT * FROM route ORDER BY framework, path, method")
+            result = db.query(
+                "SELECT * FROM route WHERE repo = $repo ORDER BY framework, path, method",
+                {"repo": repo},
+            )
         rows = _raw_result_rows(result)
     except Exception:
         logger.debug("Failed to query route table (table may not exist)")
@@ -384,7 +502,7 @@ def get_routes_map(
     ]
 
 
-def get_tools_map(repo_path: Path | None = None) -> list[dict]:
+def get_tools_map(repo_path: Path | None = None, repo: str = "") -> list[dict]:
     """Get MCP tool definitions from SurrealDB.
 
     If no tools exist in the database and repo_path is provided, extracts
@@ -392,9 +510,14 @@ def get_tools_map(repo_path: Path | None = None) -> list[dict]:
     """
     db = get_surreal()
 
-    # Check if tools exist
+    # Check if tools exist for this repo
     try:
-        existing = _raw_result_rows(db.query("SELECT count() FROM tool_def GROUP ALL"))
+        existing = _raw_result_rows(
+            db.query(
+                "SELECT count() FROM tool_def WHERE repo = $repo GROUP ALL",
+                {"repo": repo},
+            )
+        )
         count = existing[0].get("count", 0) if existing else 0
     except Exception:
         count = 0
@@ -402,10 +525,13 @@ def get_tools_map(repo_path: Path | None = None) -> list[dict]:
     if count == 0 and repo_path:
         tools = extract_mcp_tools(repo_path)
         if tools:
-            _upsert_tools(db, tools)
+            _upsert_tools(db, tools, repo)
 
     try:
-        result = db.query("SELECT * FROM tool_def ORDER BY server_name, name")
+        result = db.query(
+            "SELECT * FROM tool_def WHERE repo = $repo ORDER BY server_name, name",
+            {"repo": repo},
+        )
         rows = _raw_result_rows(result)
     except Exception:
         logger.debug("Failed to query tool_def table (table may not exist)")

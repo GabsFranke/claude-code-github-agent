@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 # Priority focus area patterns
 # Maps abstract focus area names to file glob patterns.
 # When a workflow sets priority_focus, files matching these patterns
-# get added to mentioned_files for PageRank personalization.
+# get added to mentioned_files for context personalization.
 # ---------------------------------------------------------------------------
 
 FOCUS_PATTERNS: dict[str, list[str]] = {

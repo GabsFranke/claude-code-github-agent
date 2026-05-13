@@ -27,7 +27,8 @@ def _discover_host_mcp_names(cwd: str | None = None) -> list[str]:
     if not claude_json.exists():
         return []
     try:
-        data = json.load(open(claude_json, encoding="utf-8"))
+        with open(claude_json, encoding="utf-8") as f:
+            data = json.load(f)
     except Exception as e:
         logger.warning(f"Failed to read ~/.claude.json for MCP discovery: {e}")
         return []
@@ -59,26 +60,6 @@ class SDKOptionsBuilder:
             .build()
         )
     """
-
-    @staticmethod
-    def _resolve_indexing_config() -> tuple[bool, str, str | None]:
-        """Resolve indexing configuration with env-var fallback.
-
-        Returns:
-            Tuple of (is_enabled, surrealdb_url, gemini_api_key or None).
-        """
-        try:
-            from shared.config import IndexingConfig
-
-            cfg = IndexingConfig()
-            return cfg.is_enabled, cfg.surrealdb_url, cfg.gemini_api_key
-        except Exception as e:
-            logger.warning("Failed to resolve indexing config: %s", e)
-            return (
-                os.getenv("INDEXING_ENABLED", "false").lower() == "true",
-                os.getenv("SURREALDB_URL") or "",
-                os.getenv("GEMINI_API_KEY") or "",
-            )
 
     def __init__(self, cwd: str):
         """Initialize builder with working directory.
@@ -361,8 +342,10 @@ class SDKOptionsBuilder:
         retrospector_enabled = (
             os.getenv("RETROSPECTOR_ENABLED", "true").lower() == "true"
         )
-        indexing_enabled, _, gemini_key = self._resolve_indexing_config()
-        indexing_enabled = indexing_enabled and bool(gemini_key)
+        from shared.config import IndexingConfig
+
+        cfg = IndexingConfig()
+        indexing_enabled = cfg.is_enabled and bool(cfg.gemini_api_key)
 
         # Capture context from builder for hooks to use
         repo_context = self._repo_context
@@ -933,11 +916,7 @@ def _truncate_text(text: str, max_tokens: int, from_top: bool = False) -> str | 
         if not result_lines:
             return None
 
-        result = "\n".join(result_lines)
-        if _estimate(result) > max_tokens:
-            return None
-
-        return "... (older comments truncated)\n" + result
+        return "... (older comments truncated)\n" + "\n".join(result_lines)
     else:
         # Remove lines from the end, keeping the beginning
         result_lines = []
@@ -950,8 +929,4 @@ def _truncate_text(text: str, max_tokens: int, from_top: bool = False) -> str | 
         if not result_lines:
             return None
 
-        result = "\n".join(result_lines)
-        if _estimate(result) > max_tokens:
-            return None
-
-        return result + "\n... (truncated)"
+        return "\n".join(result_lines) + "\n... (truncated)"

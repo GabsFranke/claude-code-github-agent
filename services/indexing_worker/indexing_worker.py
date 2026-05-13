@@ -16,7 +16,6 @@ import os
 import shutil
 import sys
 import tempfile
-import uuid
 from pathlib import Path
 
 from shared import dlq as _dlq_mod, setup_graceful_shutdown
@@ -88,8 +87,7 @@ async def ensure_surrealdb() -> None:
     Must be called once before storing or querying symbols.
     """
     init_surrealdb(SURREALDB_URL)
-    db = get_surreal()
-    apply_schema(db)
+    apply_schema()
 
 
 # ---------------------------------------------------------------------------
@@ -299,10 +297,17 @@ async def batch_embed(texts: list[str], redis_client=None) -> list[list[float]]:
 # ---------------------------------------------------------------------------
 
 
-def _symbol_id(filepath: str, start_line: int, kind: str, name: str) -> str:
-    """Deterministic UUID v5 record ID for deduplication."""
-    raw = f"{filepath}:{start_line}:{kind}:{name}"
-    return uuid.uuid5(uuid.NAMESPACE_URL, raw).hex
+def _symbol_id(
+    filepath: str, start_line: int, kind: str, name: str, repo: str = ""
+) -> str:
+    """Deterministic record ID matching code_graph._upsert_symbols.
+
+    Uses SHA-256 of the composite key so that UPSERT updates existing
+    symbol records (created by code_graph.build) instead of creating
+    duplicates. The ID format must match code_graph._upsert_symbols.
+    """
+    raw_key = f"{repo}:{filepath}:{kind}:{name}:{start_line}"
+    return hashlib.sha256(raw_key.encode()).hexdigest()[:40]
 
 
 async def upsert_chunks(
@@ -340,10 +345,15 @@ async def upsert_chunks(
                     "Failed to delete symbols for removed file %s: %s", filepath, e
                 )
 
-    # Upsert each chunk individually via its deterministic record ID
+    # Upsert each chunk individually via its deterministic record ID.
+    # Use MERGE (not CONTENT) so that existing fields from code_graph
+    # (category, kind, etc.) are preserved and only embedding + content
+    # are added.
     count = 0
     for chunk, embedding in zip(chunks, embeddings):
-        record_id = _symbol_id(chunk.filepath, chunk.start_line, chunk.kind, chunk.name)
+        record_id = _symbol_id(
+            chunk.filepath, chunk.start_line, chunk.kind, chunk.name, repo=repo
+        )
         record = {
             "name": chunk.name,
             "kind": "definition",
@@ -357,7 +367,7 @@ async def upsert_chunks(
             "content": chunk.content[:2000],
         }
         try:
-            db.query(f"UPSERT symbol:{record_id} CONTENT $record", {"record": record})
+            db.query(f"UPSERT symbol:{record_id} MERGE $record", {"record": record})
             count += 1
         except Exception as e:
             logger.warning(
@@ -489,25 +499,38 @@ async def _get_previous_commit(redis_client, repo: str, ref: str) -> str | None:
     return None
 
 
-def _build_code_graph(worktree: str) -> None:
-    """Build the code graph (definitions + relationships) from a worktree."""
-    idx = SymbolIndex(repo_path=Path(worktree))
-    idx.build(force=True)
+def _build_code_graph(
+    worktree: str,
+    repo: str,
+    *,
+    changed_files: list[str] | None = None,
+) -> None:
+    """Build the code graph (definitions + relationships) from a worktree.
+
+    If changed_files is provided, does an incremental build on just those
+    files. Otherwise, does a full build (or skips if the commit is already
+    indexed via _is_commit_indexed).
+    """
+    idx = SymbolIndex(repo_path=Path(worktree), repo=repo)
+    if changed_files:
+        idx.build_incremental(changed_files)
+    else:
+        idx.build()
 
 
-def _build_route_maps(worktree: str) -> None:
+def _build_route_maps(worktree: str, repo: str) -> None:
     """Extract and persist API routes + MCP tool definitions from a worktree."""
     repo_path = Path(worktree)
     db = get_surreal()
 
     routes = extract_routes(repo_path)
     if routes:
-        _upsert_routes(db, routes)
+        _upsert_routes(db, routes, repo)
         logger.info("Indexed %d API routes from %s", len(routes), worktree)
 
     tools = _extract_mcp_tools(repo_path)
     if tools:
-        _upsert_tools(db, tools)
+        _upsert_tools(db, tools, repo)
         logger.info("Indexed %d MCP tool defs from %s", len(tools), worktree)
 
 
@@ -605,24 +628,6 @@ async def process_indexing_job(message: dict, redis_client=None) -> None:
             logger.error(f"Cannot index {repo}: {e}")
             return
 
-        # Build the code graph (definitions + call/import/inheritance edges)
-        # before chunking so that graph edges are pre-built for MCP tools.
-        # The graph build is fast (AST parsing only, no API calls).
-        try:
-            await asyncio.to_thread(_build_code_graph, worktree)
-        except Exception as e:
-            logger.warning(
-                "Code graph build failed for %s: %s (chunking will continue)", repo, e
-            )
-
-        # Extract and persist API routes + MCP tool definitions
-        try:
-            await asyncio.to_thread(_build_route_maps, worktree)
-        except Exception as e:
-            logger.warning(
-                "Route maps build failed for %s: %s (chunking will continue)", repo, e
-            )
-
         # Check for previous index to determine incremental vs full
         previous_commit = await _get_previous_commit(redis_client, repo, ref)
         full_index = True
@@ -656,6 +661,29 @@ async def process_indexing_job(message: dict, redis_client=None) -> None:
             )
         else:
             logger.info(f"Full index for {repo} on {ref} (commit {commit_hash[:8]})")
+
+        # Build the code graph (definitions + call/import/inheritance edges)
+        # before chunking so that graph edges are pre-built for MCP tools.
+        # For incremental runs, only rebuild if the commit changed.
+        try:
+            await asyncio.to_thread(
+                _build_code_graph,
+                worktree,
+                repo,
+                changed_files=changed_files if not full_index else None,
+            )
+        except Exception as e:
+            logger.warning(
+                "Code graph build failed for %s: %s (chunking will continue)", repo, e
+            )
+
+        # Extract and persist API routes + MCP tool definitions
+        try:
+            await asyncio.to_thread(_build_route_maps, worktree, repo)
+        except Exception as e:
+            logger.warning(
+                "Route maps build failed for %s: %s (chunking will continue)", repo, e
+            )
 
         # Chunk the repo (full or incremental)
         chunks = await asyncio.to_thread(chunk_repo, Path(worktree), changed_files)

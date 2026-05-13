@@ -21,6 +21,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from shared.constants import sanitize_repo_key
+
 logger = logging.getLogger(__name__)
 
 CLAUDE_HOME = Path(os.getenv("CLAUDE_HOME", str(Path.home() / ".claude")))
@@ -76,7 +78,7 @@ def find_transcript_by_repo(repo: str, issue_number: int, workflow: str) -> Path
 
     # The SDK sanitizes CWD paths: / → -, special chars removed.
     # Repo "GabsFranke/sma" becomes "GabsFranke--sma" in the project dir name.
-    repo_segment = repo.replace("/", "--")
+    repo_segment = sanitize_repo_key(repo)
 
     candidates: list[tuple[float, Path]] = []
 

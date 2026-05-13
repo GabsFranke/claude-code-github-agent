@@ -52,12 +52,25 @@ class FakeSurrealDB:
                 table.append(rec)
             return []
 
-        # INSERT INTO _schema_meta { ... } (inline record syntax)
+        # INSERT INTO _schema_meta { ... } ON DUPLICATE KEY UPDATE ...
         if "INSERT INTO _SCHEMA_META" in sql_upper:
             record = self._parse_inline_record(sql_stripped, params)
             table = self._ensure_table("_schema_meta")
-            table.clear()
-            table.append(record)
+            if "ON DUPLICATE KEY UPDATE" in sql_upper:
+                # Upsert: update existing record by id, or insert new one
+                rec_id = record.get("id")
+                existing = None
+                if rec_id:
+                    existing = next((r for r in table if r.get("id") == rec_id), None)
+                if existing:
+                    existing.update(record)
+                else:
+                    if "id" not in record:
+                        record["id"] = self._next_id()
+                    table.append(record)
+            else:
+                table.clear()
+                table.append(record)
             return []
 
         # INSERT INTO route { ... } or INSERT INTO tool_def { ... }
@@ -68,6 +81,21 @@ class FakeSurrealDB:
                 if "id" not in record:
                     record["id"] = self._next_id()
                 self._ensure_table(tname).append(record)
+            return []
+
+        # INSERT RELATION INTO <table> $records (batch edge insert)
+        if "INSERT RELATION INTO" in sql_upper and "$RECORDS" in sql_upper:
+            m = re.search(
+                r"INSERT\s+RELATION\s+INTO\s+(\w+)", sql_stripped, re.IGNORECASE
+            )
+            if m:
+                table_name = m.group(1).lower()
+                table = self._ensure_table(table_name)
+                records = params.get("records", [])
+                for rec in records:
+                    if "id" not in rec:
+                        rec["id"] = self._next_id()
+                    table.append(rec)
             return []
 
         # Other INSERT — ignore
@@ -81,7 +109,10 @@ class FakeSurrealDB:
                 t = self._ensure_table(table_name)
                 repo = params.get("repo")
                 fp = params.get("fp")
-                if repo is not None and fp is not None:
+                # Handle edge table deletes with dot-notation (in.filepath, in.repo)
+                if table_name in ("calls", "imports", "inherits", "contains_edge"):
+                    self._delete_from_edges(table_name, sql_stripped, params)
+                elif repo is not None and fp is not None:
                     self._tables[table_name] = [
                         r
                         for r in t
@@ -164,15 +195,71 @@ class FakeSurrealDB:
             return m.group(1).lower()
         return None
 
+    def _delete_from_edges(self, table_name: str, sql: str, params: dict) -> None:
+        """Handle DELETE FROM edge_table with repo/file filters.
+
+        Supports both dot-notation (WHERE in.repo = $repo) and subquery
+        (WHERE in IN (SELECT id FROM symbol WHERE repo = $repo)) patterns.
+        """
+        t = self._ensure_table(table_name)
+        sym_table = self._ensure_table("symbol")
+
+        repo = params.get("repo")
+        fp = params.get("fp")
+
+        # Check for subquery pattern: WHERE in IN (SELECT id FROM symbol WHERE repo = $repo)
+        subquery_match = re.search(
+            r"WHERE\s+in\s+IN\s+\(SELECT\s+id\s+FROM\s+symbol\s+WHERE\s+repo\s*=\s*\$(\w+)\)",
+            sql,
+            re.IGNORECASE,
+        )
+
+        def _get_field(rid, field_name):
+            if not rid:
+                return ""
+            for s in sym_table:
+                if s.get("id") == rid:
+                    return s.get(field_name, "")
+            return rid if isinstance(rid, str) else ""
+
+        if subquery_match:
+            # Subquery: delete edges where 'in' is in the set of symbol IDs for this repo
+            repo_ids = {s["id"] for s in sym_table if s.get("repo") == repo}
+            filtered = [r for r in t if r.get("in") not in repo_ids]
+        elif repo is not None and fp is not None:
+            # File-scoped delete: WHERE in.filepath = $fp AND in.repo = $repo
+            filtered = []
+            for r in t:
+                in_repo = _get_field(r.get("in"), "repo")
+                in_fp = _get_field(r.get("in"), "filepath")
+                if in_repo == repo and in_fp == fp:
+                    continue  # delete this one
+                filtered.append(r)
+        elif repo is not None:
+            # Repo-scoped delete: WHERE in.repo = $repo
+            filtered = [r for r in t if _get_field(r.get("in"), "repo") != repo]
+        else:
+            filtered = list(t)
+
+        self._tables[table_name] = filtered
+
     def _handle_update(self, sql: str, params: dict) -> None:
-        """Handle UPDATE _schema_meta SET field = $param."""
-        table = self._ensure_table("_schema_meta")
+        """Handle UPDATE ... SET field = $param, ... (multiple SET clauses)."""
+        # Extract table name from UPDATE <table>
+        m = re.search(r"UPDATE\s+(\w+)", sql, re.IGNORECASE)
+        if not m:
+            return
+        table_name = m.group(1).lower()
+        table = self._ensure_table(table_name)
         if not table:
             table.append({})
-        m = re.search(r"SET\s+(\w+)\s*=\s*\$(\w+)", sql, re.IGNORECASE)
-        if m:
+        # Apply all SET field = $param assignments
+        for m in re.finditer(r"(\w+)\s*=\s*\$(\w+)", sql, re.IGNORECASE):
             field = m.group(1).lower()
             param_name = m.group(2).lower()
+            # Skip SQL keywords that aren't fields
+            if field in ("set", "where", "and", "or", "from", "into"):
+                continue
             table[0][field] = params.get(param_name)
 
     def _handle_relate(self, sql: str, params: dict) -> None:
@@ -228,6 +315,11 @@ class FakeSurrealDB:
             field = m.group(1).lower()
             results = [r for r in results if r.get(field) is not None]
 
+        # Parse != NONE / != NULL conditions: WHERE field != NONE
+        for m in re.finditer(r"(\w+)\s*!=\s*(?:NONE|NULL)", sql, re.IGNORECASE):
+            field = m.group(1).lower()
+            results = [r for r in results if r.get(field) is not None]
+
         # LIMIT
         limit_m = re.search(r"LIMIT\s+(\d+)", sql, re.IGNORECASE)
         if limit_m:
@@ -257,20 +349,39 @@ class FakeSurrealDB:
         # Look up in/out symbol names from the symbol table
         sym_table = self._ensure_table("symbol")
 
-        def _get_name(rid):
+        def _get_field(rid, field_name):
             if not rid:
                 return ""
             for s in sym_table:
                 if s.get("id") == rid:
-                    return s.get("name", "")
+                    return s.get(field_name, "")
             return rid if isinstance(rid, str) else ""
 
-        # Annotate edges with in.name and out.name for filtering
+        # Annotate edges with in.name, out.name, in.repo, out.repo for filtering
         annotated = []
         for r in results:
             ann = dict(r)
-            ann["in.name"] = _get_name(r.get("in"))
-            ann["out.name"] = _get_name(r.get("out"))
+            ann["in.name"] = _get_field(r.get("in"), "name")
+            ann["out.name"] = _get_field(r.get("out"), "name")
+            ann["in.repo"] = _get_field(r.get("in"), "repo")
+            ann["out.repo"] = _get_field(r.get("out"), "repo")
+            ann["in.filepath"] = _get_field(r.get("in"), "filepath")
+            ann["out.filepath"] = _get_field(r.get("out"), "filepath")
+            # line is numeric — try int conversion
+            in_line = _get_field(r.get("in"), "line")
+            ann["in.line"] = (
+                int(in_line)
+                if isinstance(in_line, (int, float))
+                or (isinstance(in_line, str) and in_line.isdigit())
+                else in_line
+            )
+            out_line = _get_field(r.get("out"), "line")
+            ann["out.line"] = (
+                int(out_line)
+                if isinstance(out_line, (int, float))
+                or (isinstance(out_line, str) and out_line.isdigit())
+                else out_line
+            )
             annotated.append(ann)
 
         # Parse WHERE in.field = $param or WHERE out.field = $param
@@ -296,16 +407,20 @@ class FakeSurrealDB:
                 lookup = f"{direction}.{field}"
                 annotated = [r for r in annotated if r.get(lookup) == value]
 
-        # Parse SELECT in/out.field AS alias
-        select_m = re.search(
-            r"SELECT\s+(in|out)\.(\w+)\s+AS\s+(\w+)", sql, re.IGNORECASE
-        )
-        if select_m:
-            direction = select_m.group(1).lower()
-            field = select_m.group(2).lower()
-            alias = select_m.group(3).lower()
-            lookup = f"{direction}.{field}"
-            return [{alias: r.get(lookup, "")} for r in annotated]
+        # Parse SELECT in/out.field AS alias (single or multi-alias)
+        aliases = re.findall(r"(in|out)\.(\w+)\s+AS\s+(\w+)", sql, re.IGNORECASE)
+        if aliases:
+            rows_out = []
+            for r in annotated:
+                row = {}
+                for direction, field, alias in aliases:
+                    direction = direction.lower()
+                    field = field.lower()
+                    alias = alias.lower()
+                    lookup = f"{direction}.{field}"
+                    row[alias] = r.get(lookup, "")
+                rows_out.append(row)
+            return rows_out
 
         return annotated
 

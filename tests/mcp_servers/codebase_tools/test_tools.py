@@ -4,6 +4,7 @@ Tests find_definitions, find_references, search_codebase, and read_file_summary
 using a temporary Python repo fixture.
 """
 
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -27,16 +28,19 @@ def _mock_surrealdb():
     """Mock SurrealDB for all tests — no real connection needed."""
     fake_db = FakeSurrealDB()
 
+    def fake_query(query, vars=None):
+        return fake_db.query(query, vars)
+
     with (
         patch("shared.surrealdb_client.is_initialized", return_value=True),
         patch("shared.surrealdb_client.get_surreal", return_value=fake_db),
         patch("shared.surrealdb_client.init_surrealdb"),
         patch("shared.surrealdb_client.apply_schema"),
+        patch("shared.surrealdb_client.query_surreal", side_effect=fake_query),
         patch("shared.code_graph.is_initialized", return_value=True),
-        patch("shared.code_graph.get_surreal", return_value=fake_db),
         patch("shared.code_graph.apply_schema"),
+        patch("shared.code_graph.query_surreal", side_effect=fake_query),
         patch("mcp_servers.codebase_tools.tools.init_surrealdb"),
-        patch("mcp_servers.codebase_tools.tools.get_surreal", return_value=fake_db),
     ):
         yield fake_db
 
@@ -140,6 +144,8 @@ def initialized_repo(python_repo: Path):
 
     tools._repo_path = None
     tools._symbol_index = None
+    tools._repo = ""
+    os.environ["GITHUB_REPOSITORY"] = "test-repo"
     init_repo(str(python_repo))
     return python_repo
 
@@ -151,6 +157,7 @@ def initialized_repo(python_repo: Path):
 
 class TestInitRepo:
     def test_initializes_with_valid_path(self, python_repo: Path):
+        os.environ["GITHUB_REPOSITORY"] = "test-repo"
         init_repo(str(python_repo))
         from mcp_servers.codebase_tools import tools
 
@@ -164,6 +171,7 @@ class TestInitRepo:
 
     def test_build_completes_successfully(self, python_repo: Path):
         """init_repo should build SymbolIndex and mark it as built."""
+        os.environ["GITHUB_REPOSITORY"] = "test-repo"
         init_repo(str(python_repo))
         from mcp_servers.codebase_tools import tools
 
@@ -303,6 +311,7 @@ class TestSearchCodebase:
 
     def test_python_fallback_works(self, python_repo: Path):
         """Test the Python regex fallback path."""
+        os.environ["GITHUB_REPOSITORY"] = "test-repo"
         init_repo(str(python_repo))
         from mcp_servers.codebase_tools import tools
 
@@ -347,6 +356,7 @@ def _populate_symbols(_mock_surrealdb: FakeSurrealDB):
             "line": 6,
             "end_line": 17,
             "language": "python",
+            "repo": "test-repo",
             "content": "class Database:\n    ...",
             "embedding": [0.1] * 1024,
         },
@@ -358,6 +368,7 @@ def _populate_symbols(_mock_surrealdb: FakeSurrealDB):
             "line": 7,
             "end_line": 20,
             "language": "python",
+            "repo": "test-repo",
             "content": "class Application:\n    ...",
             "embedding": [0.2] * 1024,
         },
@@ -369,6 +380,7 @@ def _populate_symbols(_mock_surrealdb: FakeSurrealDB):
             "line": 21,
             "end_line": 23,
             "language": "python",
+            "repo": "test-repo",
             "content": "def create_pool(size):\n    ...",
             "embedding": [0.3] * 1024,
         },
@@ -398,9 +410,13 @@ class TestSemanticSearch:
             )
             assert isinstance(results, list)
             assert len(results) >= 1
-            assert results[0]["name"] == "Database"
-            assert results[0]["kind"] == "definition"
-            assert "score" in results[0]
+            # FakeSurrealDB doesn't compute vector distances, so result order
+            # is not deterministic — check that Database appears somewhere.
+            names = [r["name"] for r in results]
+            assert "Database" in names
+            db_result = next(r for r in results if r["name"] == "Database")
+            assert db_result["kind"] == "definition"
+            assert "score" in db_result
 
     def test_semantic_search_filters_by_file_type(
         self, initialized_repo: Path, _populate_symbols: None, monkeypatch
@@ -488,7 +504,7 @@ class TestHybridSearch:
             # Each result should have a "source" field
             for r in results:
                 assert "source" in r
-                assert r["source"] in ("semantic", "text")
+                assert r["source"] in ("semantic", "text", "hybrid")
             # At least one semantic result
             assert any(r["source"] == "semantic" for r in results)
 

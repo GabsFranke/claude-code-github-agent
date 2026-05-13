@@ -22,9 +22,9 @@ from shared.code_graph import SymbolIndex
 from shared.file_tree import EXCLUDE_DIRS
 from shared.surrealdb_client import (
     _raw_result_rows,
-    get_surreal,
     init_surrealdb,
     is_initialized as _sdb_is_initialized,
+    query_surreal,
 )
 from shared.ts_languages import EXTENSION_MAP, get_language
 
@@ -35,10 +35,13 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _repo_path: Path | None = None
+_repo: str = ""
 _symbol_index: SymbolIndex | None = None
 _ast_cache: dict[tuple[str, float], tuple[Any, bytes]] = {}
 _AST_CACHE_MAX_SIZE = 500
 _index_ready = threading.Event()
+_SEMANTIC_MAX_DISTANCE = float(os.getenv("SEMANTIC_MAX_DISTANCE", "0.5"))
+_RRF_K = 60
 
 # File type aliases for ripgrep
 _FILE_TYPE_MAP: dict[str, str] = {
@@ -78,15 +81,60 @@ _PY_DOCSTRING_QUERY = ("(expression_statement (string)) @node",)
 # ---------------------------------------------------------------------------
 
 
+def _derive_repo_from_git(repo_path: Path) -> str:
+    """Derive 'owner/name' repo slug from git remote or environment.
+
+    Resolution order:
+      1. GITHUB_REPOSITORY env var (backward compat, e.g. CI)
+      2. git remote get-url origin → parse owner/name
+      3. Empty string with warning
+    """
+    from_env = os.getenv("GITHUB_REPOSITORY", "")
+    if from_env:
+        return from_env
+
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            cwd=str(repo_path),
+        )
+        if result.returncode == 0:
+            url = result.stdout.strip()
+            # SSH: git@github.com:owner/name.git
+            if ":" in url and "@" in url:
+                path = url.split(":", 1)[1]
+                if path.endswith(".git"):
+                    path = path[:-4]
+                return path
+            # HTTPS: https://github.com/owner/name.git
+            if "://" in url:
+                from urllib.parse import urlparse
+
+                parsed = urlparse(url)
+                path = parsed.path.strip("/")
+                if path.endswith(".git"):
+                    path = path[:-4]
+                return path
+    except Exception:
+        pass
+
+    logger.warning("Could not derive repo from git remote for %s", repo_path)
+    return ""
+
+
 def init_repo(repo_path: str) -> None:
     """Initialize module state. Called once at server startup.
 
     Args:
         repo_path: Absolute path to the git worktree.
     """
-    global _repo_path, _symbol_index
+    global _repo_path, _repo, _symbol_index
 
     _repo_path = Path(repo_path).resolve()
+    _repo = _derive_repo_from_git(_repo_path)
 
     if not _repo_path.is_dir():
         raise ValueError(f"Repo path does not exist: {_repo_path}")
@@ -95,11 +143,22 @@ def init_repo(repo_path: str) -> None:
     surrealdb_url = os.getenv("SURREALDB_URL", "ws://localhost:8000/rpc")
     init_surrealdb(surrealdb_url)
 
-    # Build the symbol index (SurrealDB-backed, skips if already indexed)
-    _symbol_index = SymbolIndex(repo_path=_repo_path)
-    _symbol_index.build()
+    # Initialize symbol index and build from source files so that
+    # query methods (find_definitions, trace_flow, etc.) return results.
+    # The indexing worker handles incremental updates; this initial build
+    # ensures the index is usable immediately after init.
+    _symbol_index = SymbolIndex(repo_path=_repo_path, repo=_repo)
+    try:
+        _symbol_index.build()
+    except Exception:
+        logger.warning(
+            "Symbol index build failed for %s (repo=%s); "
+            "queries will return empty results until rebuilt.",
+            _repo_path,
+            _repo,
+        )
     _index_ready.set()
-    logger.info("Symbol index ready for %s", _repo_path)
+    logger.info("Symbol index ready for %s (repo=%s)", _repo_path, _repo)
 
 
 def is_ready() -> bool:
@@ -110,10 +169,8 @@ def is_ready() -> bool:
 def warmup_surrealdb() -> None:
     """Pre-load SurrealDB HNSW index pages into memory.
 
-    Running a lightweight query forces SurrealDB to load index segments
-    into the page cache, avoiding a cold-start scenario where the first
-    k-NN search returns 0 rows or mutates internal structures during
-    iteration.
+    Running a k-NN probe forces SurrealDB to load HNSW index segments,
+    avoiding a cold-start where the first real search returns 0 rows.
 
     Safe to call before init — it is a no-op if SurrealDB is not
     connected.
@@ -121,8 +178,12 @@ def warmup_surrealdb() -> None:
     try:
         if not _sdb_is_initialized():
             return
-        db = get_surreal()
-        db.query("SELECT count() FROM symbol LIMIT 1")
+        dim = int(os.getenv("EMBEDDING_DIMENSION", "1024"))
+        query_surreal(
+            "SELECT id FROM symbol WHERE embedding != NONE "
+            "AND embedding <|1,128|> $qvec LIMIT 1",
+            {"qvec": [0.0] * dim},
+        )
         logger.info("SurrealDB warmup complete")
     except Exception as e:
         logger.warning("SurrealDB warmup query failed: %s", e)
@@ -236,7 +297,7 @@ def find_definitions(symbol_name: str) -> dict[str, Any]:
 
     MAX_DEFINITIONS = 50
 
-    tags = _symbol_index.find_definitions(symbol_name)
+    tags = _symbol_index.find_definitions(symbol_name, repo=_repo)
     seen: set[tuple[str, int, str]] = set()
     results: list[dict[str, Any]] = []
 
@@ -287,7 +348,7 @@ def find_references(symbol_name: str) -> list[dict[str, Any]]:
     # Collect definition locations to exclude from results
     definition_lines: set[tuple[str, int]] = set()
     if _symbol_index is not None:
-        for tag in _symbol_index.find_definitions(symbol_name):
+        for tag in _symbol_index.find_definitions(symbol_name, repo=_repo):
             definition_lines.add((tag.filepath, tag.line))
 
     # Search for exact word-boundary matches of the symbol name
@@ -542,7 +603,11 @@ def _semantic_search(
         from google.genai import types
     except ImportError:
         logger.warning("google-genai not installed; semantic search unavailable")
-        return [{"error": "google-genai package is not installed. Semantic search requires it."}]
+        return [
+            {
+                "error": "google-genai package is not installed. Semantic search requires it."
+            }
+        ]
 
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
@@ -570,13 +635,14 @@ def _semantic_search(
 
         if not _sdb_is_initialized():
             init_surrealdb()
-        db = get_surreal()
 
-        # Warm up SurrealDB — first query after startup may need to load
-        # HNSW index pages into memory. Without this, the k-NN below can
-        # return 0 rows even though the index has matching embeddings.
+        # Warm up SurrealDB — k-NN probe forces HNSW index page loading.
         try:
-            db.query("SELECT count() FROM symbol LIMIT 1")
+            query_surreal(
+                "SELECT id FROM symbol WHERE embedding IS NOT NULL "
+                "AND embedding <|1,128|> $qvec LIMIT 1",
+                {"qvec": [0.0] * embedding_dim},
+            )
         except Exception:
             pass
 
@@ -596,15 +662,18 @@ def _semantic_search(
             conditions.append("kind = $kind")
             params["kind"] = kind_filter
 
+        conditions.append("repo = $repo")
+        params["repo"] = _repo
+
         kind_condition = ""
         if conditions:
             kind_condition = "AND " + " AND ".join(conditions)
 
-        result = db.query(
+        result = query_surreal(
             f"""SELECT name, kind, filepath, line, end_line, content,
                        vector::distance::knn() AS score
                 FROM symbol
-                WHERE embedding IS NOT NULL {kind_condition}
+                WHERE embedding != NONE {kind_condition}
                 AND embedding <|{max_results},128|> $qvec
                 ORDER BY score
                 LIMIT {max_results}""",
@@ -622,6 +691,16 @@ def _semantic_search(
 
         output: list[dict[str, Any]] = []
         for row in rows:
+            score = row.get("score")
+            if score is not None and score > _SEMANTIC_MAX_DISTANCE:
+                logger.debug(
+                    "Skipping low-relevance hit: %s (distance=%.3f > %.3f)",
+                    row.get("name", "?"),
+                    score,
+                    _SEMANTIC_MAX_DISTANCE,
+                )
+                continue
+
             content = row.get("content", "")
             content_truncated = False
             if content and len(content) > 2000:
@@ -635,7 +714,7 @@ def _semantic_search(
                     "line": row.get("line", 0),
                     "end_line": row.get("end_line", 0),
                     "content": content,
-                    "score": row.get("score"),
+                    "score": score,
                 }
             )
             if content_truncated:
@@ -647,7 +726,11 @@ def _semantic_search(
 
     except (ConnectionRefusedError, OSError) as e:
         logger.error("SurrealDB unreachable: %s", e)
-        return [{"error": f"SurrealDB is not available at {os.getenv('SURREALDB_URL', 'ws://localhost:8000/rpc')}. Semantic search requires a running SurrealDB instance."}]
+        return [
+            {
+                "error": f"SurrealDB is not available at {os.getenv('SURREALDB_URL', 'ws://localhost:8000/rpc')}. Semantic search requires a running SurrealDB instance."
+            }
+        ]
     except Exception as e:
         logger.error("Semantic search failed: %s", e, exc_info=True)
         return [{"error": f"Semantic search failed: {e}"}]
@@ -659,41 +742,40 @@ def _hybrid_search(
     max_results: int,
     kind_filter: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Hybrid search combining text + semantic with deduplication.
+    """Hybrid search combining text + semantic via Reciprocal Rank Fusion.
 
-    Runs both search modes independently and merges results. Semantic results
-    are prioritized since they capture meaning, not just literal matches.
-    Deduplicates by (file, line) key. Errors from semantic search (e.g.
-    SurrealDB unreachable) are surfaced in the result list.
+    Runs both search modes independently and merges with RRF scoring.
+    Items found by both sources are marked ``"source": "hybrid"``.
+    Errors from semantic search are surfaced in the result list.
     """
     text_results = _fallback_text_search(pattern, file_type, max_results)
     semantic_results = _semantic_search(pattern, file_type, max_results, kind_filter)
 
-    # Separate error results from valid semantic results
     errors = [r for r in semantic_results if "error" in r]
     valid_semantic = [r for r in semantic_results if "error" not in r]
 
-    seen: set[tuple[str, int]] = set()
-    merged: list[dict[str, Any]] = []
+    rrf_scores: dict[tuple[str, int], float] = {}
+    item_map: dict[tuple[str, int], dict[str, Any]] = {}
 
-    # Add semantic results first (ranked by relevance)
-    for r in valid_semantic:
+    for rank, r in enumerate(valid_semantic, 1):
         key = (r["file"], r["line"])
-        if key not in seen:
-            seen.add(key)
-            r["source"] = "semantic"
-            merged.append(r)
+        rrf_scores[key] = rrf_scores.get(key, 0) + 1.0 / (_RRF_K + rank)
+        r["source"] = "semantic"
+        item_map[key] = r
 
-    # Add non-overlapping text results
-    for r in text_results:
+    for rank, r in enumerate(text_results, 1):
         key = (r["file"], r["line"])
-        if key not in seen:
-            seen.add(key)
+        rrf_scores[key] = rrf_scores.get(key, 0) + 1.0 / (_RRF_K + rank)
+        if key not in item_map:
             r["source"] = "text"
-            merged.append(r)
+            item_map[key] = r
+        else:
+            item_map[key]["source"] = "hybrid"
 
-    # Prepend any error dicts so the caller knows semantic search had issues
-    return errors + merged[:max_results]
+    sorted_keys = sorted(rrf_scores, key=lambda k: rrf_scores[k], reverse=True)
+    merged = [item_map[k] for k in sorted_keys[:max_results]]
+
+    return errors + merged
 
 
 def _fallback_text_search(
@@ -986,7 +1068,7 @@ def get_context(symbol_name: str, file_hint: str | None = None) -> dict[str, Any
     if _symbol_index is None:
         return {"symbol": symbol_name, "error": "Symbol index not initialized"}
 
-    result = _symbol_index.get_context(symbol_name, file_hint=file_hint)
+    result = _symbol_index.get_context(symbol_name, file_hint=file_hint, repo=_repo)
 
     # Cap unbounded call graph sets
     for field in ("calls", "called_by"):
@@ -1040,13 +1122,14 @@ def get_impact(
         end_line,
         max_depth=max_depth,
         direction=direction,
+        repo=_repo,
     )
 
     # Cap items per depth level in upstream/downstream impact
     for direction_key in ("upstream_impact", "downstream_impact"):
         impact = result.get(direction_key)
         if isinstance(impact, dict):
-            for depth_key, items in impact.items():
+            for depth_key, items in list(impact.items()):
                 if isinstance(items, list) and len(items) > 50:
                     impact[depth_key] = items[:50]
                     impact[f"{depth_key}_partial"] = True
@@ -1075,7 +1158,7 @@ def get_file_overview(file_path: str) -> dict[str, Any]:
     # Validate the file path
     _resolve_and_validate(file_path)
 
-    result = _symbol_index.get_file_overview(file_path)
+    result = _symbol_index.get_file_overview(file_path, repo=_repo)
 
     imported_by = result.get("imported_by")
     if isinstance(imported_by, list) and len(imported_by) > 50:
@@ -1151,6 +1234,7 @@ def trace_flow(
         entry_point,
         file_hint=file_hint,
         max_depth=max_depth,
+        repo=_repo,
     )
 
     steps = result.get("steps")
@@ -1182,7 +1266,7 @@ def get_routes_map(framework: str | None = None) -> list[dict[str, Any]]:
     """
     from shared.route_maps import get_routes_map as _get_routes_map
 
-    return _get_routes_map(repo_path=_repo_path, framework=framework)
+    return _get_routes_map(repo_path=_repo_path, framework=framework, repo=_repo)
 
 
 # ---------------------------------------------------------------------------
@@ -1202,7 +1286,7 @@ def get_tools_map() -> list[dict[str, Any]]:
     """
     from shared.route_maps import get_tools_map as _get_tools_map
 
-    return _get_tools_map(repo_path=_repo_path)
+    return _get_tools_map(repo_path=_repo_path, repo=_repo)
 
 
 # ---------------------------------------------------------------------------

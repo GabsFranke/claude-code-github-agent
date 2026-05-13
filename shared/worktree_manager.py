@@ -9,12 +9,19 @@ import asyncio
 import logging
 import shutil
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from shared import execute_git_command
 from shared.constants import sanitize_repo_key
 
 logger = logging.getLogger(__name__)
+
+
+class HasListSessions(Protocol):
+    """Protocol for session stores that can enumerate active sessions."""
+
+    async def list_sessions(self, repo: str) -> list[Any]: ...
+
 
 WORKTREE_BASE = Path.home() / ".claude" / "worktrees"
 
@@ -181,12 +188,62 @@ def get_project_dir_for_worktree(worktree_path: Path) -> Path:
     return Path.home() / ".claude" / "projects" / safe_cwd
 
 
+async def _deregister_worktree(bare_repo: str | None, worktree_path: Path) -> None:
+    """Deregister a worktree from git before removing its directory.
+
+    If ``bare_repo`` is provided, uses ``git worktree remove --force``.
+    If ``bare_repo`` is ``None``, attempts to detect it from the worktree's
+    ``.git`` file (which points back to the bare repo).  Falls back
+    gracefully if detection fails.
+    """
+    if bare_repo is None:
+        # Try to detect bare repo from the worktree's .git file
+        git_file = worktree_path / ".git"
+        if git_file.is_file():
+            try:
+                content = git_file.read_text().strip()
+                # .git file contains: gitdir: /path/to/bare.git/worktrees/name
+                if content.startswith("gitdir: "):
+                    gitdir = content[len("gitdir: ") :]
+                    # Strip /worktrees/... suffix to get bare repo path
+                    worktrees_suffix = "/worktrees/"
+                    idx = gitdir.find(worktrees_suffix)
+                    if idx >= 0:
+                        bare_repo = gitdir[:idx]
+            except Exception as e:
+                logger.debug(f"Could not detect bare repo from .git file: {e}")
+
+    if bare_repo:
+        try:
+            await execute_git_command(
+                [
+                    "git",
+                    f"--git-dir={bare_repo}",
+                    "worktree",
+                    "remove",
+                    "--force",
+                    str(worktree_path),
+                ]
+            )
+        except Exception as e:
+            logger.debug(f"Git worktree remove failed (may not be registered): {e}")
+
+
 async def cleanup_worktrees(
     repo: str,
     thread_type: str,
     thread_id: str,
+    bare_repo: str | None = None,
 ) -> None:
-    """Remove all worktrees for a specific thread (PR close, issue close, etc.)."""
+    """Remove all worktrees for a specific thread (PR close, issue close, etc.).
+
+    Args:
+        repo: Repository full name (``owner/repo``).
+        thread_type: One of ``pr``, ``issue``, ``discussion``.
+        thread_id: Issue/PR/discussion number.
+        bare_repo: Path to the bare repository for git worktree deregistration.
+            If ``None``, attempts to detect from each worktree's ``.git`` file.
+    """
     safe_repo = sanitize_repo_key(repo)
     thread_dir = WORKTREE_BASE / safe_repo / f"{thread_type}-{thread_id}"
 
@@ -196,6 +253,8 @@ async def cleanup_worktrees(
     for workflow_dir in thread_dir.iterdir():
         if workflow_dir.is_dir():
             try:
+                # Deregister from git FIRST, then remove files
+                await _deregister_worktree(bare_repo, workflow_dir)
                 await asyncio.to_thread(shutil.rmtree, workflow_dir, ignore_errors=True)
                 project_dir = get_project_dir_for_worktree(workflow_dir)
                 if project_dir.exists():
@@ -213,8 +272,17 @@ async def cleanup_worktrees(
         pass
 
 
-async def cleanup_worktrees_by_branch(repo: str, branch: str) -> None:
-    """Remove worktrees tracking a specific branch (branch deleted event)."""
+async def cleanup_worktrees_by_branch(
+    repo: str, branch: str, bare_repo: str | None = None
+) -> None:
+    """Remove worktrees tracking a specific branch (branch deleted event).
+
+    Args:
+        repo: Repository full name (``owner/repo``).
+        branch: Branch name to match for cleanup.
+        bare_repo: Path to the bare repository for git worktree deregistration.
+            If ``None``, attempts to detect from each worktree's ``.git`` file.
+    """
     safe_repo = sanitize_repo_key(repo)
     repo_dir = WORKTREE_BASE / safe_repo
     if not repo_dir.exists():
@@ -238,6 +306,8 @@ async def cleanup_worktrees_by_branch(repo: str, branch: str) -> None:
                     ]
                 )
                 if code == 0 and branch in (out or ""):
+                    # Deregister from git FIRST, then remove files
+                    await _deregister_worktree(bare_repo, workflow_dir)
                     await asyncio.to_thread(
                         shutil.rmtree, workflow_dir, ignore_errors=True
                     )
@@ -253,7 +323,7 @@ async def cleanup_worktrees_by_branch(repo: str, branch: str) -> None:
                 logger.debug(f"Worktree branch check/remove failed: {e}")
 
 
-async def detect_orphan_worktrees(session_store: Any) -> list[Path]:
+async def detect_orphan_worktrees(session_store: HasListSessions) -> list[Path]:
     """Find worktrees on disk with no corresponding Redis session.
 
     Returns list of orphan paths for optional cleanup.

@@ -267,13 +267,10 @@ Total Matches: {result['total_matches']}{truncated_note}
                 "arguments": arguments,
             },
         )
-        import traceback
-
         return {
             "error": {
                 "code": -32603,
                 "message": f"Tool execution failed: {type(e).__name__}: {e}",
-                "data": {"traceback": traceback.format_exc()},
             }
         }
 

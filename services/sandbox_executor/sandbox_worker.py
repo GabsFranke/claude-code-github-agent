@@ -77,7 +77,10 @@ async def _process_cleanup_requests(redis: Any) -> None:
                 logger.info(
                     f"Cleaning up worktrees for {repo}/{thread_type}/{thread_id}"
                 )
-                await cleanup_worktrees(repo, thread_type, thread_id)
+                bare_repo = os.path.join("/var/cache/repos", f"{repo}.git")
+                await cleanup_worktrees(
+                    repo, thread_type, thread_id, bare_repo=bare_repo
+                )
 
                 # Also clean up session metadata
                 try:
@@ -140,7 +143,8 @@ async def _process_cleanup_requests(redis: Any) -> None:
             elif action == "cleanup_branch":
                 branch = msg.get("branch", "")
                 logger.info(f"Cleaning up worktrees for branch {branch} in {repo}")
-                await cleanup_worktrees_by_branch(repo, branch)
+                bare_repo = os.path.join("/var/cache/repos", f"{repo}.git")
+                await cleanup_worktrees_by_branch(repo, branch, bare_repo=bare_repo)
 
         except Exception as e:
             logger.error(f"Failed to process cleanup request: {e}", exc_info=True)
