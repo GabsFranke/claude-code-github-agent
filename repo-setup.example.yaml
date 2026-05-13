@@ -5,12 +5,17 @@
 # Use a plain string for a single command, or a | block for a multi-line
 # shell script that runs in one bash session (environment is shared within
 # the block — useful for `source`, `export`, venv activation, etc.).
+#
+# $FAST_CACHE is automatically available in every setup command. It points to
+# a per-worktree directory on the native Docker volume — use it to keep heavy
+# file I/O (pip install, npm ci, cargo build) off the slow Docker Desktop
+# bind mount on Windows/macOS. See docs/REPO_SETUP.md for details.
 
 repositories:
-  # Python project with venv (recommended — isolated per job)
+  # Python project with venv — using $FAST_CACHE to avoid slow bind-mount I/O
   myorg/python-api:
     setup_commands:
-      - "python -m venv .venv"
+      - "python -m venv $FAST_CACHE/.venv && ln -sfn $FAST_CACHE/.venv .venv"
       - |
         .venv/bin/pip install -r requirements.txt
         .venv/bin/pip install -r requirements-dev.txt
@@ -19,13 +24,13 @@ repositories:
       PYTHONPATH: "/workspace/src"
       ENVIRONMENT: "test"
 
-  # Node.js project
+  # Node.js project — npm cache and node_modules on fast volume
   myorg/frontend:
     setup_commands:
       - |
         sudo apt-get update
         sudo apt-get install -y nodejs npm
-      - "npm ci"
+      - "npm ci --cache $FAST_CACHE/.npm && mv node_modules $FAST_CACHE/ && ln -sfn $FAST_CACHE/node_modules ."
       - "npm run build:dev"
     timeout: 300 # Includes time for Node.js installation
 
@@ -41,7 +46,7 @@ repositories:
     env:
       RAILS_ENV: "test"
 
-  # Go project
+  # Go project — go module cache on fast volume
   myorg/go-service:
     setup_commands:
       - |
@@ -50,17 +55,23 @@ repositories:
       - "go mod download"
       - "go build ./..."
     timeout: 300
+    env:
+      GOPATH: "$FAST_CACHE/go"
 
-  # Rust project — rustup install and cargo must share the same shell
-  # so that `source` takes effect before cargo runs
+  # Rust project — cargo build cache on fast volume
+  # rustup install and cargo must share the same shell so that `source` takes
+  # effect before cargo runs
   myorg/rust-cli:
     setup_commands:
       - |
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
         source $HOME/.cargo/env
+        mkdir -p $FAST_CACHE/target && ln -sfn $FAST_CACHE/target target
         cargo fetch
         cargo build --release
     timeout: 900 # 15 minutes for Rust builds
+    env:
+      CARGO_TARGET_DIR: "$FAST_CACHE/target"
 
   # Monorepo (Node.js with multiple workspaces)
   myorg/monorepo:
@@ -69,31 +80,31 @@ repositories:
         sudo apt-get update
         sudo apt-get install -y nodejs npm
         sudo npm install -g yarn
-      - "yarn install --frozen-lockfile"
+      - "yarn install --frozen-lockfile --cache-folder $FAST_CACHE/.yarn"
       - |
         yarn workspace @myorg/api build
         yarn workspace @myorg/web build
     timeout: 600
 
-  # Java/Maven project
+  # Java/Maven project — local repository on fast volume
   myorg/java-service:
     setup_commands:
       - |
         sudo apt-get update
         sudo apt-get install -y default-jdk maven
-      - "mvn dependency:resolve"
-      - "mvn compile -DskipTests"
+      - "mvn dependency:resolve -Dmaven.repo.local=$FAST_CACHE/.m2"
+      - "mvn compile -DskipTests -Dmaven.repo.local=$FAST_CACHE/.m2"
     timeout: 600
 
-  # Fullstack (Python backend + Node.js frontend)
+  # Fullstack (Python backend + Node.js frontend) — both on fast volume
   myorg/fullstack:
     setup_commands:
-      - "python -m venv .venv"
+      - "python -m venv $FAST_CACHE/.venv && ln -sfn $FAST_CACHE/.venv .venv"
       - ".venv/bin/pip install -r backend/requirements.txt"
       - |
         sudo apt-get update
         sudo apt-get install -y nodejs npm
-      - "npm ci --prefix frontend"
+      - "npm ci --prefix frontend --cache $FAST_CACHE/.npm"
       - "npm run build --prefix frontend"
     timeout: 400
 
@@ -129,3 +140,5 @@ default:
 # - Timeout is a shared budget across all steps
 # - Use -y flag with apt-get to avoid interactive prompts
 # - Environment variables in `env:` are merged with the system environment
+# - $FAST_CACHE is always available: a per-worktree dir on the native Docker
+#   volume — use it to keep heavy I/O off the slow Windows/macOS bind mount

@@ -1,6 +1,7 @@
 """Git command execution utilities."""
 
 import asyncio
+import warnings
 
 
 async def execute_git_command(
@@ -9,7 +10,8 @@ async def execute_git_command(
     """Execute a git command asynchronously.
 
     Args:
-        cmd: Git command to execute (string for backward compatibility, list preferred)
+        cmd: Git command to execute (list preferred; string deprecated due to
+             shell injection risk).
         cwd: Optional working directory
 
     Returns:
@@ -31,7 +33,14 @@ async def execute_git_command(
             stderr=asyncio.subprocess.PIPE,
         )
     else:
-        # Legacy string format - validate it starts with 'git'
+        # Legacy string format - shell injection risk, emit deprecation warning
+        warnings.warn(
+            "Passing a string to execute_git_command() is deprecated due to "
+            "shell injection risk. Use list format instead: "
+            '["git", "arg1", "arg2"]',
+            DeprecationWarning,
+            stacklevel=2,
+        )
         if not cmd.strip().startswith("git ") and cmd.strip() != "git":
             raise ValueError(f"Command must start with 'git', got: {cmd}")
         process = await asyncio.create_subprocess_shell(

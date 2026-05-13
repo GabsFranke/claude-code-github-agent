@@ -153,9 +153,9 @@ class TestWorkflowEngine:
         """Test event to workflow mapping."""
         engine = WorkflowEngine(temp_workflow_file)
 
-        assert engine._event_map["pull_request.opened"] == "review-pr"
-        assert engine._event_map["issues.opened"] == "triage-issue"
-        assert engine._event_map["issues.labeled"] == "triage-issue"
+        assert engine._event_map["pull_request.opened"] == ["review-pr"]
+        assert engine._event_map["issues.opened"] == ["triage-issue"]
+        assert engine._event_map["issues.labeled"] == ["triage-issue"]
 
     def test_command_mapping(self, temp_workflow_file):
         """Test command to workflow mapping."""
@@ -172,7 +172,7 @@ class TestWorkflowEngine:
 
         workflow = engine.get_workflow_for_event("pull_request", "opened")
 
-        assert workflow == "review-pr"
+        assert workflow == ["review-pr"]
 
     def test_get_workflow_for_event_without_action(self, temp_workflow_file):
         """Test getting workflow for event without action."""
@@ -180,7 +180,7 @@ class TestWorkflowEngine:
 
         workflow = engine.get_workflow_for_event("pull_request")
 
-        assert workflow is None  # No generic pull_request trigger
+        assert workflow == []  # No generic pull_request trigger
 
     def test_get_workflow_for_event_not_found(self, temp_workflow_file):
         """Test getting workflow for unknown event."""
@@ -188,7 +188,7 @@ class TestWorkflowEngine:
 
         workflow = engine.get_workflow_for_event("unknown_event", "action")
 
-        assert workflow is None
+        assert workflow == []
 
     def test_get_workflow_for_command(self, temp_workflow_file):
         """Test getting workflow for command."""
@@ -430,9 +430,9 @@ class TestWorkflowEngine:
         assert system_context is not None
         assert "issue #42" in system_context
         assert "test/project" in system_context  # Template uses {repo}
-        assert (
-            "add labels" in system_context.lower()
-        )  # Check system context, not prompt
+        # Verify placeholders were actually substituted (not left as raw template)
+        assert "{issue_number}" not in system_context
+        assert "{repo}" not in system_context
 
     def test_empty_issue_number(self, tmp_path):
         """Test building prompt with None issue_number."""
@@ -491,7 +491,7 @@ class TestWorkflowEngineIntegration:
 
         # Test common patterns
         pr_workflow = engine.get_workflow_for_event("pull_request", "opened")
-        assert pr_workflow is not None
+        assert pr_workflow
 
         review_workflow = engine.get_workflow_for_command("/review")
         assert review_workflow is not None
@@ -851,8 +851,8 @@ class TestPerEventFilters:
 
     def test_event_map_has_both_events(self, engine_per_event):
         """Both events are in the event map."""
-        assert engine_per_event._event_map["pull_request.opened"] == "review-pr"
-        assert engine_per_event._event_map["pull_request.labeled"] == "review-pr"
+        assert engine_per_event._event_map["pull_request.opened"] == ["review-pr"]
+        assert engine_per_event._event_map["pull_request.labeled"] == ["review-pr"]
 
     def test_per_event_filters_stored(self, engine_per_event):
         """Only the labeled event has per-event filters stored."""
@@ -864,8 +864,8 @@ class TestPerEventFilters:
 
     def test_mixed_string_and_structured_events(self, engine_per_event):
         """Plain string and structured events coexist in the same workflow."""
-        assert engine_per_event._event_map["issues.opened"] == "mixed-format"
-        assert engine_per_event._event_map["issues.labeled"] == "mixed-format"
+        assert engine_per_event._event_map["issues.opened"] == ["mixed-format"]
+        assert engine_per_event._event_map["issues.labeled"] == ["mixed-format"]
         assert ("mixed-format", "issues.labeled") in engine_per_event._event_filters
         assert ("mixed-format", "issues.opened") not in engine_per_event._event_filters
 

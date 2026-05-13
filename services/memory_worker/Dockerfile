@@ -8,6 +8,7 @@ WORKDIR /app
 # Minimal OS deps (no git/build tools needed — just Python and file I/O)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
+    socat \
     && rm -rf /var/lib/apt/lists/*
 
 # Shared utilities and subagent definitions
@@ -29,12 +30,7 @@ COPY services/sandbox_executor/requirements.txt ./requirements.txt
 RUN pip3 install --no-cache-dir -r requirements.txt
 
 # Create persistent memory directory and set ownership
-RUN mkdir -p /home/bot/.claude/projects && chown -R bot:bot /home/bot/.claude/projects
-
-# Create agent memory directory for writing MEMORY.md
-RUN mkdir -p /home/bot/agent-memory && chown -R bot:bot /home/bot/agent-memory
-# Create transcript staging directory (shared volume with sandbox_worker)
-RUN mkdir -p /home/bot/transcripts && chown -R bot:bot /home/bot/transcripts
+RUN mkdir -p /home/bot/.claude/projects /home/bot/.claude/memory && chown -R bot:bot /home/bot/.claude
 
 # Set ownership
 RUN chown -R bot:bot /app /home/bot

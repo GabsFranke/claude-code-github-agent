@@ -60,7 +60,9 @@ async def process_memory_job(message: dict, redis_client) -> None:
 
     logger.info(f"Processing memory job for {repo} [{hook_event}]: {transcript_path}")
 
-    memory_dir = f"/home/bot/agent-memory/{repo}/memory"
+    from pathlib import Path
+
+    memory_dir = str(Path.home() / ".claude" / "memory" / repo / "memory")
     os.makedirs(memory_dir, exist_ok=True)
 
     conversation_text = extract_conversation(transcript_path)
@@ -118,6 +120,7 @@ Extract memorable facts from the session transcript and update the memory files 
 
         logger.info(
             f"Memory extraction done for {repo} — "
+            f"session_id={result.get('session_id', 'N/A')[:8] if result.get('session_id') else 'N/A'}, "
             f"{result['num_turns']} turns, {result['duration_ms']}ms"
         )
 

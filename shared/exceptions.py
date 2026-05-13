@@ -63,3 +63,7 @@ class RepositorySyncError(AgentError):
 
 class WorktreeCreationError(AgentError):
     """Raised when git worktree creation fails."""
+
+
+class IndexingTimeoutError(AgentError):
+    """Raised when indexing wait times out."""

@@ -39,6 +39,9 @@ class LanguageConfig:
         decorator_types: AST node types that wrap definitions (e.g., Python decorators).
         definition_queries: Tree-sitter queries for extracting definitions (for repomap).
         reference_queries: Tree-sitter queries for extracting references (for repomap).
+        call_queries: Tree-sitter queries for extracting call relationships.
+        import_queries: Tree-sitter queries for extracting import relationships.
+        inheritance_queries: Tree-sitter queries for extracting inheritance relationships.
     """
 
     name: str
@@ -55,6 +58,11 @@ class LanguageConfig:
     # Repomap: tree-sitter queries for tag extraction
     definition_queries: tuple[tuple[str, str], ...] = ()
     reference_queries: tuple[tuple[str, str], ...] = ()
+
+    # Relationship queries: tree-sitter queries for call/import/inheritance extraction
+    call_queries: tuple[tuple[str, str], ...] = ()
+    import_queries: tuple[tuple[str, str], ...] = ()
+    inheritance_queries: tuple[tuple[str, str], ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +98,33 @@ LANGUAGES: dict[str, LanguageConfig] = {
             ),
         ),
         reference_queries=(("identifier", "(identifier) @name"),),
+        call_queries=(
+            ("call", "(call function: (identifier) @target) @node"),
+            (
+                "call_method",
+                "(call function: (attribute attribute: (identifier) @target)) @node",
+            ),
+        ),
+        import_queries=(
+            (
+                "import",
+                "(import_statement name: (dotted_name (identifier) @target)) @node",
+            ),
+            (
+                "import_from_module",
+                "(import_from_statement module_name: (dotted_name) @target) @node",
+            ),
+            (
+                "import_from_name",
+                "(import_from_statement name: (dotted_name (identifier) @target)) @node",
+            ),
+        ),
+        inheritance_queries=(
+            (
+                "inherit",
+                "(class_definition superclasses: (argument_list (identifier) @target)) @node",
+            ),
+        ),
     ),
     "javascript": LanguageConfig(
         name="javascript",
@@ -145,6 +180,25 @@ LANGUAGES: dict[str, LanguageConfig] = {
         reference_queries=(
             ("identifier", "(identifier) @name"),
             ("property", "(property_identifier) @name"),
+        ),
+        call_queries=(
+            ("call", "(call_expression function: (identifier) @target) @node"),
+            (
+                "call_member",
+                "(call_expression function: (member_expression property: (property_identifier) @target)) @node",
+            ),
+        ),
+        import_queries=(
+            ("import_source", "(import_statement source: (string) @target) @node"),
+            ("import_clause", "(import_clause (identifier) @target) @node"),
+            ("import_specifier", "(import_specifier name: (identifier) @target) @node"),
+            ("namespace_import", "(namespace_import (identifier) @target) @node"),
+        ),
+        inheritance_queries=(
+            (
+                "extend",
+                "(class_declaration (class_heritage (identifier) @target)) @node",
+            ),
         ),
     ),
     "typescript": LanguageConfig(
@@ -208,6 +262,29 @@ LANGUAGES: dict[str, LanguageConfig] = {
             ("identifier", "(identifier) @name"),
             ("type_identifier", "(type_identifier) @name"),
         ),
+        call_queries=(
+            ("call", "(call_expression function: (identifier) @target) @node"),
+            (
+                "call_member",
+                "(call_expression function: (member_expression property: (property_identifier) @target)) @node",
+            ),
+        ),
+        import_queries=(
+            ("import_source", "(import_statement source: (string) @target) @node"),
+            ("import_clause", "(import_clause (identifier) @target) @node"),
+            ("import_specifier", "(import_specifier name: (identifier) @target) @node"),
+            ("namespace_import", "(namespace_import (identifier) @target) @node"),
+        ),
+        inheritance_queries=(
+            (
+                "extend",
+                "(class_declaration (class_heritage (extends_clause (identifier) @target))) @node",
+            ),
+            (
+                "implement",
+                "(class_declaration (class_heritage (implements_clause (type_identifier) @target))) @node",
+            ),
+        ),
     ),
     "tsx": LanguageConfig(
         name="tsx",
@@ -269,6 +346,29 @@ LANGUAGES: dict[str, LanguageConfig] = {
         reference_queries=(
             ("identifier", "(identifier) @name"),
             ("type_identifier", "(type_identifier) @name"),
+        ),
+        call_queries=(
+            ("call", "(call_expression function: (identifier) @target) @node"),
+            (
+                "call_member",
+                "(call_expression function: (member_expression property: (property_identifier) @target)) @node",
+            ),
+        ),
+        import_queries=(
+            ("import_source", "(import_statement source: (string) @target) @node"),
+            ("import_clause", "(import_clause (identifier) @target) @node"),
+            ("import_specifier", "(import_specifier name: (identifier) @target) @node"),
+            ("namespace_import", "(namespace_import (identifier) @target) @node"),
+        ),
+        inheritance_queries=(
+            (
+                "extend",
+                "(class_declaration (class_heritage (extends_clause (identifier) @target))) @node",
+            ),
+            (
+                "implement",
+                "(class_declaration (class_heritage (implements_clause (type_identifier) @target))) @node",
+            ),
         ),
     ),
     "go": LanguageConfig(

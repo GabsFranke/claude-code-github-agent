@@ -20,19 +20,21 @@ class TestSkipSelfWithEventActor:
 
     def test_bot_opens_pr_should_skip(self, engine):
         """Bot opens PR - should skip automatic review."""
-        workflow_name = engine.get_workflow_for_event("pull_request", "opened")
-        if not workflow_name:
+        workflow_names = engine.get_workflow_for_event("pull_request", "opened")
+        if not workflow_names:
             pytest.skip("No workflow for pull_request.opened")
 
+        workflow_name = workflow_names[0]
         # Bot is the actor (sender) - should skip
         assert engine.should_skip_self(workflow_name, "bot-user", "bot-user") is True
 
     def test_human_opens_pr_should_not_skip(self, engine):
         """Human opens PR - should process review."""
-        workflow_name = engine.get_workflow_for_event("pull_request", "opened")
-        if not workflow_name:
+        workflow_names = engine.get_workflow_for_event("pull_request", "opened")
+        if not workflow_names:
             pytest.skip("No workflow for pull_request.opened")
 
+        workflow_name = workflow_names[0]
         # Human is the actor (sender) - should not skip
         assert engine.should_skip_self(workflow_name, "human-user", "bot-user") is False
 
@@ -84,10 +86,11 @@ class TestSkipSelfWithEventActor:
 
     def test_different_bot_usernames(self, engine):
         """Test with different bot username formats."""
-        workflow_name = engine.get_workflow_for_event("pull_request", "opened")
-        if not workflow_name:
+        workflow_names = engine.get_workflow_for_event("pull_request", "opened")
+        if not workflow_names:
             pytest.skip("No workflow for pull_request.opened")
 
+        workflow_name = workflow_names[0]
         # Test various bot username formats
         bot_usernames = [
             "claude-code-agent[bot]",
@@ -109,10 +112,11 @@ class TestSkipSelfWithEventActor:
 
     def test_empty_event_actor(self, engine):
         """Test with empty event actor (edge case)."""
-        workflow_name = engine.get_workflow_for_event("pull_request", "opened")
-        if not workflow_name:
+        workflow_names = engine.get_workflow_for_event("pull_request", "opened")
+        if not workflow_names:
             pytest.skip("No workflow for pull_request.opened")
 
+        workflow_name = workflow_names[0]
         # Empty actor should not match bot username
         assert (
             engine.should_skip_self(workflow_name, "", "claude-code-agent[bot]")
@@ -121,10 +125,11 @@ class TestSkipSelfWithEventActor:
 
     def test_case_sensitive_username_matching(self, engine):
         """Test that username matching is case-sensitive."""
-        workflow_name = engine.get_workflow_for_event("pull_request", "opened")
-        if not workflow_name:
+        workflow_names = engine.get_workflow_for_event("pull_request", "opened")
+        if not workflow_names:
             pytest.skip("No workflow for pull_request.opened")
 
+        workflow_name = workflow_names[0]
         # Different case should not match
         assert engine.should_skip_self(workflow_name, "Bot-User", "bot-user") is False
         assert engine.should_skip_self(workflow_name, "bot-user", "Bot-User") is False

@@ -2,12 +2,428 @@
 
 import asyncio
 import os
+import re
 import sys
 from collections.abc import Generator
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
+
+
+class FakeSurrealDB:
+    """A simple in-memory SurrealDB mock for tests.
+
+    Stores rows inserted via INSERT INTO and returns them
+    for SELECT queries. Supports basic RELATE graph edges and
+    UPDATE operations. Enough to make SymbolIndex operations work
+    without a real SurrealDB connection.
+    """
+
+    def __init__(self):
+        self._tables: dict[str, list[dict]] = {}
+        self._id_counter = 0
+
+    def _next_id(self) -> str:
+        self._id_counter += 1
+        return f"symbol:{self._id_counter}"
+
+    def _ensure_table(self, table: str) -> list[dict]:
+        if table not in self._tables:
+            self._tables[table] = []
+        return self._tables[table]
+
+    def query(self, sql: str, params: dict | None = None):
+        params = params or {}
+        sql_stripped = sql.strip()
+        sql_upper = sql_stripped.upper()
+
+        # DEFINE TABLE / FIELD / INDEX — schema DDL, ignore
+        if sql_upper.startswith("DEFINE"):
+            return []
+
+        # INSERT INTO symbol $records (batch upsert from _upsert_symbols)
+        if "INSERT INTO SYMBOL" in sql_upper and "$RECORDS" in sql_upper:
+            records = params.get("records", [])
+            table = self._ensure_table("symbol")
+            for rec in records:
+                if "id" not in rec:
+                    rec["id"] = self._next_id()
+                table.append(rec)
+            return []
+
+        # INSERT INTO _schema_meta { ... } ON DUPLICATE KEY UPDATE ...
+        if "INSERT INTO _SCHEMA_META" in sql_upper:
+            record = self._parse_inline_record(sql_stripped, params)
+            table = self._ensure_table("_schema_meta")
+            if "ON DUPLICATE KEY UPDATE" in sql_upper:
+                # Upsert: update existing record by id, or insert new one
+                rec_id = record.get("id")
+                existing = None
+                if rec_id:
+                    existing = next((r for r in table if r.get("id") == rec_id), None)
+                if existing:
+                    existing.update(record)
+                else:
+                    if "id" not in record:
+                        record["id"] = self._next_id()
+                    table.append(record)
+            else:
+                table.clear()
+                table.append(record)
+            return []
+
+        # INSERT INTO route { ... } or INSERT INTO tool_def { ... }
+        if "INSERT INTO ROUTE" in sql_upper or "INSERT INTO TOOL_DEF" in sql_upper:
+            record = self._parse_inline_record(sql_stripped, params)
+            tname = "route" if "ROUTE" in sql_upper else "tool_def"
+            if record:
+                if "id" not in record:
+                    record["id"] = self._next_id()
+                self._ensure_table(tname).append(record)
+            return []
+
+        # INSERT RELATION INTO <table> $records (batch edge insert)
+        if "INSERT RELATION INTO" in sql_upper and "$RECORDS" in sql_upper:
+            m = re.search(
+                r"INSERT\s+RELATION\s+INTO\s+(\w+)", sql_stripped, re.IGNORECASE
+            )
+            if m:
+                table_name = m.group(1).lower()
+                table = self._ensure_table(table_name)
+                records = params.get("records", [])
+                for rec in records:
+                    if "id" not in rec:
+                        rec["id"] = self._next_id()
+                    table.append(rec)
+            return []
+
+        # Other INSERT — ignore
+        if sql_upper.startswith("INSERT"):
+            return []
+
+        # DELETE FROM <table>
+        if sql_upper.startswith("DELETE"):
+            table_name = self._extract_table_name(sql_stripped)
+            if table_name:
+                t = self._ensure_table(table_name)
+                repo = params.get("repo")
+                fp = params.get("fp")
+                # Handle edge table deletes with dot-notation (in.filepath, in.repo)
+                if table_name in ("calls", "imports", "inherits", "contains_edge"):
+                    self._delete_from_edges(table_name, sql_stripped, params)
+                elif repo is not None and fp is not None:
+                    self._tables[table_name] = [
+                        r
+                        for r in t
+                        if not (r.get("repo") == repo and r.get("filepath") == fp)
+                    ]
+                elif repo is not None:
+                    self._tables[table_name] = [r for r in t if r.get("repo") != repo]
+                else:
+                    self._tables[table_name] = []
+            return []
+
+        # UPDATE _schema_meta SET repo_commit = $hash
+        if sql_upper.startswith("UPDATE"):
+            self._handle_update(sql_stripped, params)
+            return []
+
+        # RELATE $src->calls->$tgt SET source_line = $line
+        if sql_upper.startswith("RELATE"):
+            self._handle_relate(sql_stripped, params)
+            return []
+
+        # SELECT ... FROM symbol ...
+        if "SELECT" in sql_upper and "FROM SYMBOL" in sql_upper:
+            return self._select_from_table("symbol", sql_stripped, params)
+
+        # SELECT ... FROM _schema_meta ...
+        if "SELECT" in sql_upper and "_SCHEMA_META" in sql_upper:
+            return self._select_from_table("_schema_meta", sql_stripped, params)
+
+        # SELECT ... FROM route ...
+        if "SELECT" in sql_upper and "FROM ROUTE" in sql_upper:
+            return self._select_from_table("route", sql_stripped, params)
+
+        # SELECT ... FROM tool_def ...
+        if "SELECT" in sql_upper and "FROM TOOL_DEF" in sql_upper:
+            return self._select_from_table("tool_def", sql_stripped, params)
+
+        # SELECT ... FROM calls/imports/inherits/contains_edge
+        if "SELECT" in sql_upper:
+            return self._select_from_edge(sql_stripped, params)
+
+        # REMOVE TABLE — ignore
+        return []
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _parse_inline_record(self, sql: str, params: dict) -> dict:
+        """Parse SurrealQL inline record like { version: $ver, created_at: time::now() }."""
+        record: dict = {}
+        m = re.search(r"\{\s*(.+?)\s*\}", sql, re.DOTALL)
+        if m:
+            inner = m.group(1)
+            for pair in inner.split(","):
+                pair = pair.strip()
+                if ":" in pair:
+                    key, val = pair.split(":", 1)
+                    key = key.strip()
+                    val = val.strip()
+                    if val.startswith("$"):
+                        record[key] = params.get(val[1:])
+                    elif val.startswith("time::now()"):
+                        record[key] = "2024-01-01T00:00:00Z"
+                    else:
+                        stripped = val.strip("'\"")
+                        try:
+                            record[key] = int(stripped)
+                        except ValueError:
+                            try:
+                                record[key] = float(stripped)
+                            except ValueError:
+                                record[key] = stripped
+        return record
+
+    def _extract_table_name(self, sql: str) -> str | None:
+        """Extract table name from DELETE FROM <table>."""
+        m = re.search(r"DELETE\s+FROM\s+(\w+)", sql, re.IGNORECASE)
+        if m:
+            return m.group(1).lower()
+        return None
+
+    def _delete_from_edges(self, table_name: str, sql: str, params: dict) -> None:
+        """Handle DELETE FROM edge_table with repo/file filters.
+
+        Supports both dot-notation (WHERE in.repo = $repo) and subquery
+        (WHERE in IN (SELECT id FROM symbol WHERE repo = $repo)) patterns.
+        """
+        t = self._ensure_table(table_name)
+        sym_table = self._ensure_table("symbol")
+
+        repo = params.get("repo")
+        fp = params.get("fp")
+
+        # Check for subquery pattern: WHERE in IN (SELECT id FROM symbol WHERE repo = $repo)
+        subquery_match = re.search(
+            r"WHERE\s+in\s+IN\s+\(SELECT\s+id\s+FROM\s+symbol\s+WHERE\s+repo\s*=\s*\$(\w+)\)",
+            sql,
+            re.IGNORECASE,
+        )
+
+        def _get_field(rid, field_name):
+            if not rid:
+                return ""
+            for s in sym_table:
+                if s.get("id") == rid:
+                    return s.get(field_name, "")
+            return rid if isinstance(rid, str) else ""
+
+        if subquery_match:
+            # Subquery: delete edges where 'in' is in the set of symbol IDs for this repo
+            repo_ids = {s["id"] for s in sym_table if s.get("repo") == repo}
+            filtered = [r for r in t if r.get("in") not in repo_ids]
+        elif repo is not None and fp is not None:
+            # File-scoped delete: WHERE in.filepath = $fp AND in.repo = $repo
+            filtered = []
+            for r in t:
+                in_repo = _get_field(r.get("in"), "repo")
+                in_fp = _get_field(r.get("in"), "filepath")
+                if in_repo == repo and in_fp == fp:
+                    continue  # delete this one
+                filtered.append(r)
+        elif repo is not None:
+            # Repo-scoped delete: WHERE in.repo = $repo
+            filtered = [r for r in t if _get_field(r.get("in"), "repo") != repo]
+        else:
+            filtered = list(t)
+
+        self._tables[table_name] = filtered
+
+    def _handle_update(self, sql: str, params: dict) -> None:
+        """Handle UPDATE ... SET field = $param, ... (multiple SET clauses)."""
+        # Extract table name from UPDATE <table>
+        m = re.search(r"UPDATE\s+(\w+)", sql, re.IGNORECASE)
+        if not m:
+            return
+        table_name = m.group(1).lower()
+        table = self._ensure_table(table_name)
+        if not table:
+            table.append({})
+        # Apply all SET field = $param assignments
+        for m in re.finditer(r"(\w+)\s*=\s*\$(\w+)", sql, re.IGNORECASE):
+            field = m.group(1).lower()
+            param_name = m.group(2).lower()
+            # Skip SQL keywords that aren't fields
+            if field in ("set", "where", "and", "or", "from", "into"):
+                continue
+            table[0][field] = params.get(param_name)
+
+    def _handle_relate(self, sql: str, params: dict) -> None:
+        """Store a graph edge from RELATE $src->table->$tgt SET ..."""
+        m = re.search(r"RELATE\s+\$(\w+)\s*->(\w+)->\s*\$(\w+)", sql, re.IGNORECASE)
+        if m:
+            src_param = m.group(1).lower()
+            edge_table = m.group(2).lower()
+            tgt_param = m.group(3).lower()
+            src_id = params.get(src_param)
+            tgt_id = params.get(tgt_param)
+            record: dict = {"in": src_id, "out": tgt_id}
+            # Extract SET fields
+            set_m = re.search(r"SET\s+(.+)$", sql, re.IGNORECASE)
+            if set_m:
+                set_clause = set_m.group(1)
+                for pair in set_clause.split(","):
+                    if "=" in pair:
+                        k, v = pair.split("=", 1)
+                        k = k.strip().lower()
+                        v = v.strip()
+                        if v.startswith("$"):
+                            record[k] = params.get(v[1:])
+                        else:
+                            stripped = v.strip("'\"")
+                            try:
+                                record[k] = int(stripped)
+                            except ValueError:
+                                record[k] = stripped
+            self._ensure_table(edge_table).append(record)
+
+    def _select_from_table(self, table_name: str, sql: str, params: dict) -> list[dict]:
+        """Handle SELECT ... FROM <table> with WHERE and LIMIT."""
+        table = self._ensure_table(table_name)
+        results = list(table)
+
+        # Parse parameterized WHERE clauses: WHERE field = $param
+        for m in re.finditer(r"(\w+)\s*=\s*\$(\w+)", sql):
+            field = m.group(1).lower()
+            param_name = m.group(2).lower()
+            value = params.get(param_name)
+            if value is not None:
+                results = [r for r in results if r.get(field) == value]
+
+        # Parse literal WHERE clauses: WHERE kind = 'definition'
+        for m in re.finditer(r"(\w+)\s*=\s*'([^']+)'", sql):
+            field = m.group(1).lower()
+            value = m.group(2)
+            results = [r for r in results if r.get(field) == value]
+
+        # Parse IS NOT NULL conditions: WHERE field IS NOT NULL
+        for m in re.finditer(r"(\w+)\s+IS\s+NOT\s+NULL", sql, re.IGNORECASE):
+            field = m.group(1).lower()
+            results = [r for r in results if r.get(field) is not None]
+
+        # Parse != NONE / != NULL conditions: WHERE field != NONE
+        for m in re.finditer(r"(\w+)\s*!=\s*(?:NONE|NULL)", sql, re.IGNORECASE):
+            field = m.group(1).lower()
+            results = [r for r in results if r.get(field) is not None]
+
+        # LIMIT
+        limit_m = re.search(r"LIMIT\s+(\d+)", sql, re.IGNORECASE)
+        if limit_m:
+            results = results[: int(limit_m.group(1))]
+
+        # $k param limit (used by indexing worker)
+        k = params.get("k")
+        if k is not None and isinstance(k, int):
+            results = results[:k]
+
+        return results
+
+    def _select_from_edge(self, sql: str, params: dict) -> list[dict]:
+        """Handle SELECT ... FROM edge_table WHERE in/out.field = $param."""
+        edge_tables = ["calls", "imports", "inherits", "contains_edge"]
+        table_name = None
+        for t in edge_tables:
+            if t.upper() in sql.upper():
+                table_name = t
+                break
+        if not table_name:
+            return []
+
+        table = self._ensure_table(table_name)
+        results = list(table)
+
+        # Look up in/out symbol names from the symbol table
+        sym_table = self._ensure_table("symbol")
+
+        def _get_field(rid, field_name):
+            if not rid:
+                return ""
+            for s in sym_table:
+                if s.get("id") == rid:
+                    return s.get(field_name, "")
+            return rid if isinstance(rid, str) else ""
+
+        # Annotate edges with in.name, out.name, in.repo, out.repo for filtering
+        annotated = []
+        for r in results:
+            ann = dict(r)
+            ann["in.name"] = _get_field(r.get("in"), "name")
+            ann["out.name"] = _get_field(r.get("out"), "name")
+            ann["in.repo"] = _get_field(r.get("in"), "repo")
+            ann["out.repo"] = _get_field(r.get("out"), "repo")
+            ann["in.filepath"] = _get_field(r.get("in"), "filepath")
+            ann["out.filepath"] = _get_field(r.get("out"), "filepath")
+            # line is numeric — try int conversion
+            in_line = _get_field(r.get("in"), "line")
+            ann["in.line"] = (
+                int(in_line)
+                if isinstance(in_line, (int, float))
+                or (isinstance(in_line, str) and in_line.isdigit())
+                else in_line
+            )
+            out_line = _get_field(r.get("out"), "line")
+            ann["out.line"] = (
+                int(out_line)
+                if isinstance(out_line, (int, float))
+                or (isinstance(out_line, str) and out_line.isdigit())
+                else out_line
+            )
+            annotated.append(ann)
+
+        # Parse WHERE in.field = $param or WHERE out.field = $param
+        where_m = re.search(
+            r"WHERE\s+(in|out)\.(\w+)\s*=\s*\$(\w+)", sql, re.IGNORECASE
+        )
+        if where_m:
+            direction = where_m.group(1).lower()
+            field = where_m.group(2).lower()
+            param_name = where_m.group(3).lower()
+            value = params.get(param_name)
+            if value is not None:
+                lookup = f"{direction}.{field}"
+                annotated = [r for r in annotated if r.get(lookup) == value]
+
+        # Multi-field WHERE (e.g., in.filepath = $fp AND in.line = $line AND in.name = $name)
+        for m in re.finditer(r"(in|out)\.(\w+)\s*=\s*\$(\w+)", sql, re.IGNORECASE):
+            direction = m.group(1).lower()
+            field = m.group(2).lower()
+            param_name = m.group(3).lower()
+            value = params.get(param_name)
+            if value is not None:
+                lookup = f"{direction}.{field}"
+                annotated = [r for r in annotated if r.get(lookup) == value]
+
+        # Parse SELECT in/out.field AS alias (single or multi-alias)
+        aliases = re.findall(r"(in|out)\.(\w+)\s+AS\s+(\w+)", sql, re.IGNORECASE)
+        if aliases:
+            rows_out = []
+            for r in annotated:
+                row = {}
+                for direction, field, alias in aliases:
+                    direction = direction.lower()
+                    field = field.lower()
+                    alias = alias.lower()
+                    lookup = f"{direction}.{field}"
+                    row[alias] = r.get(lookup, "")
+                rows_out.append(row)
+            return rows_out
+
+        return annotated
+
 
 # CRITICAL: Set test environment variables BEFORE any imports
 # This allows worker.py and main.py to be imported without validation errors

@@ -23,6 +23,7 @@ This is a self-hosted GitHub bot that uses Claude Agent SDK to autonomously revi
 - **Python 3.11+** with async/await patterns
 - **FastAPI** for webhook service
 - **Redis** for message queues and job coordination
+- **SurrealDB** for code intelligence (vector search, symbol index, code graph)
 - **Claude Agent SDK** for autonomous operations
 - **GitHub MCP** for GitHub API interactions
 - **Git worktrees** for isolated workspaces

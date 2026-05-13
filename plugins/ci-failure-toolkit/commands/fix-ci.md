@@ -11,7 +11,7 @@ Analyze GitHub Actions workflow failures and coordinate specialized agents to im
 
 - First argument: Repository (owner/repo format, required)
 - Second argument: Workflow run ID or PR number (required)
-  **IMPORTANT:** A workflow run ID (e.g., `24425975972`) is NOT a commit SHA. It is a GitHub Actions run identifier — use it ONLY with `mcp__github-actions__*` tools (e.g., `get_workflow_run_summary`). Never pass it to `mcp__github__get_commit` or any tool that expects a commit SHA.
+  **IMPORTANT:** A workflow run ID (e.g., `24425975972`) is NOT a commit SHA. It is a GitHub Actions run identifier — use it ONLY with `mcp__github_actions__*` tools (e.g., `get_workflow_run_summary`). Never pass it to `mcp__github__get_commit` or any tool that expects a commit SHA.
 - Third argument: Failure type (optional: build, test, lint, deploy, all)
 
 **Context Variables Available:**
@@ -44,7 +44,7 @@ You are the main coordinator with these responsibilities:
 - **Subagents implement ALL fixes** - They work in your branch and commit their changes
 - **YOU create the PR** - After all fixes are committed by agents
 - **YOU post the final summary** - Comprehensive results to GitHub
-- **`gh` CLI is NOT available** - Never attempt `gh` commands; use `mcp__github__*` and `mcp__github-actions__*` tools exclusively
+- **`gh` CLI is NOT available** - Never attempt `gh` commands; use `mcp__github__*` and `mcp__github_actions__*` tools exclusively
 
 **CRITICAL - Your Job is Coordination, NOT Implementation:**
 
@@ -65,7 +65,7 @@ You are the main coordinator with these responsibilities:
 - ❌ **NEVER use Read or Bash to access workflow logs** - They are too large (often 50KB+) and will be truncated
 - ❌ **NEVER use `curl`, `gh` CLI, or direct HTTP requests to fetch logs** - Always use MCP tools instead
 - ❌ **NEVER extract tokens from git config or remote URLs** - Credentials are pre-configured; MCP tools handle auth automatically
-- ✅ **ALWAYS use GitHub Actions MCP tools (`mcp__github-actions__*`)** - They handle large logs efficiently and provide structured output
+- ✅ **ALWAYS use GitHub Actions MCP tools (`mcp__github_actions__*`)** - They handle large logs efficiently and provide structured output
 - ✅ **Use `get_failed_steps` with `log_lines_per_step: 200`** - This gives you ALL errors in one call
 - ✅ **Pass the COMPLETE failed steps output to subagents** - Don't just pass a snippet or the first error
 
@@ -123,16 +123,16 @@ Extract from $ARGUMENTS:
 
 **Use the GitHub Actions MCP tools - they fetch logs via API and handle size limits:**
 
-All tools use the `mcp__github-actions__` prefix. Call them directly as MCP tools.
+All tools use the `mcp__github_actions__` prefix. Call them directly as MCP tools.
 
-**Do NOT fall back to `curl`, `gh` CLI, or other direct methods if MCP tools seem unavailable.** If a `mcp__github-actions__*` tool call fails, try the next one in the recommended flow before considering alternatives. These tools are the only approved way to access logs.
+**Do NOT fall back to `curl`, `gh` CLI, or other direct methods if MCP tools seem unavailable.** If a `mcp__github_actions__*` tool call fails, try the next one in the recommended flow before considering alternatives. These tools are the only approved way to access logs.
 
 **IMPORTANT: You are ONLY gathering information here. Do NOT attempt to fix anything yourself.**
 
 **Step 2a: Get High-Level Summary (Always start here)**
 
 ```
-Tool: mcp__github-actions__get_workflow_run_summary
+Tool: mcp__github_actions__get_workflow_run_summary
 Arguments:
 {
     "owner": "owner-name",
@@ -148,7 +148,7 @@ Extract the job_id for the next step
 **Step 2b: Get Job Logs with Pagination (RECOMMENDED - avoids size issues)**
 
 ```
-Tool: mcp__github-actions__get_job_logs_raw
+Tool: mcp__github_actions__get_job_logs_raw
 Arguments:
 {
     "owner": "owner-name",
@@ -179,7 +179,7 @@ Strategy:
 ```
 
 ```
-Tool: mcp__github-actions__search_job_logs
+Tool: mcp__github_actions__search_job_logs
 Arguments:
 {
     "owner": "owner-name",
@@ -190,7 +190,7 @@ Arguments:
 
 ```
 
-Tool: mcp**github-actions**search_job_logs
+Tool: mcp**github_actions**search_job_logs
 Arguments:
 {
 "owner": "owner-name",
@@ -207,8 +207,8 @@ Useful for finding specific errors in very long logs
 
 **Recommended Flow:**
 
-1. Call `mcp__github-actions__get_workflow_run_summary` - identify failed jobs
-2. Call `mcp__github-actions__get_job_logs_raw` with `start_line: 0, num_lines: 500` - get first chunk
+1. Call `mcp__github_actions__get_workflow_run_summary` - identify failed jobs
+2. Call `mcp__github_actions__get_job_logs_raw` with `start_line: 0, num_lines: 500` - get first chunk
 3. Check `total_lines` in response to see how big the log is
 4. Calculate last chunk: `start_line = total_lines - 500` and fetch it (errors usually at end)
 5. Continue paginating as needed to get full context
@@ -224,7 +224,7 @@ Useful for finding specific errors in very long logs
 
 **Fallback: When GitHub Actions MCP Tools Are Unavailable**
 
-If `mcp__github-actions__*` tools are not available or return errors, use this alternative approach to gather failure information:
+If `mcp__github_actions__*` tools are not available or return errors, use this alternative approach to gather failure information:
 
 1. **Find the associated PR** using `mcp__github__search_pull_requests` with the head branch name from your context
 2. **Get check run details** using `mcp__github__pull_request_read` with `method: "get_check_runs"` — this shows which jobs passed/failed and their IDs
@@ -241,7 +241,7 @@ If `mcp__github-actions__*` tools are not available or return errors, use this a
 
 **Why this works:** Running tests locally is the most reliable fallback when CI logs are inaccessible. The local test suite matches CI, so failures reproduced locally directly correspond to CI failures.
 
-**When to use this fallback:** Only when `mcp__github-actions__*` tools are genuinely unavailable. Always try the primary approach first — it provides richer context (logs, stack traces, timing info) that local runs may not surface.
+**When to use this fallback:** Only when `mcp__github_actions__*` tools are genuinely unavailable. Always try the primary approach first — it provides richer context (logs, stack traces, timing info) that local runs may not surface.
 
 ### Step 3: Analyze Failure Scope and Type
 
@@ -772,7 +772,7 @@ All agents have the `git-worktree-workflow` skill and know how to:
 - **You create the branch first** - Before delegating to agents
 - **Agents commit to your branch** - They work in the same worktree
 - **You create the PR** - After all fixes are done
-- **GitHub MCP only** - Use `mcp__github__*` tools and `mcp__github-actions__*` tools, NOT `gh` CLI, `curl`, or direct HTTP requests
+- **GitHub MCP only** - Use `mcp__github__*` tools and `mcp__github_actions__*` tools, NOT `gh` CLI, `curl`, or direct HTTP requests
 - **Never extract credentials** - Do not read git config or remote URLs to obtain tokens; MCP tools handle auth automatically
 - **Delegate with context** - Provide error logs and clear instructions
 - **Trust the agents** - They have the `git-worktree-workflow` skill
@@ -793,7 +793,7 @@ echo "Created branch: $current_branch"
 
 ```
 # 2. Fetch workflow summary (fast, no logs)
-Tool: mcp__github-actions__get_workflow_run_summary
+Tool: mcp__github_actions__get_workflow_run_summary
 Arguments: {"owner": "owner", "repo": "repo", "run_id": "12345"}
 Result: summary with job list
 
@@ -802,7 +802,7 @@ Result: summary with job list
 # Extract the job_id for the failed job
 
 # 4. Get first chunk of logs to check size
-Tool: mcp__github-actions__get_job_logs_raw
+Tool: mcp__github_actions__get_job_logs_raw
 Arguments: {
     "owner": "owner",
     "repo": "repo",
@@ -819,7 +819,7 @@ Result: {
 }
 
 # 5. Get the last 500 lines (where errors usually are)
-Tool: mcp__github-actions__get_job_logs_raw
+Tool: mcp__github_actions__get_job_logs_raw
 Arguments: {
     "owner": "owner",
     "repo": "repo",
@@ -830,7 +830,7 @@ Arguments: {
 Result: Last 500 lines with all the errors
 
 # 6. If you need more context, paginate backwards
-Tool: mcp__github-actions__get_job_logs_raw
+Tool: mcp__github_actions__get_job_logs_raw
 Arguments: {
     "owner": "owner",
     "repo": "repo",

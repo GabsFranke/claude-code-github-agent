@@ -36,7 +36,7 @@ class TestFixReviewWorkflow:
         """Test that pull_request.labeled event triggers fix-review workflow."""
         workflow = engine.get_workflow_for_event("pull_request", "labeled")
 
-        assert workflow == "fix-review", (
+        assert "fix-review" in workflow, (
             "pull_request.labeled event should trigger fix-review workflow. "
             "Check workflows.yaml triggers configuration."
         )

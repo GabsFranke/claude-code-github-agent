@@ -11,7 +11,7 @@ from pathlib import Path
 
 
 def collection_name_for_repo(repo: str) -> str:
-    """Convert a repo slug (owner/repo) to a Qdrant-safe collection name."""
+    """Convert a repo slug (owner/repo) to a SurrealDB-safe collection name."""
     return repo.replace("/", "__")
 
 

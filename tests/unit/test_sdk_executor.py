@@ -132,14 +132,16 @@ class TestExecuteSDK:
             mock_client.receive_messages.return_value = mock_messages()
             mock_client_class.return_value = mock_client
 
-            result = await execute_sdk(
-                prompt="test",
-                options=mock_options,
-                collect_text=True,
-            )
+            # Patch TextBlock so isinstance checks pass against MagicMock blocks
+            with patch("shared.sdk_executor.TextBlock", MagicMock):
+                result = await execute_sdk(
+                    prompt="test",
+                    options=mock_options,
+                    collect_text=True,
+                )
 
-            assert "First part" in result["response"]
-            assert "Second part" in result["response"]
+                assert "First part" in result["response"]
+                assert "Second part" in result["response"]
 
 
 class TestExecuteSDKRetry:
@@ -171,13 +173,13 @@ class TestExecuteSDKRetry:
             mock_execute.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_retries_on_failure(self, mock_options):
-        """Test that execution retries on failure with exponential backoff."""
+    async def test_retries_on_transient_failure(self, mock_options):
+        """Test that execution retries on transient errors with exponential backoff."""
         with patch("shared.sdk_executor._execute_sdk_once") as mock_execute:
-            # Fail twice, then succeed
+            # Fail twice with transient errors, then succeed
             mock_execute.side_effect = [
-                RuntimeError("First failure"),
-                RuntimeError("Second failure"),
+                RuntimeError("Connection reset by peer"),
+                RuntimeError("502 Bad Gateway"),
                 {
                     "response": "success",
                     "num_turns": 1,
@@ -205,12 +207,12 @@ class TestExecuteSDKRetry:
 
     @pytest.mark.asyncio
     async def test_raises_after_max_retries(self, mock_options):
-        """Test that exception is raised after max retries exhausted."""
+        """Test that exception is raised after max retries exhausted for transient errors."""
         with patch("shared.sdk_executor._execute_sdk_once") as mock_execute:
-            mock_execute.side_effect = RuntimeError("Always fails")
+            mock_execute.side_effect = RuntimeError("503 Service Unavailable")
 
             with patch("shared.sdk_executor.asyncio.sleep"):
-                with pytest.raises(RuntimeError, match="Always fails"):
+                with pytest.raises(RuntimeError, match="503"):
                     await execute_sdk(
                         prompt="test",
                         options=mock_options,
@@ -236,13 +238,33 @@ class TestExecuteSDKRetry:
             mock_execute.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_timeout_never_retried(self, mock_options):
+        """Test that SDKTimeoutError is not retried even with max_retries > 1.
+
+        Retrying a timeout would just re-run the full session up to the same
+        wall — wasting up to (max_retries × timeout_seconds) before failing.
+        """
+        with patch("shared.sdk_executor._execute_sdk_once") as mock_execute:
+            mock_execute.side_effect = SDKTimeoutError("timed out after 1800s")
+
+            with pytest.raises(SDKTimeoutError):
+                await execute_sdk(
+                    prompt="test",
+                    options=mock_options,
+                    max_retries=3,  # Would normally allow 3 attempts
+                )
+
+            # Must only be called once — timeout is not retryable
+            mock_execute.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_exponential_backoff_calculation(self, mock_options):
         """Test that exponential backoff uses correct formula (base * 3^attempt)."""
         with patch("shared.sdk_executor._execute_sdk_once") as mock_execute:
             mock_execute.side_effect = [
-                RuntimeError("Fail 1"),
-                RuntimeError("Fail 2"),
-                RuntimeError("Fail 3"),
+                RuntimeError("ECONNRESET: connection lost"),
+                RuntimeError("429 Too Many Requests"),
+                RuntimeError("ETIMEDOUT: timed out"),
             ]
 
             with patch("shared.sdk_executor.asyncio.sleep") as mock_sleep:
@@ -258,3 +280,41 @@ class TestExecuteSDKRetry:
                 assert mock_sleep.call_count == 2
                 calls = [call[0][0] for call in mock_sleep.call_args_list]
                 assert calls == [5.0, 15.0]
+
+    @pytest.mark.asyncio
+    async def test_permanent_error_not_retried(self, mock_options):
+        """Test that permanent (non-transient) errors are raised immediately without retry.
+
+        Only transient errors (timeouts, connection resets, rate limits, 502/503)
+        should be retried. Permanent errors like config or validation issues will
+        fail the same way every time and must not waste retry attempts.
+        """
+        with patch("shared.sdk_executor._execute_sdk_once") as mock_execute:
+            mock_execute.side_effect = SDKError(
+                "Invalid configuration: missing API key"
+            )
+
+            with pytest.raises(SDKError, match="Invalid configuration"):
+                await execute_sdk(
+                    prompt="test",
+                    options=mock_options,
+                    max_retries=3,  # Would normally allow 3 attempts
+                )
+
+            # Must only be called once — permanent error is not retryable
+            mock_execute.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_no_retry_when_max_retries_is_one_permanent(self, mock_options):
+        """Test that a permanent error with max_retries=1 also does not retry."""
+        with patch("shared.sdk_executor._execute_sdk_once") as mock_execute:
+            mock_execute.side_effect = RuntimeError("Config validation failed")
+
+            with pytest.raises(RuntimeError, match="Config validation"):
+                await execute_sdk(
+                    prompt="test",
+                    options=mock_options,
+                    max_retries=1,
+                )
+
+            mock_execute.assert_called_once()

@@ -225,10 +225,12 @@ class TestSkipSelfIntegration:
         engine = WorkflowEngine(workflow_path)
 
         # Simulate bot creating PR (bot is the actor)
-        workflow_name = engine.get_workflow_for_event("pull_request", "opened")
+        workflow_names = engine.get_workflow_for_event("pull_request", "opened")
 
-        if workflow_name:
-            should_skip = engine.should_skip_self(workflow_name, "bot-user", "bot-user")
+        if workflow_names:
+            should_skip = engine.should_skip_self(
+                workflow_names[0], "bot-user", "bot-user"
+            )
             # Bot's own PRs should be skipped by default
             assert should_skip is True
 
@@ -244,11 +246,11 @@ class TestSkipSelfIntegration:
         engine = WorkflowEngine(workflow_path)
 
         # Simulate human creating PR (human is the actor)
-        workflow_name = engine.get_workflow_for_event("pull_request", "opened")
+        workflow_names = engine.get_workflow_for_event("pull_request", "opened")
 
-        if workflow_name:
+        if workflow_names:
             should_skip = engine.should_skip_self(
-                workflow_name, "human-user", "bot-user"
+                workflow_names[0], "human-user", "bot-user"
             )
             # Human PRs should not be skipped
             assert should_skip is False
@@ -292,10 +294,12 @@ class TestSkipSelfIntegration:
         engine = WorkflowEngine(workflow_path)
 
         # Simulate workflow_job.completed event triggered by bot
-        workflow_name = engine.get_workflow_for_event("workflow_job", "completed")
+        workflow_names = engine.get_workflow_for_event("workflow_job", "completed")
 
-        if workflow_name:
-            should_skip = engine.should_skip_self(workflow_name, "bot-user", "bot-user")
+        if workflow_names:
+            should_skip = engine.should_skip_self(
+                workflow_names[0], "bot-user", "bot-user"
+            )
             # CI failures triggered by bot should be skipped by default
             # (use /fix-ci command to manually trigger)
             assert should_skip is True

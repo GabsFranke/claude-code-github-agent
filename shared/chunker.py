@@ -56,7 +56,7 @@ class Chunk:
 
         The header gives the embedding model awareness of where this chunk
         lives in the codebase structure, improving retrieval quality.
-        Stored content in Qdrant remains raw source (via self.content).
+        Stored content in SurrealDB remains raw source (via self.content).
         """
         header = f"# {self.filepath}"
         if self.parent:

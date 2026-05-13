@@ -6,8 +6,34 @@ Tests the JSON-RPC protocol handling: initialize, tools/list, tools/call.
 import json
 import os
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
+
+from tests.conftest import FakeSurrealDB
+
+
+@pytest.fixture(autouse=True)
+def _mock_surrealdb():
+    """Mock SurrealDB for all tests — no real connection needed."""
+    fake_db = FakeSurrealDB()
+
+    def fake_query(query, vars=None):
+        return fake_db.query(query, vars)
+
+    with (
+        patch("shared.surrealdb_client.is_initialized", return_value=True),
+        patch("shared.surrealdb_client.get_surreal", return_value=fake_db),
+        patch("shared.surrealdb_client.init_surrealdb"),
+        patch("shared.surrealdb_client.apply_schema"),
+        patch("shared.surrealdb_client.query_surreal", side_effect=fake_query),
+        patch("shared.code_graph.is_initialized", return_value=True),
+        patch("shared.code_graph.apply_schema"),
+        patch("shared.code_graph.query_surreal", side_effect=fake_query),
+        patch("mcp_servers.codebase_tools.tools.init_surrealdb"),
+    ):
+        yield fake_db
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -69,7 +95,7 @@ async def test_initialize_returns_server_info(mock_server):
     response = await mock_server.handle_request(request)
 
     assert response["protocolVersion"] == "2024-11-05"
-    assert response["serverInfo"]["name"] == "codebase-tools"
+    assert response["serverInfo"]["name"] == "codebase_tools"
     assert response["serverInfo"]["version"] == "1.0.0"
     assert "tools" in response["capabilities"]
 
@@ -90,7 +116,7 @@ async def test_tools_list_returns_four_tools(mock_server):
     response = await mock_server.handle_request(request)
 
     tools = response["tools"]
-    assert len(tools) == 4
+    assert len(tools) == 11
 
     tool_names = {t["name"] for t in tools}
     assert tool_names == {
@@ -98,6 +124,13 @@ async def test_tools_list_returns_four_tools(mock_server):
         "find_references",
         "search_codebase",
         "read_file_summary",
+        "get_context",
+        "get_impact",
+        "get_file_overview",
+        "detect_changes",
+        "trace_flow",
+        "get_routes_map",
+        "get_tools_map",
     }
 
 
@@ -142,10 +175,11 @@ async def test_find_definitions_call(mock_server):
     assert content["type"] == "text"
 
     results = json.loads(content["text"])
-    assert isinstance(results, list)
-    assert len(results) >= 1
+    assert isinstance(results, dict)
+    assert len(results.get("results", [])) >= 1
     assert any(
-        r.get("kind") == "class" and "App" in r.get("signature", "") for r in results
+        r.get("kind") == "class" and "App" in r.get("signature", "")
+        for r in results.get("results", [])
     )
 
 

@@ -1,6 +1,6 @@
 ---
 description: "Analyse a session transcript and improve agent instructions via a PR to develop"
-argument-hint: "<transcript_summary_path> <workflow_name> <target_repo> [num_turns] [is_error]"
+argument-hint: "<transcript_summary_path> <workflow_name> <target_repo> [num_turns] [is_error] [subagent]"
 ---
 
 # Retrospector
@@ -43,10 +43,9 @@ When analyzing transcripts, you need to know what tools agents have access to so
 
 **Search and exploration tools:**
 - `read_file_summary` — AST-extracted file overview at ~15% token cost of full `Read`
-- `semantic_search` — Natural language code search (Gemini embeddings + Qdrant)
+- `search_codebase` — Text, semantic, and hybrid code search
 - `find_definitions` — Locate symbol definitions by exact name
 - `find_references` — Find all usages of a symbol across the codebase
-- `search_codebase` — Regex search across the codebase
 
 **File tools:** `Read`, `Grep`, `Glob`, `Write`, `Edit`
 **GitHub tools:** `mcp__github__*` (PRs, issues, comments, reviews)
@@ -70,7 +69,7 @@ When scanning the transcript, flag these common problems:
 
 1. **Sequential file reading** — Agent reads 10+ files one-by-one in consecutive turns. Should use `read_file_summary` to triage, then deep-read selectively. This is the most common cause of turn exhaustion on large PRs.
 
-2. **Manual pattern searching** — Agent reads files to find where something is defined or how a pattern works. Should use `semantic_search`, `find_definitions`, or `search_codebase` instead.
+2. **Manual pattern searching** — Agent reads files to find where something is defined or how a pattern works. Should use `search_codebase` (text, semantic, or hybrid), `find_definitions`, or `find_references` instead.
 
 3. **Missing symbol tracing** — Agent changes or reviews code without checking where symbols are used downstream. Should use `find_references` to trace blast radius.
 

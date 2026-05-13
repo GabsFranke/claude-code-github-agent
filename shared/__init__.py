@@ -1,115 +1,109 @@
-"""Shared utilities for the GitHub Agent system."""
+"""Shared utilities for the GitHub Agent system.
 
-from .config import (
-    AnthropicConfig,
-    GitHubConfig,
-    LangfuseConfig,
-    QueueConfig,
-    WebhookConfig,
-    WorkerConfig,
-    get_webhook_config,
-    get_worker_config,
-)
-from .exceptions import (
-    AgentError,
-    AuthenticationError,
-    CommandExecutionError,
-    ConfigurationError,
-    GitHubAPIError,
-    QueueError,
-    RateLimitError,
-    RepositorySyncError,
-    RetryExhaustedError,
-    SDKError,
-    SDKInitializationError,
-    SDKTimeoutError,
-    TokenRefreshError,
-    WebhookValidationError,
-    WorktreeCreationError,
-)
-from .file_tree import EXCLUDE_DIRS, EXCLUDE_FILES, EXCLUDE_SUFFIXES, load_ignore_spec
-from .git_utils import execute_git_command
-from .github_auth import (
-    GitHubAuthService,
-    close_github_auth_service,
-    get_github_auth_service,
-)
-from .health import HealthChecker, HealthStatus
-from .http_client import AsyncHTTPClient, close_http_client, get_http_client
-from .job_queue import JobQueue
-from .logging_utils import setup_logging
-from .models import AgentRequest, AgentResponse
-from .queue import MessageQueue, PubSubQueue, RedisQueue, get_queue, wait_for_repo_sync
-from .rate_limiter import MultiRateLimiter, RateLimiter
-from .retry import async_retry
-from .signals import setup_graceful_shutdown
-from .utils import _MISSING, resolve_path
+This package uses lazy imports to avoid forcing heavy dependencies
+(httpx, pyjwt, etc.) on lightweight services that only need a subset
+of utilities. Import what you need directly:
 
-__all__ = [
+    from shared.logging_utils import setup_logging        # no heavy deps
+    from shared.streaming_session import StreamingSessionStore  # redis only
+
+Using `from shared import X` still works — it just defers the import
+until first access, so missing optional deps only fail if you actually
+use the module that needs them.
+"""
+
+import importlib as _importlib
+
+# Lazy-imported names — {name: module_path} where getattr(module, name) gives the value.
+_LAZY_NAMES = {
     # Config
-    "AnthropicConfig",
-    "GitHubConfig",
-    "LangfuseConfig",
-    "QueueConfig",
-    "WebhookConfig",
-    "WorkerConfig",
-    "get_webhook_config",
-    "get_worker_config",
+    "AnthropicConfig": ".config",
+    "GitHubConfig": ".config",
+    "LangfuseConfig": ".config",
+    "QueueConfig": ".config",
+    "WebhookConfig": ".config",
+    "WorkerConfig": ".config",
+    "get_webhook_config": ".config",
+    "get_worker_config": ".config",
     # Exceptions
-    "AgentError",
-    "AuthenticationError",
-    "CommandExecutionError",
-    "ConfigurationError",
-    "GitHubAPIError",
-    "QueueError",
-    "RateLimitError",
-    "RepositorySyncError",
-    "RetryExhaustedError",
-    "SDKError",
-    "SDKInitializationError",
-    "SDKTimeoutError",
-    "TokenRefreshError",
-    "WebhookValidationError",
-    "WorktreeCreationError",
-    # Git Utils
-    "execute_git_command",
-    # GitHub Auth
-    "GitHubAuthService",
-    "get_github_auth_service",
-    "close_github_auth_service",
-    # Health
-    "HealthChecker",
-    "HealthStatus",
-    # HTTP Client
-    "AsyncHTTPClient",
-    "get_http_client",
-    "close_http_client",
-    # Job Queue
-    "JobQueue",
-    # Logging
-    "setup_logging",
-    # Models
-    "AgentRequest",
-    "AgentResponse",
-    # Queue
-    "MessageQueue",
-    "RedisQueue",
-    "PubSubQueue",
-    "get_queue",
-    "wait_for_repo_sync",
-    # Rate Limiting
-    "RateLimiter",
-    "MultiRateLimiter",
-    # Retry
-    "async_retry",
-    # Signals
-    "setup_graceful_shutdown",
-    # Utils
-    "_MISSING",
-    "resolve_path",
+    "AgentError": ".exceptions",
+    "AuthenticationError": ".exceptions",
+    "CommandExecutionError": ".exceptions",
+    "ConfigurationError": ".exceptions",
+    "GitHubAPIError": ".exceptions",
+    "IndexingTimeoutError": ".exceptions",
+    "QueueError": ".exceptions",
+    "RateLimitError": ".exceptions",
+    "RepositorySyncError": ".exceptions",
+    "RetryExhaustedError": ".exceptions",
+    "SDKError": ".exceptions",
+    "SDKInitializationError": ".exceptions",
+    "SDKTimeoutError": ".exceptions",
+    "TokenRefreshError": ".exceptions",
+    "WebhookValidationError": ".exceptions",
+    "WorktreeCreationError": ".exceptions",
     # File tree
-    "EXCLUDE_DIRS",
-    "EXCLUDE_FILES",
-    "EXCLUDE_SUFFIXES",
-    "load_ignore_spec",
-]
+    "EXCLUDE_DIRS": ".file_tree",
+    "EXCLUDE_FILES": ".file_tree",
+    "EXCLUDE_SUFFIXES": ".file_tree",
+    "load_ignore_spec": ".file_tree",
+    # Git utils
+    "execute_git_command": ".git_utils",
+    # GitHub auth
+    "GitHubAuthService": ".github_auth",
+    "get_github_auth_service": ".github_auth",
+    "close_github_auth_service": ".github_auth",
+    # Health
+    "HealthChecker": ".health",
+    "HealthStatus": ".health",
+    # HTTP client
+    "AsyncHTTPClient": ".http_client",
+    "get_http_client": ".http_client",
+    "close_http_client": ".http_client",
+    # Job queue
+    "JobQueue": ".job_queue",
+    # Logging
+    "setup_logging": ".logging_utils",
+    # Models
+    "AgentRequest": ".models",
+    "AgentResponse": ".models",
+    # Queue
+    "MessageQueue": ".queue",
+    "RedisQueue": ".queue",
+    "PubSubQueue": ".queue",
+    "get_queue": ".queue",
+    "wait_for_indexing": ".queue",
+    "wait_for_repo_sync": ".queue",
+    # Rate limiting
+    "RateLimiter": ".rate_limiter",
+    "MultiRateLimiter": ".rate_limiter",
+    # Session store
+    "SessionStore": ".session_store",
+    "resolve_thread_type": ".session_store",
+    # Retry
+    "async_retry": ".retry",
+    # Signals
+    "setup_graceful_shutdown": ".signals",
+    # Utils
+    "_MISSING": ".utils",
+    "resolve_path": ".utils",
+}
+
+# Lazy-imported submodules — `from shared import dlq` returns the module object.
+_LAZY_SUBMODULES = frozenset({"dlq"})
+
+
+def __getattr__(name: str):
+    if name in _LAZY_NAMES:
+        module = _importlib.import_module(_LAZY_NAMES[name], __name__)
+        value = getattr(module, name)
+        globals()[name] = value
+        return value
+    if name in _LAZY_SUBMODULES:
+        module = _importlib.import_module(f".{name}", __name__)
+        globals()[name] = module
+        return module
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+__all__ = sorted(_LAZY_NAMES.keys()) + sorted(_LAZY_SUBMODULES)

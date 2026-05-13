@@ -1,4 +1,4 @@
-"""Background worker that chunks repos, generates embeddings, and stores in Qdrant.
+"""Background worker that chunks repos, generates embeddings, and stores in SurrealDB.
 
 Subscribes to two event sources:
   1. agent:sync:events (pub/sub) — triggers full repo indexing on sync completion
@@ -16,16 +16,21 @@ import os
 import shutil
 import sys
 import tempfile
-import uuid
 from pathlib import Path
 
-from shared import dlq as _dlq_mod
-from shared import setup_graceful_shutdown
+from shared import dlq as _dlq_mod, setup_graceful_shutdown
 from shared.chunker import chunk_repo
+from shared.code_graph import SymbolIndex
 from shared.dlq import enqueue_for_retry, is_transient_error
-from shared.file_tree import collection_name_for_repo
 from shared.logging_utils import setup_logging
 from shared.queue import RedisQueue
+from shared.route_maps import (
+    _upsert_routes,
+    _upsert_tools,
+    extract_mcp_tools as _extract_mcp_tools,
+    extract_routes,
+)
+from shared.surrealdb_client import apply_schema, get_surreal, init_surrealdb
 
 # Configure logging
 setup_logging(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -43,14 +48,14 @@ except Exception:
 
 if _indexing_config:
     INDEXING_ENABLED = _indexing_config.indexing_enabled
-    QDRANT_URL = _indexing_config.qdrant_url
+    SURREALDB_URL = _indexing_config.surrealdb_url
     GEMINI_API_KEY = _indexing_config.gemini_api_key
     EMBEDDING_MODEL = _indexing_config.embedding_model
     EMBEDDING_DIMENSION = _indexing_config.embedding_dimension
     EMBEDDING_BATCH_SIZE = _indexing_config.embedding_batch_size
 else:
     INDEXING_ENABLED = os.getenv("INDEXING_ENABLED", "true").lower() == "true"
-    QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
+    SURREALDB_URL = os.getenv("SURREALDB_URL", "ws://localhost:8000/rpc")
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
     EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "gemini-embedding-001")
     EMBEDDING_DIMENSION = int(os.getenv("EMBEDDING_DIMENSION", "1024"))
@@ -72,46 +77,17 @@ _CACHE_KEY = (
 
 
 # ---------------------------------------------------------------------------
-# Qdrant helpers
+# SurrealDB helpers
 # ---------------------------------------------------------------------------
 
 
-def _collection_name(repo: str) -> str:
-    """Convert repo slug to Qdrant collection name."""
-    return collection_name_for_repo(repo)
+async def ensure_surrealdb() -> None:
+    """Initialize SurrealDB connection and apply schema.
 
-
-async def ensure_collection(repo: str) -> str:
-    """Create or verify a Qdrant collection for the given repo.
-
-    Returns the collection name.
+    Must be called once before storing or querying symbols.
     """
-    from qdrant_client import QdrantClient
-    from qdrant_client.models import Distance, VectorParams
-
-    collection = _collection_name(repo)
-    client = QdrantClient(url=QDRANT_URL, timeout=10)
-
-    try:
-        collections = client.get_collections().collections
-        existing = {c.name for c in collections}
-
-        if collection not in existing:
-            client.create_collection(
-                collection_name=collection,
-                vectors_config=VectorParams(
-                    size=EMBEDDING_DIMENSION,
-                    distance=Distance.COSINE,
-                ),
-            )
-            logger.info(f"Created Qdrant collection: {collection}")
-    except Exception as e:
-        logger.error(f"Failed to ensure collection for {repo}: {e}")
-        raise
-    finally:
-        client.close()
-
-    return collection
+    init_surrealdb(SURREALDB_URL)
+    apply_schema()
 
 
 # ---------------------------------------------------------------------------
@@ -198,6 +174,7 @@ async def _embed_texts(
                     contents=batch,
                     config=types.EmbedContentConfig(
                         output_dimensionality=EMBEDDING_DIMENSION,
+                        task_type="RETRIEVAL_DOCUMENT",
                     ),
                 )
                 # Skip chunks with empty embeddings rather than substituting
@@ -289,6 +266,9 @@ async def batch_embed(texts: list[str], redis_client=None) -> list[list[float]]:
         zip(valid_local_indices, new_embeddings)  # type: ignore[arg-type]
     )
 
+    # Reverse map: global index -> position within miss_indices
+    index_to_local: dict[int, int] = {idx: pos for pos, idx in enumerate(miss_indices)}
+
     # Merge cached + new, skipping chunks without valid embeddings
     results: list[list[float]] = []
     skipped = 0
@@ -296,8 +276,7 @@ async def batch_embed(texts: list[str], redis_client=None) -> list[list[float]]:
         if cached_results[i] is not None:
             results.append(cached_results[i])  # type: ignore[arg-type]
         else:
-            # Find position of i within miss_indices
-            pos = miss_indices.index(i)
+            pos = index_to_local[i]
             if pos in local_to_embed:
                 results.append(local_to_embed[pos])
             else:
@@ -318,124 +297,89 @@ async def batch_embed(texts: list[str], redis_client=None) -> list[list[float]]:
 # ---------------------------------------------------------------------------
 
 
-def _point_id(filepath: str, start_line: int, kind: str, name: str) -> str:
-    """Deterministic UUID v5 point ID for deduplication."""
-    raw = f"{filepath}:{start_line}:{kind}:{name}"
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, raw))
+def _symbol_id(
+    filepath: str, start_line: int, kind: str, name: str, repo: str = ""
+) -> str:
+    """Deterministic record ID matching code_graph._upsert_symbols.
+
+    Uses SHA-256 of the composite key so that UPSERT updates existing
+    symbol records (created by code_graph.build) instead of creating
+    duplicates. The ID format must match code_graph._upsert_symbols.
+    """
+    raw_key = f"{repo}:{filepath}:{kind}:{name}:{start_line}"
+    return hashlib.sha256(raw_key.encode()).hexdigest()[:40]
 
 
 async def upsert_chunks(
-    collection: str,
+    repo: str,
     chunks: list,
     embeddings: list[list[float]],
-    commit_hash: str,
     removed_files: list[str] | None = None,
     full_index: bool = True,
 ) -> int:
-    """Upsert chunk embeddings into Qdrant.
+    """Upsert chunk embeddings into SurrealDB symbol table.
+
+    Uses UPSERT (insert-or-update) semantics via SurrealDB's UPSERT statement.
+    Previously used DELETE-then-INSERT which could fail with AlreadyExistsError
+    if the DELETE was partial or failed silently.
 
     Args:
-        collection: Qdrant collection name.
+        repo: Repository slug (e.g. "owner/name").
         chunks: List of Chunk objects.
         embeddings: Corresponding embedding vectors.
-        commit_hash: Current commit hash.
         removed_files: Files to delete from index (incremental mode).
-        full_index: If True, delete all stale points after upsert.
+        full_index: Ignored; retained for backward compatibility.
     """
-    from qdrant_client import QdrantClient
-    from qdrant_client.models import FieldCondition, Filter, MatchValue, PointStruct
+    db = get_surreal()
 
-    client = QdrantClient(url=QDRANT_URL, timeout=30)
-
-    try:
-        from datetime import UTC, datetime
-
-        # For incremental mode: delete all existing chunks for files being re-indexed.
-        # This handles line shifts and renamed functions within changed files.
-        if not full_index:
-            changed_filepaths = list({c.filepath for c in chunks})
-            for filepath in changed_filepaths:
-                client.delete(
-                    collection_name=collection,
-                    points_selector=Filter(
-                        must=[
-                            FieldCondition(
-                                key="filepath",
-                                match=MatchValue(value=filepath),
-                            )
-                        ]
-                    ),
+    # Delete symbols for removed files only (UPSERT handles new/changed)
+    if removed_files:
+        for filepath in removed_files:
+            try:
+                db.query(
+                    "DELETE FROM symbol WHERE repo = $repo AND filepath = $fp",
+                    {"repo": repo, "fp": filepath},
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to delete symbols for removed file %s: %s", filepath, e
                 )
 
-        points = []
-        for chunk, embedding in zip(chunks, embeddings):
-            point = PointStruct(
-                id=_point_id(chunk.filepath, chunk.start_line, chunk.kind, chunk.name),
-                vector=embedding,
-                payload={
-                    "filepath": chunk.filepath,
-                    "name": chunk.name,
-                    "kind": chunk.kind,
-                    "language": chunk.language,
-                    "parent": chunk.parent,
-                    "start_line": chunk.start_line,
-                    "end_line": chunk.end_line,
-                    "content": chunk.content[:2000],
-                    "commit_hash": commit_hash,
-                    "indexed_at": datetime.now(UTC).isoformat(),
-                },
-            )
-            points.append(point)
-
-        # Upsert in batches of 100
-        for i in range(0, len(points), 100):
-            batch = points[i : i + 100]
-            client.upsert(collection_name=collection, points=batch)
-
-        logger.info(f"Upserted {len(points)} points into {collection}")
-
-        # Cleanup stale points
+    # Upsert each chunk individually via its deterministic record ID.
+    # Use MERGE (not CONTENT) so that existing fields from code_graph
+    # (category, kind, etc.) are preserved and only embedding + content
+    # are added.
+    count = 0
+    for chunk, embedding in zip(chunks, embeddings):
+        record_id = _symbol_id(
+            chunk.filepath, chunk.start_line, chunk.kind, chunk.name, repo=repo
+        )
+        record = {
+            "name": chunk.name,
+            "kind": "definition",
+            "category": chunk.kind,
+            "filepath": chunk.filepath,
+            "line": chunk.start_line,
+            "end_line": chunk.end_line,
+            "language": chunk.language,
+            "repo": repo,
+            "embedding": embedding,
+            "content": chunk.content[:2000],
+        }
         try:
-            if full_index:
-                # Full index: delete everything from previous commits
-                client.delete(
-                    collection_name=collection,
-                    points_selector=Filter(
-                        must_not=[
-                            FieldCondition(
-                                key="commit_hash",
-                                match=MatchValue(value=commit_hash),
-                            )
-                        ]
-                    ),
-                )
-                logger.info(
-                    f"Cleaned up stale points in {collection} "
-                    f"(keeping commit {commit_hash[:8]})"
-                )
-            elif removed_files:
-                # Incremental: only delete chunks for removed files
-                for filepath in removed_files:
-                    client.delete(
-                        collection_name=collection,
-                        points_selector=Filter(
-                            must=[
-                                FieldCondition(
-                                    key="filepath",
-                                    match=MatchValue(value=filepath),
-                                )
-                            ]
-                        ),
-                    )
-                logger.info(
-                    f"Deleted chunks for {len(removed_files)} removed files in {collection}"
-                )
+            db.query(f"UPSERT symbol:{record_id} MERGE $record", {"record": record})
+            count += 1
         except Exception as e:
-            logger.warning(f"Stale point cleanup failed for {collection}: {e}")
+            logger.warning(
+                "Failed to upsert symbol %s (%s:%d): %s",
+                record_id,
+                chunk.filepath,
+                chunk.start_line,
+                e,
+            )
 
-        return len(points)
-    finally:
-        client.close()
+    logger.info("Upserted %d symbols for repo %s", count, repo)
+    return count
 
 
 # ---------------------------------------------------------------------------
@@ -555,9 +499,43 @@ async def _get_previous_commit(redis_client, repo: str, ref: str) -> str | None:
     return None
 
 
+def _build_code_graph(
+    worktree: str,
+    repo: str,
+    *,
+    changed_files: list[str] | None = None,
+) -> None:
+    """Build the code graph (definitions + relationships) from a worktree.
+
+    If changed_files is provided, does an incremental build on just those
+    files. Otherwise, does a full build (or skips if the commit is already
+    indexed via _is_commit_indexed).
+    """
+    idx = SymbolIndex(repo_path=Path(worktree), repo=repo)
+    if changed_files:
+        idx.build_incremental(changed_files)
+    else:
+        idx.build()
+
+
+def _build_route_maps(worktree: str, repo: str) -> None:
+    """Extract and persist API routes + MCP tool definitions from a worktree."""
+    repo_path = Path(worktree)
+    db = get_surreal()
+
+    routes = extract_routes(repo_path)
+    if routes:
+        _upsert_routes(db, routes, repo)
+        logger.info("Indexed %d API routes from %s", len(routes), worktree)
+
+    tools = _extract_mcp_tools(repo_path)
+    if tools:
+        _upsert_tools(db, tools, repo)
+        logger.info("Indexed %d MCP tool defs from %s", len(tools), worktree)
+
+
 async def _update_indexing_metadata(
     repo: str,
-    collection: str,
     commit_hash: str,
     chunk_count: int,
     ref: str,
@@ -569,7 +547,6 @@ async def _update_indexing_metadata(
     try:
         meta = json.dumps(
             {
-                "collection_name": collection,
                 "indexed_commit": commit_hash,
                 "chunk_count": chunk_count,
             }
@@ -582,6 +559,29 @@ async def _update_indexing_metadata(
             await redis_client.hset(key, ref, meta)  # type: ignore[misc]
         else:
             logger.warning(f"Failed to update indexing metadata: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Indexing event publishing
+# ---------------------------------------------------------------------------
+
+
+_INDEXING_EVENTS_CHANNEL = "agent:indexing:events"
+
+
+async def _publish_indexing_event(
+    redis_client, repo: str, ref: str, status: str, error: str | None = None
+) -> None:
+    """Publish an indexing lifecycle event to the pub/sub channel."""
+    if not redis_client:
+        return
+    event: dict[str, str] = {"status": status, "repo": repo, "ref": ref}
+    if error:
+        event["error"] = error
+    try:
+        await redis_client.publish(_INDEXING_EVENTS_CHANNEL, json.dumps(event))
+    except Exception as e:
+        logger.warning(f"Failed to publish indexing event: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -609,8 +609,8 @@ async def process_indexing_job(message: dict, redis_client=None) -> None:
         f"Processing indexing job for {repo} (trigger: {message.get('trigger', 'unknown')})"
     )
 
-    # Ensure Qdrant collection exists
-    collection = await ensure_collection(repo)
+    # Ensure SurrealDB schema is applied
+    await ensure_surrealdb()
 
     # Create worktree from bare repo cache
     worktree = None
@@ -649,9 +649,8 @@ async def process_indexing_job(message: dict, redis_client=None) -> None:
                     f"({previous_commit[:8]}..{commit_hash[:8]}), skipping"
                 )
                 # Still update metadata to refresh the commit hash
-                await _update_indexing_metadata(
-                    repo, collection, commit_hash, 0, ref, redis_client
-                )
+                await _update_indexing_metadata(repo, commit_hash, 0, ref, redis_client)
+                await _publish_indexing_event(redis_client, repo, ref, "complete")
                 return
 
             full_index = False
@@ -662,6 +661,29 @@ async def process_indexing_job(message: dict, redis_client=None) -> None:
             )
         else:
             logger.info(f"Full index for {repo} on {ref} (commit {commit_hash[:8]})")
+
+        # Build the code graph (definitions + call/import/inheritance edges)
+        # before chunking so that graph edges are pre-built for MCP tools.
+        # For incremental runs, only rebuild if the commit changed.
+        try:
+            await asyncio.to_thread(
+                _build_code_graph,
+                worktree,
+                repo,
+                changed_files=changed_files if not full_index else None,
+            )
+        except Exception as e:
+            logger.warning(
+                "Code graph build failed for %s: %s (chunking will continue)", repo, e
+            )
+
+        # Extract and persist API routes + MCP tool definitions
+        try:
+            await asyncio.to_thread(_build_route_maps, worktree, repo)
+        except Exception as e:
+            logger.warning(
+                "Route maps build failed for %s: %s (chunking will continue)", repo, e
+            )
 
         # Chunk the repo (full or incremental)
         chunks = await asyncio.to_thread(chunk_repo, Path(worktree), changed_files)
@@ -676,25 +698,26 @@ async def process_indexing_job(message: dict, redis_client=None) -> None:
         texts = [c.embed_text for c in chunks]
         embeddings = await batch_embed(texts, redis_client=redis_client)
 
-        # Upsert into Qdrant
+        # Upsert into SurrealDB
         count = await upsert_chunks(
-            collection,
+            repo,
             chunks,
             embeddings,
-            commit_hash,
             removed_files=removed_files,
             full_index=full_index,
         )
 
         # Update metadata in Redis
-        await _update_indexing_metadata(
-            repo, collection, commit_hash, count, ref, redis_client
-        )
+        await _update_indexing_metadata(repo, commit_hash, count, ref, redis_client)
+
+        # Notify waiters that indexing is complete
+        await _publish_indexing_event(redis_client, repo, ref, "complete")
 
         logger.info(f"Indexing complete for {repo}: {count} points")
 
     except Exception as e:
         logger.error(f"Indexing failed for {repo}: {e}", exc_info=True)
+        await _publish_indexing_event(redis_client, repo, ref, "error", error=str(e))
     finally:
         if worktree:
             await _cleanup_worktree(repo, worktree)

@@ -17,9 +17,10 @@ tree-sitter-cpp>=0.23.4
 tree-sitter-ruby>=0.23.1
 networkx>=3.6.1
 numpy>=2.4.4
+scipy>=1.17.1
 tiktoken>=0.12.0
 pathspec>=1.0.4
 # Embedding client
 google-genai>=1.72.0
-# Vector database client
-qdrant-client>=1.17.1
+# Multi-model database (graph + vector + full-text)
+surrealdb>=0.3.0

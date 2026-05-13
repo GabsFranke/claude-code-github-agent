@@ -34,10 +34,9 @@ class TestFixCIWorkflow:
 
     def test_fix_ci_event_trigger(self, engine):
         """Test that workflow_job.completed event triggers fix-ci workflow."""
-        # This test will FAIL until the workflow engine properly handles this event
         workflow = engine.get_workflow_for_event("workflow_job", "completed")
 
-        assert workflow == "fix-ci", (
+        assert "fix-ci" in workflow, (
             "workflow_job.completed event should trigger fix-ci workflow. "
             "Check workflows.yaml triggers configuration."
         )
@@ -146,10 +145,9 @@ class TestFixCIWorkflowJobEvent:
 
         engine = WorkflowEngine(workflow_path)
 
-        # This is the critical test that will FAIL
         workflow = engine.get_workflow_for_event("workflow_job", "completed")
 
-        assert workflow == "fix-ci", (
+        assert "fix-ci" in workflow, (
             "Expected workflow_job.completed to route to fix-ci workflow. "
             "The workflow engine should map this GitHub event to the fix-ci workflow."
         )
@@ -165,9 +163,9 @@ class TestFixCIWorkflowJobEvent:
         # Generic workflow_job event without action should not trigger
         workflow = engine.get_workflow_for_event("workflow_job")
 
-        # Should be None or not fix-ci (depends on implementation)
+        # Should be empty or not contain fix-ci (depends on implementation)
         # We only want workflow_job.completed to trigger
-        assert workflow is None or workflow != "fix-ci"
+        assert not workflow or "fix-ci" not in workflow
 
 
 class TestFixCIPromptGeneration:

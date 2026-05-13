@@ -83,7 +83,8 @@ async def get_dlq_count(redis_client, dlq_key: str) -> int:
     """Get number of entries in a dead-letter queue."""
     try:
         return int(await redis_client.llen(dlq_key))  # type: ignore[no-any-return]
-    except Exception:
+    except Exception as e:
+        logger.error(f"Failed to get DLQ count for {dlq_key}: {e}")
         return 0
 
 
@@ -92,5 +93,6 @@ async def inspect_dlq(redis_client, dlq_key: str, limit: int = 10) -> list[dict]
     try:
         entries = await redis_client.lrange(dlq_key, 0, limit - 1)
         return [json.loads(e) for e in entries]
-    except Exception:
+    except Exception as e:
+        logger.error(f"Failed to inspect DLQ for {dlq_key}: {e}")
         return []

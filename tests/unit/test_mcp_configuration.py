@@ -7,7 +7,6 @@ requiring actual API keys or network access.
 import os
 import sys
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -35,56 +34,22 @@ class TestMCPConfiguration:
         assert github_config["headers"]["Authorization"] == f"Bearer {token}"
 
     def test_github_actions_mcp_configuration_docker(self):
-        """Test GitHub Actions MCP configuration in Docker environment."""
-        token = "test_token_123"
-
-        # Mock Docker environment
-        with patch("os.path.exists") as mock_exists:
-            # Simulate Docker container path exists
-            mock_exists.side_effect = lambda p: p == "/app/plugins/ci-failure-toolkit"
-
-            builder = SDKOptionsBuilder(cwd="/tmp")
-            builder.with_github_actions_mcp(token)
-            options = builder.build()
-
-            assert "github-actions" in options.mcp_servers
-            ga_config = options.mcp_servers["github-actions"]
-            assert ga_config["type"] == "stdio"
-            assert ga_config["command"] == "python"
-            assert len(ga_config["args"]) == 1
-            assert (
-                ga_config["args"][0]
-                == "/app/plugins/ci-failure-toolkit/servers/github_actions_server.py"
-            )
-            assert ga_config["env"]["PYTHONPATH"] == "/app/plugins/ci-failure-toolkit"
-            assert ga_config["env"]["GITHUB_TOKEN"] == token
+        """Test GitHub Actions MCP is now configured via .mcp.json auto-discovery."""
+        # with_github_actions_mcp was removed: MCP servers are now declared in
+        # .mcp.json written to each worktree by write_mcp_json(). This test
+        # verifies the builder does NOT raise when .mcp.json-based flow is used.
+        builder = SDKOptionsBuilder(cwd="/tmp")
+        # No explicit MCP method needed — .mcp.json handles github-actions server
+        options = builder.build()
+        # github-actions is NOT in mcp_servers (it's in .mcp.json instead)
+        assert "github-actions" not in options.mcp_servers
 
     def test_github_actions_mcp_configuration_local(self):
-        """Test GitHub Actions MCP configuration in local development."""
-        token = "test_token_123"
-
-        # Get actual project root
-        project_root = Path(__file__).parent.parent.parent
-        expected_plugin_path = project_root / "plugins/ci-failure-toolkit"
-
-        # Only run if plugin actually exists
-        if not expected_plugin_path.exists():
-            pytest.skip("Plugin directory not found in project")
-
+        """Test GitHub Actions MCP is now configured via .mcp.json auto-discovery."""
+        # Same as docker test — method removed, coverage via write_mcp_json tests
         builder = SDKOptionsBuilder(cwd="/tmp")
-        builder.with_github_actions_mcp(token)
         options = builder.build()
-
-        assert "github-actions" in options.mcp_servers
-        ga_config = options.mcp_servers["github-actions"]
-        assert ga_config["type"] == "stdio"
-        assert ga_config["command"] == "python"
-        assert len(ga_config["args"]) == 1
-        # Normalize path separators for cross-platform compatibility
-        assert "ci-failure-toolkit" in ga_config["args"][0]
-        assert "github_actions_server.py" in ga_config["args"][0]
-        assert "ci-failure-toolkit" in ga_config["env"]["PYTHONPATH"]
-        assert ga_config["env"]["GITHUB_TOKEN"] == token
+        assert "github-actions" not in options.mcp_servers
 
     def test_memory_mcp_configuration(self):
         """Test memory MCP server configuration."""
@@ -108,7 +73,8 @@ class TestMCPConfiguration:
         options = builder.build()
 
         assert "mcp__github__*" in options.allowed_tools
-        assert "mcp__github-actions__*" in options.allowed_tools
+        # github_actions uses underscore (matches .mcp.json server key)
+        assert "mcp__github_actions__*" in options.allowed_tools
         assert "mcp__memory__memory_read" in options.allowed_tools
 
     def test_retrospector_toolset_includes_github_mcp(self):
@@ -142,17 +108,17 @@ class TestMCPConfiguration:
             SDKOptionsBuilder(cwd="/tmp")
             .with_sonnet()
             .with_github_mcp(token)
-            .with_github_actions_mcp(token)
             .with_memory_mcp(repo)
             .with_full_toolset()
         )
 
         options = builder.build()
 
-        # Verify all MCP servers are configured
+        # Verify configured MCP servers
         assert "github" in options.mcp_servers
-        assert "github-actions" in options.mcp_servers
         assert "memory" in options.mcp_servers
+        # github-actions is now in .mcp.json, not programmatic mcp_servers
+        assert "github-actions" not in options.mcp_servers
 
         # Verify model is set
         assert options.model is not None

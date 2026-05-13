@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 def _get_memory_dir(repo: str) -> Path:
     """Get the memory directory for a repository."""
-    return Path(f"/home/bot/agent-memory/{repo}/memory")
+    return Path.home() / ".claude" / "memory" / repo / "memory"
 
 
 def _validate_path(full_path: Path, base_dir: Path) -> None:
@@ -89,8 +89,17 @@ def memory_read(file_path: str | None, repo: str) -> dict[str, Any]:
         raise ValueError(f"Path is not a file: {file_path}")
 
     content = full_path.read_text(encoding="utf-8")
-    logger.info(f"Read memory file {file_path} for {repo} ({len(content)} chars)")
-    return {"content": content}
+    MAX_CHARS = 100_000
+    total_size = len(content)
+    truncated = total_size > MAX_CHARS
+    if truncated:
+        content = content[:MAX_CHARS] + "\n\n... [truncated, file is larger]"
+    logger.info(f"Read memory file {file_path} for {repo} ({total_size} chars)")
+    return {
+        "content": content,
+        "truncated": truncated,
+        "total_size": total_size,
+    }
 
 
 def memory_write(file_path: str, content: str, repo: str) -> dict[str, Any]:
