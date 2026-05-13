@@ -144,82 +144,6 @@ claude-code-github-agent/
             └── repository_context_loader.py  # Fetches CLAUDE.md + memory index
 ```
 
-**Current workflows.yaml:**
-
-```yaml
-workflows:
-  review-pr:
-    triggers:
-      events:
-        - event: pull_request.opened
-        - event: pull_request.labeled
-          filters:
-            label.name: ["review", "pr-review", "review-pr"]
-      commands: [/review, /pr-review, /review-pr]
-    prompt:
-      template: "/pr-review-toolkit:review-pr {repo} {issue_number}"
-    context:
-      repomap_budget: 4096
-      personalized: true
-      include_test_files: true
-
-  triage-issue:
-    triggers:
-      events:
-        - event: issues.opened
-        - event: issues.labeled
-          filters:
-            label.name: "triage"
-      commands: [/triage, /triage-issue]
-    prompt:
-      template: "Triage issue #{issue_number} in {repo}"
-      system_context: "triage.md"
-
-  fix-ci:
-    triggers:
-      events:
-        - event: workflow_job.completed
-          filters:
-            workflow_job.conclusion: "failure"
-      commands: [/fix-ci, /fix-build, /fix-tests]
-    prompt:
-      template: "/ci-failure-toolkit:fix-ci {repo} {issue_number}"
-    context:
-      repomap_budget: 4096
-      personalized: true
-      priority_focus: ["build_system", "test_structure"]
-
-  test-toolkit:
-    triggers:
-      commands: [/test]
-    prompt:
-      template: "/test-toolkit:test {user_query}"
-    skip_self: false
-
-  generic:
-    triggers:
-      commands: [/agent]
-    prompt:
-      template: "{user_query}"
-      system_context: "generic.md"
-    skip_self: false
-
-  fix-review:
-    triggers:
-      events:
-        - event: pull_request.labeled
-          filters:
-            label.name: ["fix-review", "fix-it", "pr-fix"]
-      commands: [/fix-it]
-    prompt:
-      template: "/pr-fix:fix-review {repo} {issue_number}"
-    context:
-      repomap_budget: 4096
-      personalized: true
-      include_test_files: true
-    skip_self: true
-```
-
 ### Workflow Routing
 
 **Webhook Service** (matches + routes):
@@ -575,7 +499,7 @@ Both tools validate paths to prevent directory traversal attacks.
 - Extracts API routes (FastAPI/Flask/Django) and MCP tool definitions
 - Supports incremental indexing via git diff — only re-embeds changed files
 - Caches embeddings in Redis to avoid re-embedding unchanged content
-- Cleans up stale points from previous commits
+- Deletes orphaned symbols for files removed from the repo
 - Controlled by `INDEXING_ENABLED` env var and `IndexingConfig`
 
 **Key Files**:
@@ -597,10 +521,12 @@ Python, JavaScript, TypeScript, TSX, Go, Rust, Java, C, C++, Ruby — via per-la
 3. Creates worktree from bare repo cache
 4. Checks previous commit for incremental diff (or full index if first time)
 5. Chunks changed files via tree-sitter (or regex fallback)
-6. Checks Redis embedding cache — only embeds new/changed chunks via Gemini API
-7. Upserts vectors, symbols, and graph edges into SurrealDB
-8. Cleans up stale points from previous commits
-9. Updates indexing metadata in Redis
+6. Builds code graph edges (calls, imports, inheritance) via `SymbolIndex`
+7. Extracts API routes and MCP tool definitions via `route_maps`
+8. Checks Redis embedding cache — only embeds new/changed chunks via Gemini API
+9. Upserts vectors, symbols, and graph edges into SurrealDB
+10. Deletes orphaned symbols for files removed from the repo
+11. Updates indexing metadata in Redis
 
 ### 11. Codebase Context System
 
@@ -784,7 +710,6 @@ When `ALLOW_HOST_MCP=true`, MCP server definitions from the host's `~/.claude.js
 | `logging_utils.py` | Logging configuration with noisy logger silencing |
 | `models.py` | `AgentRequest` / `AgentResponse` Pydantic models |
 | `utils.py` | General utilities (dot-path dict resolution, URL building) |
-| `worktree_lock.py` | `WorktreeLock` — Redis-based distributed locking with interrupt-and-continue semantics for safe concurrent worktree access |
 
 ### MCP Server Base
 
