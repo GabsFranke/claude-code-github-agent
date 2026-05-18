@@ -2,7 +2,7 @@
 
 # Claude Code GitHub Agent
 
-**Self-hosted GitHub agent that runs Claude SDK on any of 40+ webhook events — fully configurable via YAML workflows and plugins**
+**An orchestration engine for autonomous AI coding agents that hooks into 40+ GitHub events — fully configurable via YAML and plugins.**
 
 [![CI](https://github.com/GabsFranke/claude-code-github-agent/actions/workflows/test.yml/badge.svg)](https://github.com/GabsFranke/claude-code-github-agent/actions/workflows/test.yml) [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/) [![Docker](https://img.shields.io/badge/docker-ready-blue.svg)](https://www.docker.com/) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -14,7 +14,7 @@
 
 ## What It Does
 
-A self-hosted GitHub agent that hooks into **40+ webhook events** and runs Claude SDK with full repository access — reading files, making changes, and interacting with GitHub via MCP. Everything is configured through **YAML workflows** and **plugins**:
+An orchestration engine for autonomous AI coding agents. It provides a highly scalable, microservices-based system that connects the Claude SDK to **40+ GitHub webhook events**. By providing persistent memory, secure sandboxing, semantic codebase indexing, and an extensible plugin system, it allows you to run complex, autonomous agentic workflows directly on your own infrastructure. Everything is configured through **YAML workflows** and **plugins**:
 
 ```yaml
 # workflows.yaml — add new behaviors without touching code
@@ -57,10 +57,14 @@ The agent runs Claude SDK with the full Claude Code feature set. Because `~/.cla
 
 ### Code Intelligence
 
-- **3-layer context** — File tree → AST code tools → semantic vector search
-- **Structural awareness** — Aider-style repomap with tree-sitter (10 languages), personalized per PR
-- **4 MCP servers** — GitHub (HTTP), GitHub Actions, Memory, Codebase Tools (proxied via SSE)
-- **Self-improvement** — Retrospector analyzes past sessions and proposes instruction improvements via PRs
+The agent doesn't explore code blindly. It uses a dedicated **Codebase Tools MCP server** backed by SurrealDB and Gemini to understand codebases structurally and semantically:
+
+- **3-Layer Context**:
+  1. **Structural**: File tree & Aider-style repomaps (tree-sitter, 10 languages), personalized per session.
+  2. **Semantic**: Hybrid search combining text matching (ripgrep) and Gemini embeddings.
+  3. **Graph AST**: Code is parsed into Abstract Syntax Trees and stored as graph edges (calls, imports, inherits) in SurrealDB.
+- **Advanced Graph Tools**: Agents can trace execution flows (`trace_flow`) or run BFS impact analysis (`get_impact`) to evaluate the blast radius of a change before writing code.
+- **Incremental Indexing**: A background worker incrementally indexes changed files on every push, ensuring context is instantly available when a webhook triggers.
 
 ## Quick Start
 

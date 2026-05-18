@@ -4,33 +4,100 @@ Complete system architecture for the Claude Code GitHub Agent.
 
 ## Table of Contents
 
-- [System Overview](#system-overview)
-- [Workflow System](#workflow-system)
-  - [YAML-Driven Configuration](#yaml-driven-configuration)
-  - [Workflow Routing](#workflow-routing)
-- [Core Components](#core-components)
-  - [1. Webhook Service](#1-webhook-service)
-  - [2. Worker Service (Coordinator)](#2-worker-service-coordinator)
-  - [3. Repository Sync Service](#3-repository-sync-service)
-  - [4. Sandbox Worker Pool](#4-sandbox-worker-pool)
-  - [5. Claude Agent SDK](#5-claude-agent-sdk)
-  - [6. GitHub MCP Server](#6-github-mcp-server)
-  - [7. Shared Authentication Service](#7-shared-authentication-service)
-  - [8. Memory Worker](#8-memory-worker)
-  - [9. Retrospector Worker](#9-retrospector-worker)
-  - [10. Indexing Worker](#10-indexing-worker)
-  - [11. Codebase Context System](#11-codebase-context-system)
-  - [12. Plugin System](#12-plugin-system)
-  - [13. MCP Proxy Service](#13-mcp-proxy-service)
-  - [14. Session Proxy Service](#14-session-proxy-service)
-- [Shared Module Infrastructure](#shared-module-infrastructure)
-- [Data Flow](#data-flow)
-- [Job Queue Architecture](#job-queue-architecture)
-- [Security](#security)
-- [Subagents](#subagents)
+- [Context & Problem Statement](#context--problem-statement)
+- [Key Requirements & Constraints](#key-requirements--constraints)
+- [High-Level Architecture](#high-level-architecture)
+  - [System Context](#system-context)
+  - [Logical Architecture (Core Subsystems)](#logical-architecture-core-subsystems)
+- [Architectural Decisions (ADRs)](#architectural-decisions-adrs)
+- [System Design & Implementation Details](#system-design--implementation-details)
+  - [Detailed System Flow](#detailed-system-flow)
+  - [Workflow System](#workflow-system)
+  - [Core Components](#core-components)
+  - [Shared Module Infrastructure](#shared-module-infrastructure)
+  - [Data Flow](#data-flow)
+  - [Job Queue Architecture](#job-queue-architecture)
+  - [Security](#security)
+  - [Subagents](#subagents)
 - [See Also](#see-also)
 
-## System Overview
+## Context & Problem Statement
+
+The Claude Code GitHub Agent is designed to automate software development workflows directly on GitHub. Its primary goal is to provide intelligent, context-aware assistance—such as automatic code reviews, CI failure root-cause analysis, and direct issue resolution—by executing the Claude Agent SDK securely and autonomously in response to GitHub events.
+
+## Key Requirements & Constraints
+
+- **Autonomous Execution:** The system must respond to GitHub webhooks (PRs, issues, comments) and act without human intervention.
+- **Security & Isolation:** Executing LLM-generated code or commands carries security risks. Sandbox environments (detached Git worktrees) are required to isolate the agent's actions from the host and other jobs.
+- **Context Awareness:** The agent needs deep understanding of massive codebases. It must be able to index code semantics, search structural components, and maintain persistent "memory" of past decisions.
+- **Speed & Efficiency:** Constantly cloning repositories for every webhook is too slow. The architecture must include proactive repository caching to ensure fast execution.
+
+## High-Level Architecture
+
+The system operates across three primary logical domains: Orchestration (receiving and routing events), Execution (safely running the LLM), and Knowledge (providing the LLM with codebase context and memory).
+
+### System Context
+
+```mermaid
+flowchart LR
+    Dev((Developer)) --> |Creates PR, Issue, or Comment| GH[GitHub]
+
+    GH --> |Triggers Event| Bot[Claude Agent System]
+    Bot -.-> |Analyzes Codebase & Memory| Bot
+    Bot --> |Posts Reviews, Fixes, & PRs| GH
+
+    style Bot fill:#e8f5e9,stroke:#4caf50,stroke-width:2px
+```
+
+### Logical Architecture (Core Subsystems)
+
+```mermaid
+flowchart TB
+    GH[GitHub]
+
+    subgraph Orchestration["1. Event Orchestration"]
+        WH[Webhook Gateway]
+        Coord[Job Coordinator]
+        WH --> |Routes Events| Coord
+    end
+
+    subgraph Execution["2. Secure Execution"]
+        SB[Sandbox Workspaces]
+        Claude[Claude Agent SDK]
+        MCP[MCP Tool Servers]
+
+        Coord --> |Dispatches Jobs| SB
+        SB --> |Runs| Claude
+        Claude --> |Uses| MCP
+    end
+
+    subgraph Knowledge["3. Context & Memory"]
+        Repo[(Fast Repo Cache)]
+        Vector[(Code Index / SurrealDB)]
+        Mem[(Persistent Memory)]
+    end
+
+    GH --> |Webhooks| Orchestration
+    Execution <--> |Reads / Updates| Knowledge
+    MCP --> |API Actions| GH
+
+    style Orchestration fill:#fff3e0,stroke:#ffb74d
+    style Execution fill:#e0f7fa,stroke:#4dd0e1
+    style Knowledge fill:#f3e5f5,stroke:#ba68c8
+```
+
+## Architectural Decisions (ADRs)
+
+1. **Event-Driven Microservices:** To handle high concurrency and isolate failures, the system uses discrete worker components (Webhook, Coordinator, Sandbox) communicating via Redis Queues and Pub/Sub.
+2. **Detached Git Worktrees:** Instead of cloning the repository for every job, a central `Repo Sync Service` maintains warm bare repositories. Sandbox workers create fast, detached worktrees from these caches.
+3. **Model Context Protocol (MCP):** To standardize tool use and prevent tight coupling to the GitHub API, the Claude agent relies on MCP servers to read and write data to GitHub and the local file system.
+4. **SurrealDB for Code Intelligence:** A multi-model database (SurrealDB) is used to store both dense vectors (embeddings via Gemini) and graph edges (tree-sitter AST relationships) to enable semantic and structural code search.
+
+## System Design & Implementation Details
+
+The detailed architecture below illustrates the physical implementation of the core components and queues.
+
+### Detailed System Flow
 
 ```mermaid
 flowchart LR
