@@ -436,6 +436,38 @@ def _find_transcript_token(repo: str, issue_number: int, workflow: str) -> str |
     return f"transcript:{candidates[0][1].stem}"
 
 
+def _thread_type_candidates(thread_type: str) -> list[str]:
+    """Requested thread type first, then the remaining types.
+
+    A PR thread can be stored under ``"issue"`` (GitHub delivers PR comments as
+    ``issue_comment`` events), so a ``/pull/`` URL must still find it — and the
+    reverse for links minted before the classification was fixed.
+    """
+    others = [t for t in ("pr", "issue", "discussion") if t != thread_type]
+    return [thread_type, *others]
+
+
+async def _find_session_any_thread_type(
+    full_repo: str, issue_number: int, workflow: str, thread_type: str
+) -> tuple[str | None, UnifiedSessionInfo | None]:
+    """Resolve a session token across thread types, preferring an active one."""
+    store = get_store().store
+    candidates = _thread_type_candidates(thread_type)
+
+    for finder in (store.find_active_session, store.find_session):
+        for candidate in candidates:
+            token = await finder(
+                full_repo, issue_number, workflow, thread_type=candidate
+            )
+            if not token:
+                continue
+            session = await store.get_streaming_session(token)
+            if session:
+                return token, session
+
+    return None, None
+
+
 @app.get("/api/resolve/{owner}/{repo}/{thread_type_segment}/{number}/{workflow}")
 async def resolve_session(
     owner: str,
@@ -451,8 +483,8 @@ async def resolve_session(
         ``{"status": "pending", "message": "..."}`` when nothing is found yet.
 
     Resolution chain:
-        1. find_active_session → running/active token
-        2. find_session → any session token (completed/error)
+        1. find_active_session → running/active token (all thread types)
+        2. find_session → any session token, completed/error (all thread types)
         3. transcript scan → transcript:{stem} pseudo-token
         4. not found → ``{"status": "pending"}`` (404 previously)
     """
@@ -465,7 +497,6 @@ async def resolve_session(
 
     thread_type = url_segment_to_thread_type(thread_type_segment)
     full_repo = f"{owner}/{repo}"
-    store = get_store().store
 
     def _make_response(token: str, info: UnifiedSessionInfo) -> dict:
         """Build a ResolveResponse with ``status: "found"``."""
@@ -483,23 +514,13 @@ async def resolve_session(
             },
         }
 
-    # 1. Try active session first
-    token = await store.find_active_session(
-        full_repo, issue_number, workflow, thread_type=thread_type
+    # 1-2. Active session first, then any session (completed, error),
+    #      each tried across thread types.
+    token, session = await _find_session_any_thread_type(
+        full_repo, issue_number, workflow, thread_type
     )
-    if token:
-        session = await store.get_streaming_session(token)
-        if session:
-            return _make_response(token, session)
-
-    # 2. Fall back to any session (completed, error)
-    token = await store.find_session(
-        full_repo, issue_number, workflow, thread_type=thread_type
-    )
-    if token:
-        session = await store.get_streaming_session(token)
-        if session:
-            return _make_response(token, session)
+    if token and session:
+        return _make_response(token, session)
 
     # 3. Transcript fallback — scan filesystem
     pseudo_token = _find_transcript_token(full_repo, issue_number, workflow)
@@ -564,18 +585,15 @@ async def _resolve_ws_token(
     Uses SessionStore for lookup, with transcript fallback.
     Returns (token, session) or (None, None).
     """
-    store = get_store().store
     full_repo = f"{owner}/{repo}"
     issue_number = int(number)
     thread_type = url_segment_to_thread_type(thread_type_segment)
 
-    token = await store.find_session(
-        full_repo, issue_number, workflow, thread_type=thread_type
+    token, session = await _find_session_any_thread_type(
+        full_repo, issue_number, workflow, thread_type
     )
-    if token:
-        session = await store.get_streaming_session(token)
-        if session:
-            return token, session
+    if token and session:
+        return token, session
 
     pseudo_token = _find_transcript_token(full_repo, issue_number, workflow)
     if pseudo_token:

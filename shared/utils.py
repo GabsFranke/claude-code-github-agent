@@ -47,15 +47,15 @@ def build_session_url(
 
     Args:
         base_url: The SESSION_PROXY_URL base (e.g., "http://localhost:10001").
-        owner: Repository owner (e.g., "GabsFranke").
-        repo_name: Repository name without the owner (e.g., "sma").
+        owner: Repository owner (e.g., "your-org").
+        repo_name: Repository name without the owner (e.g., "my-repo").
         thread_type: Internal thread type ("pr", "issue", "discussion").
         issue_number: GitHub issue/PR number.
         workflow: Workflow name (e.g., "triage-issue").
 
     Returns:
         Full session URL, e.g.,
-        "http://localhost:10001/session/GabsFranke/sma/issues/84/triage-issue".
+        "http://localhost:10001/session/your-org/my-repo/issues/84/triage-issue".
         Returns "" if base_url is empty.
     """
     if not base_url:

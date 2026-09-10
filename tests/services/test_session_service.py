@@ -866,6 +866,139 @@ class TestTokenResolution:
             "test/repo", 42, "test-workflow", thread_type="pr"
         )
 
+    def test_pull_url_finds_session_stored_under_issue_thread_type(
+        self,
+        client: TestClient,
+        mock_session_store_v2: MagicMock,
+    ):
+        """A PR session can be stored as "issue" — GitHub delivers PR comments
+        as ``issue_comment`` events — so a /pull/ URL must still resolve it."""
+        from shared.session_store import UnifiedSessionInfo  # noqa: E402
+
+        token = "tok_pr_as_issue"
+        session = UnifiedSessionInfo.model_validate(
+            {
+                "session_id": "ses_test",
+                "repo": "test/repo",
+                "thread_type": "issue",
+                "thread_id": "42",
+                "workflow_name": "test-workflow",
+                "ref": "refs/pull/42/head",
+                "worktree_path": "/tmp/test",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "last_run": "2026-01-01T00:00:00+00:00",
+                "turn_count": 0,
+                "status": "completed",
+                "streaming_token": token,
+            }
+        )
+
+        async def find_session(repo, number, workflow, thread_type=""):
+            return token if thread_type == "issue" else None
+
+        mock_session_store_v2.find_active_session = AsyncMock(return_value=None)
+        mock_session_store_v2.find_session = AsyncMock(side_effect=find_session)
+        mock_session_store_v2.get_streaming_session = AsyncMock(return_value=session)
+
+        response = client.get("/api/resolve/test/repo/pull/42/test-workflow")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == "found"
+        assert body["token"] == token
+
+    def test_requested_thread_type_wins_over_the_others(
+        self,
+        client: TestClient,
+        mock_session_store_v2: MagicMock,
+    ):
+        """When both a PR and an issue session exist, /pull/ gets the PR one."""
+        from shared.session_store import UnifiedSessionInfo  # noqa: E402
+
+        def _session(thread_type: str, token: str) -> UnifiedSessionInfo:
+            return UnifiedSessionInfo.model_validate(
+                {
+                    "session_id": "ses_test",
+                    "repo": "test/repo",
+                    "thread_type": thread_type,
+                    "thread_id": "42",
+                    "workflow_name": "test-workflow",
+                    "ref": "main",
+                    "worktree_path": "/tmp/test",
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                    "last_run": "2026-01-01T00:00:00+00:00",
+                    "turn_count": 0,
+                    "status": "completed",
+                    "streaming_token": token,
+                }
+            )
+
+        tokens = {"pr": "tok_pr", "issue": "tok_issue"}
+        sessions = {v: _session(k, v) for k, v in tokens.items()}
+
+        async def find_session(repo, number, workflow, thread_type=""):
+            return tokens.get(thread_type)
+
+        mock_session_store_v2.find_active_session = AsyncMock(return_value=None)
+        mock_session_store_v2.find_session = AsyncMock(side_effect=find_session)
+        mock_session_store_v2.get_streaming_session = AsyncMock(
+            side_effect=lambda token: sessions[token]
+        )
+
+        response = client.get("/api/resolve/test/repo/pull/42/test-workflow")
+
+        assert response.json()["token"] == "tok_pr"
+
+    def test_active_session_wins_over_a_completed_one_of_another_type(
+        self,
+        client: TestClient,
+        mock_session_store_v2: MagicMock,
+    ):
+        """Every thread type is checked for a running session before any
+        completed session is considered."""
+        from shared.session_store import UnifiedSessionInfo  # noqa: E402
+
+        def _session(thread_type: str, token: str, status: str) -> UnifiedSessionInfo:
+            return UnifiedSessionInfo.model_validate(
+                {
+                    "session_id": "ses_test",
+                    "repo": "test/repo",
+                    "thread_type": thread_type,
+                    "thread_id": "42",
+                    "workflow_name": "test-workflow",
+                    "ref": "main",
+                    "worktree_path": "/tmp/test",
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                    "last_run": "2026-01-01T00:00:00+00:00",
+                    "turn_count": 0,
+                    "status": status,
+                    "streaming_token": token,
+                }
+            )
+
+        sessions = {
+            "tok_running_issue": _session("issue", "tok_running_issue", "running"),
+            "tok_done_pr": _session("pr", "tok_done_pr", "completed"),
+        }
+
+        async def find_active(repo, number, workflow, thread_type=""):
+            return "tok_running_issue" if thread_type == "issue" else None
+
+        async def find_session(repo, number, workflow, thread_type=""):
+            return "tok_done_pr" if thread_type == "pr" else "tok_running_issue"
+
+        mock_session_store_v2.find_active_session = AsyncMock(side_effect=find_active)
+        mock_session_store_v2.find_session = AsyncMock(side_effect=find_session)
+        mock_session_store_v2.get_streaming_session = AsyncMock(
+            side_effect=lambda token: sessions[token]
+        )
+
+        response = client.get("/api/resolve/test/repo/pull/42/test-workflow")
+
+        body = response.json()
+        assert body["token"] == "tok_running_issue"
+        assert body["session"]["status"] == "running"
+
     def test_stale_token_falls_through_to_transcript(
         self,
         client: TestClient,
@@ -1307,6 +1440,8 @@ def ws_client(mock_session_store_v2: MagicMock, mock_redis: MagicMock) -> TestCl
     from shared.session_store import UnifiedSessionInfo  # noqa: E402
 
     store = mock_session_store_v2
+    # Lookups return a token; the conftest default returns session data.
+    store.find_active_session = AsyncMock(return_value=None)
     store.find_session = AsyncMock(return_value="tok_ws_test")
     store.get_streaming_session = AsyncMock(
         return_value=UnifiedSessionInfo.model_validate(

@@ -4,7 +4,7 @@
 
 **An orchestration engine for autonomous AI coding agents that hooks into 40+ GitHub events — fully configurable via YAML and plugins.**
 
-[![CI](https://github.com/GabsFranke/claude-code-github-agent/actions/workflows/test.yml/badge.svg)](https://github.com/GabsFranke/claude-code-github-agent/actions/workflows/test.yml) [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/) [![Docker](https://img.shields.io/badge/docker-ready-blue.svg)](https://www.docker.com/) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/) [![Docker](https://img.shields.io/badge/docker-ready-blue.svg)](https://www.docker.com/) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 [Getting Started](#quick-start) · [Usage](#usage) · [Customization](#customization) · [Docs](#documentation) · [Contributing](#contributing)
 
@@ -101,7 +101,7 @@ After creating: note the **App ID**, generate a **private key** (.pem), install 
 ### 2. Configure and Run
 
 ```bash
-git clone https://github.com/GabsFranke/claude-code-github-agent.git
+git clone https://github.com/your-org/claude-code-github-agent.git
 cd claude-code-github-agent
 cp .env.example .env               # Edit .env with your credentials
 cp workflows.example.yaml workflows.yaml    # Edit workflows (required)

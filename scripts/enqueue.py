@@ -84,7 +84,7 @@ QUEUE_REGISTRY = {
         "queue": "agent:worktree:cleanup",
         "description": "Sandbox executor — worktree cleanup (expire/revive threads, cleanup branches)",
     },
-"memory": {
+    "memory": {
         "queue": "agent:memory:requests",
         "description": "Memory worker — extract memories from transcripts",
     },
@@ -119,7 +119,6 @@ def build_cleanup_message(args: argparse.Namespace) -> dict:
     elif action == "cleanup_branch":
         msg["branch"] = args.branch
     return msg
-
 
 
 def build_memory_message(args: argparse.Namespace) -> dict:

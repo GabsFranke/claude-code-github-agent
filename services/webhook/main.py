@@ -205,12 +205,21 @@ async def webhook(request: Request):
             or "open"
         )
 
+        # GitHub delivers PR comments as ``issue_comment`` events; the only
+        # marker is ``issue.pull_request``.  Record it so downstream consumers
+        # (resolve_thread_type) classify the thread as a PR rather than an issue.
+        issue_obj = data.get("issue") or {}
+        is_pr = bool(
+            isinstance(issue_obj, dict) and issue_obj.get("pull_request")
+        ) or event_type.startswith("pull_request")
+
         # Determine event data and user query
         event_data = {
             "event_type": event_type,
             "action": action,
             "issue_state": issue_state,
             "installation_id": str(data.get("installation", {}).get("id", "")),
+            "is_pr": is_pr,
         }
         user_query = ""
         command = None
@@ -272,11 +281,7 @@ async def webhook(request: Request):
         ref = fields.ref
 
         # For issue_comment on a PR, compute the PR head ref
-        if (
-            event_type == "issue_comment"
-            and "pull_request" in data.get("issue", {})
-            and issue_number
-        ):
+        if event_type == "issue_comment" and is_pr and issue_number:
             ref = f"refs/pull/{issue_number}/head"
 
         # Merge extra fields into event_data

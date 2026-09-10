@@ -243,7 +243,7 @@ services:
       # Custom API port forwarding
       - SOCAT_API_FORWARD=${SOCAT_API_FORWARD:-}
       # The bot's own repository — retrospector opens PRs here
-      - BOT_REPO=${BOT_REPO:-GabsFranke/claude-code-github-agent}
+      - BOT_REPO=${BOT_REPO:-your-org/claude-code-github-agent}
       - BOT_USERNAME=${BOT_USERNAME:-Claude Code Agent}
       - BOT_USER_EMAIL=${BOT_USER_EMAIL:-claude-code-agent[bot]@users.noreply.github.com}
     depends_on:

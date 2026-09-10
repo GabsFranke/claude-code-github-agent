@@ -108,7 +108,7 @@ async def process_retrospector_job(message: dict, redis_client) -> None:
         f"(hook_event={hook_event})"
     )
 
-    bot_repo = os.getenv("BOT_REPO", "GabsFranke/claude-code-github-agent")
+    bot_repo = os.getenv("BOT_REPO", "your-org/claude-code-github-agent")
     workspace = None
     repo_dir = None  # Initialize to prevent NameError in finally block
 

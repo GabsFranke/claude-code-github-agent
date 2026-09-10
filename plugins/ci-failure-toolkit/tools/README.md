@@ -78,9 +78,9 @@ python plugins/ci-failure-toolkit/tools/test_github_actions.py <owner> <repo> <r
 
 # Example with real workflow run
 python plugins/ci-failure-toolkit/tools/test_github_actions.py \
-  GabsFranke \
+  your-org \
   claude-code-github-agent \
-  23327718957
+  10000000001
 ```
 
 ### Expected Output
@@ -88,8 +88,8 @@ python plugins/ci-failure-toolkit/tools/test_github_actions.py \
 ```
 ================================================================================
 Testing GitHub Actions Tools
-Repository: GabsFranke/claude-code-github-agent
-Run ID: 23327718957
+Repository: your-org/claude-code-github-agent
+Run ID: 10000000001
 ================================================================================
 
 📊 Step 1: Getting workflow run summary...
@@ -97,7 +97,7 @@ Run ID: 23327718957
 ✅ Run: CI
    Status: completed
    Conclusion: failure
-   URL: https://github.com/GabsFranke/claude-code-github-agent/actions/runs/23327718957
+   URL: https://github.com/your-org/claude-code-github-agent/actions/runs/10000000001
 
    Jobs (3):
    ✅ build - success

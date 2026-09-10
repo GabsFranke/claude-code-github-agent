@@ -192,8 +192,15 @@ async def run_github_actions_direct(tool_name: str, kwargs: dict) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def _send_jsonrpc(process: asyncio.subprocess.Process, method: str, params: dict) -> None:
-    request: dict[str, Any] = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+async def _send_jsonrpc(
+    process: asyncio.subprocess.Process, method: str, params: dict
+) -> None:
+    request: dict[str, Any] = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": method,
+        "params": params,
+    }
     line = json.dumps(request) + "\n"
     if process.stdin is None:
         raise RuntimeError("Process stdin unavailable")
@@ -235,7 +242,10 @@ async def run_rpc(
     }.get(server_name, [])
     for var in missing:
         if var not in env:
-            print(f"Error: Missing env var {var} for {server_name} RPC mode", file=sys.stderr)
+            print(
+                f"Error: Missing env var {var} for {server_name} RPC mode",
+                file=sys.stderr,
+            )
             sys.exit(1)
 
     process = await asyncio.create_subprocess_exec(
@@ -265,7 +275,9 @@ async def run_rpc(
                 print_tool_info(tool)
         else:
             # Call tool
-            await _send_jsonrpc(process, "tools/call", {"name": tool_name, "arguments": kwargs})
+            await _send_jsonrpc(
+                process, "tools/call", {"name": tool_name, "arguments": kwargs}
+            )
             resp = await _recv_jsonrpc(process)
 
             if "error" in resp:
@@ -302,7 +314,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         allow_abbrev=False,
         epilog="""Examples:
-  %(prog)s memory --tool memory_read --repo GabsFranke/myrepo
+  %(prog)s memory --tool memory_read --repo your-org/myrepo
   %(prog)s github_actions --tool get_workflow_run_summary --owner X --repo Y --run_id Z
   %(prog)s memory --rpc --list
 """,

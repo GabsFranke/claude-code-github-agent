@@ -518,7 +518,7 @@ class TestJobQueueReclaimStaleJobs:
             "issue_number": 123,
             "prompt": "Test prompt",
             "github_token": "ghs_expired_token_12345",
-            "installation_id": 112053500,
+            "installation_id": 12345678,
             "user": "testuser",
         }
         backup_json = json.dumps(original_data)
@@ -547,7 +547,7 @@ class TestJobQueueReclaimStaleJobs:
             if args[0] == f"{queue.job_data_prefix}{stale_job_id}":
                 restored_data = json.loads(args[2])
                 assert "github_token" not in restored_data
-                assert restored_data.get("installation_id") == 112053500
+                assert restored_data.get("installation_id") == 12345678
                 break
         else:
             pytest.fail("Expected setex call for job data restoration")
