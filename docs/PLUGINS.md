@@ -29,13 +29,6 @@ Plugins are auto-discovered at runtime — no code changes needed.
 
 ## Built-in Plugins
 
-### pr-review-toolkit
-
-PR review workflow with specialized agents.
-
-- **Commands**: `/review-pr`
-- **Agents**: code-reviewer, code-architecture-reviewer, code-simplifier, comment-analyzer, pr-test-analyzer, silent-failure-hunter, type-design-analyzer
-- **Triggered by**: `pull_request.opened`, `/review`, `/pr-review`, `/review-pr`
 
 ### pr-fix
 

@@ -88,7 +88,7 @@ def test_with_auto_discovered_plugins_installed_plugins_json(tmp_path, monkeypat
             "oh-my-claudecode@omc": [
                 {
                     "scope": "user",
-                    "installPath": "C:\\Users\\Gabs\\.claude\\plugins\\cache\\omc\\oh-my-claudecode\\4.14.4",
+                    "installPath": "/home/user/.claude/plugins/cache/omc/oh-my-claudecode/4.14.4",
                     "version": "4.14.4",
                 }
             ]

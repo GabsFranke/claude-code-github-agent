@@ -73,6 +73,26 @@ PENDING_JOB_QUEUE = "agent:jobs:pending"
 WORKTREE_CLEANUP_QUEUE = "agent:worktree:cleanup"
 ORPHAN_LOCK_KEY = "lock:orphan_cleanup"
 
+# A streaming session is considered orphaned when it is stuck at
+# status="running" with no worktree_path/session_id ever set (its job never
+# started executing) for longer than this. This happens when the job that
+# was meant to service it expired from the pending queue before any sandbox
+# worker picked it up — e.g. across a worker shutdown/restart gap — and gets
+# dead-lettered instead of reaching the "processing" set that reclaim_stale_jobs
+# scans. Without recovery, the session silently swallows every future event
+# for that repo/issue/workflow forever. See request_processor.py and
+# agent_worker/worker.py's recovery sweep.
+STREAMING_SESSION_STALE_SECONDS = int(
+    os.getenv("STREAMING_SESSION_STALE_SECONDS", "300")
+)
+
+# How often the agent_worker recovery sweep scans for orphaned streaming
+# sessions (see above) and requeues fresh jobs for them.
+SESSION_RECOVERY_SWEEP_INTERVAL_SECONDS = int(
+    os.getenv("SESSION_RECOVERY_SWEEP_INTERVAL_SECONDS", "300")
+)
+SESSION_RECOVERY_LOCK_KEY = "lock:session_recovery_sweep"
+
 # Transcript archival — durable storage for transcripts before
 # worktree deletion so that transcripts survive TTL expiry.
 TRANSCRIPT_ARCHIVE_DIR = "/var/transcripts"
@@ -83,6 +103,15 @@ SESSION_LOOKUP_KEY = "session:stream:lookup:{}"
 SESSION_INBOX_KEY = "session:inbox:{}"
 SESSION_SUBSCRIBERS_KEY = "session:subscribers:{}"
 SESSION_HISTORY_KEY = "session:history:{}"
+
+# Tracks the JobQueue job_id currently servicing a streaming session. Lets
+# the orphan-recovery sweep (see STREAMING_SESSION_STALE_SECONDS above) check
+# the job's REAL status (pending/processing/gone) instead of guessing from
+# elapsed time + WorktreeLock presence alone — the lock can expire
+# (DEFAULT_LOCK_TTL) well before a long-running job finishes, which caused
+# the sweep to duplicate still-running jobs. A live job_id here always wins
+# over a time-based staleness guess.
+SESSION_JOB_KEY = "session:stream:job:{}"
 
 # Streaming channels
 MSG_CHANNEL = "session:msg:{}"
@@ -145,6 +174,20 @@ def streaming_session_key(token: str) -> str:
     Returns a key like ``session:stream:{token}``.
     """
     return SESSION_KEY.format(token)
+
+
+def streaming_job_key(token: str) -> str:
+    """Build the Redis key tracking the JobQueue job_id currently servicing
+    a streaming session.
+
+    Redis type: String
+    TTL: ``DEFAULT_SESSION_TTL_SECONDS``
+    Written by: ``SessionStore.set_job_id()``
+    Read by: ``SessionStore.get_job_id()``
+
+    Returns a key like ``session:stream:job:{token}``.
+    """
+    return SESSION_JOB_KEY.format(token)
 
 
 def inbox_key(token: str) -> str:

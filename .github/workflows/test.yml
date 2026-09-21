@@ -85,6 +85,9 @@ jobs:
       - name: Run isort
         run: isort --check-only services/ shared/ subagents/ hooks/ plugins/ tests/
 
+      - name: Run flake8
+        run: flake8 services/ shared/ subagents/ hooks/ plugins/ tests/
+
       - name: Run ruff
         run: ruff check services/ shared/ subagents/ hooks/ plugins/ tests/
 

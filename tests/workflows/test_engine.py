@@ -78,7 +78,7 @@ class TestWorkflowEngine:
                         "commands": ["/review", "/pr-review"],
                     },
                     "prompt": {
-                        "template": "/pr-review-toolkit:review-pr {repo} {issue_number}",
+                        "template": "/oh-my-claudecode:review {repo} {issue_number}",
                         "system_context": "review.md",
                     },
                     "description": "Review a pull request",
@@ -278,7 +278,7 @@ class TestWorkflowEngine:
             issue_number=789,
         )
 
-        assert "/pr-review-toolkit:review-pr owner/repo 789" in prompt
+        assert "/oh-my-claudecode:review owner/repo 789" in prompt
         assert system_context is not None
         assert "Focus on code quality" in system_context
 
@@ -306,7 +306,7 @@ class TestWorkflowEngine:
         # The engine looks for prompts/ relative to workflows/engine.py
         # So it will find the real prompts/ directory in the project
         # Just verify the basic template is there
-        assert "/pr-review-toolkit:review-pr owner/repo 100" in prompt
+        assert "/oh-my-claudecode:review owner/repo 100" in prompt
 
     def test_build_prompt_with_system_context_and_user_query(
         self, temp_workflow_file, temp_prompts_dir, monkeypatch

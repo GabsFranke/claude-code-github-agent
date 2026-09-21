@@ -111,7 +111,7 @@ and the session type from the sixth argument.
 
 | Workflow       | Command file                                      | Agent files                              |
 | -------------- | ------------------------------------------------- | ---------------------------------------- |
-| `review-pr`    | `plugins/pr-review-toolkit/commands/review-pr.md` | `plugins/pr-review-toolkit/agents/*.md`  |
+| `review-pr`    | `workflows.yaml` prompt template (delegates to oh-my-claudecode) | —                            |
 | `fix-ci`       | `plugins/ci-failure-toolkit/commands/fix-ci.md`   | `plugins/ci-failure-toolkit/agents/*.md` |
 | `triage-issue` | `prompts/triage.md`                               | —                                        |
 | `generic`      | `prompts/generic.md`                              | —                                        |
@@ -122,15 +122,15 @@ The workflow name (second argument) is the subagent name (e.g., "comment-analyze
 
 To find the subagent's instruction file:
 
-1. Check the transcript summary header for "Subagents invoked" - it may show the full type like "pr-review-toolkit:comment-analyzer"
+1. Check the transcript summary header for "Subagents invoked" - it may show the full type like "ci-failure-toolkit:test-failure-analyzer"
 2. If you see a colon format like "plugin-name:agent-name", the file is at `plugins/{plugin-name}/agents/{agent-name}.md`
 3. If no colon (just the agent name), try:
    - First: `Glob plugins/*/agents/{agent-name}.md` to find plugin agents
    - If not found: `subagents/{agent_name}.py` for Python subagents (edit only the `prompt="""..."""` field)
 
-Example: For agent "comment-analyzer" with type "pr-review-toolkit:comment-analyzer":
+Example: For agent "test-failure-analyzer" with type "ci-failure-toolkit:test-failure-analyzer":
 
-- File is at: `plugins/pr-review-toolkit/agents/comment-analyzer.md`
+- File is at: `plugins/ci-failure-toolkit/agents/test-failure-analyzer.md`
 
 Focus ONLY on this subagent's instruction file. Do not read the main workflow files.
 

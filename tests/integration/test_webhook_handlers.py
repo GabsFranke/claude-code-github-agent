@@ -176,3 +176,27 @@ class TestSessionServiceDeployment:
         )
 
         assert response.status_code == 200
+
+    def test_react_client_is_served_from_the_image(self):
+        """The image must build the client; a clean clone has no dist/.
+
+        Before the multi-stage Dockerfile, / answered with JSON saying the
+        front end was not built, and only a developer machine with a stale
+        local dist/ appeared to work.
+        """
+        response = requests.get(f"{SESSION_SERVICE_URL}/", timeout=10)
+
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/html")
+        assert 'id="root"' in response.text
+        assert (
+            "/assets/" in response.text
+        ), "index.html should reference the built bundle"
+
+    def test_spa_deep_link_falls_through_to_index(self):
+        response = requests.get(
+            f"{SESSION_SERVICE_URL}/session/owner/repo/issues/1/generic", timeout=10
+        )
+
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/html")

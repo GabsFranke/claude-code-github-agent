@@ -641,7 +641,6 @@ Each plugin follows the Claude Code plugin structure (`.claude-plugin/plugin.jso
 
 | Plugin | Purpose | Agents | Commands |
 |--------|---------|--------|----------|
-| `pr-review-toolkit` | PR review workflow | code-reviewer, code-architecture-reviewer, code-simplifier, comment-analyzer, pr-test-analyzer, silent-failure-hunter, type-design-analyzer | `review-pr` |
 | `ci-failure-toolkit` | CI failure analysis | deploy-failure-analyzer, test-failure-analyzer, build-failure-analyzer, lint-failure-analyzer | `fix-ci` |
 | `test-toolkit` | Generic task testing | generic-worker | `test` |
 | `pr-fix` | PR review feedback fixes | — | `fix-review` |
@@ -991,7 +990,6 @@ The `~/.claude/` directory is bind-mounted as a shared volume across all worker 
 
 **Plugin Agents** (in `plugins/*/agents/`):
 
-- `code-reviewer`, `code-architecture-reviewer`, `code-simplifier`, `comment-analyzer`, `pr-test-analyzer`, `silent-failure-hunter`, `type-design-analyzer` — PR review agents in `pr-review-toolkit`
 - `build-failure-analyzer`, `deploy-failure-analyzer`, `lint-failure-analyzer`, `test-failure-analyzer` — CI failure agents in `ci-failure-toolkit`
 - `generic-worker` — Generic task agent in `test-toolkit`
 

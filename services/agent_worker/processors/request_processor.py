@@ -6,13 +6,18 @@ import logging
 import os
 import re
 import uuid
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, Optional
 
 import httpx
 from langfuse import Langfuse
 
 from shared import GitHubAuthService, JobQueue
-from shared.constants import SESSION_DEDUP_LOCK_TTL, session_dedup_key
+from shared.constants import (
+    SESSION_DEDUP_LOCK_TTL,
+    STREAMING_SESSION_STALE_SECONDS,
+    session_dedup_key,
+)
 from shared.session_store import SessionStore, resolve_thread_type
 from shared.utils import build_session_url
 from shared.worktree_lock import WorktreeKey, WorktreeLock
@@ -201,6 +206,36 @@ class RequestProcessor:
             return await self._execute(
                 repo, issue_number, event_data, user_query, user, ref, workflow_name
             )
+
+    async def _orphaned_session_age(
+        self, streaming_store: SessionStore, token: str
+    ) -> float | None:
+        """Return how long a "running" session has been orphaned, or ``None``.
+
+        A session is orphaned when its job never started (no worktree_path/
+        session_id), no live job_id is recorded for it, and last_run is
+        older than STREAMING_SESSION_STALE_SECONDS. A recorded job_id that
+        the JobQueue still reports as pending/processing is authoritative:
+        the job is in flight no matter how long it has taken (queue backlog,
+        slow repo sync), so elapsed time alone never declares it dead.
+        """
+        info = await streaming_store.get_streaming_session(token)
+        if not info or info.worktree_path or info.session_id:
+            return None
+
+        job_id = await streaming_store.get_job_id(token)
+        if job_id:
+            status = await self.job_queue.get_job_status(job_id)
+            if status in ("pending", "processing"):
+                return None
+
+        try:
+            age = (
+                datetime.now(UTC) - datetime.fromisoformat(info.last_run)
+            ).total_seconds()
+        except ValueError:
+            return None
+        return age if age > STREAMING_SESSION_STALE_SECONDS else None
 
     async def _execute(
         self,
@@ -495,28 +530,61 @@ class RequestProcessor:
                             )
                             return "injected"
 
-                        # Session is running but no active worker.
-                        # This happens when a job is pending (worker hasn't
-                        # started yet) or the worker crashed mid-run.
-                        # Push the message to the inbox — the worker will
-                        # pick it up after it starts or the reclaim will
-                        # re-queue the job and find it later.
-                        await streaming_store.push_inbox_message(
-                            existing_token, user_query
+                        # Session is running but no active worker. This
+                        # normally means a job is pending (worker hasn't
+                        # started yet) or the worker crashed mid-run, in
+                        # which case reclaim_stale_jobs() will re-queue it
+                        # and it'll pick up the inbox message once it starts.
+                        #
+                        # But if the job never even started — no
+                        # worktree_path/session_id was ever set — and it's
+                        # been stuck like this for a while, the original job
+                        # most likely expired out of the pending queue before
+                        # any worker popped it (e.g. a worker shutdown/
+                        # restart gap) and was dead-lettered. Dead-lettered
+                        # jobs never reach the "processing" set, so
+                        # reclaim_stale_jobs() will never find or re-queue
+                        # them — the session would stay a zombie forever,
+                        # silently swallowing every future event. Detect that
+                        # and fall through to create a fresh job instead.
+                        orphaned_age = await self._orphaned_session_age(
+                            streaming_store, existing_token
                         )
-                        # Also publish for browser display
-                        from shared.session_stream import SessionStreamBridge
 
-                        bridge = SessionStreamBridge(
-                            token=existing_token,
-                            redis=self.job_queue.redis,
-                        )
-                        await bridge.publish_user_message(user_query)
-                        logger.info(
-                            f"[Streaming] Queued follow-up for pending session "
-                            f"{existing_token[:8]}... for {repo}#{issue_number}"
-                        )
-                        return "queued"
+                        if orphaned_age is not None:
+                            logger.warning(
+                                f"[Streaming] Session {existing_token[:8]}... for "
+                                f"{repo}#{issue_number} has been 'running' with no "
+                                "worktree/session_id and no active worker for "
+                                f"{orphaned_age:.0f}s — its job was likely lost "
+                                "before ever starting; recreating it"
+                            )
+                            await streaming_store.set_completed(
+                                existing_token, is_error=True
+                            )
+                            # Fall through to the "completed/error session"
+                            # reuse path below, which will reuse this token
+                            # and enqueue a real job.
+                        else:
+                            # Push the message to the inbox — the worker will
+                            # pick it up after it starts or the reclaim will
+                            # re-queue the job and find it later.
+                            await streaming_store.push_inbox_message(
+                                existing_token, user_query
+                            )
+                            # Also publish for browser display
+                            from shared.session_stream import SessionStreamBridge
+
+                            bridge = SessionStreamBridge(
+                                token=existing_token,
+                                redis=self.job_queue.redis,
+                            )
+                            await bridge.publish_user_message(user_query)
+                            logger.info(
+                                f"[Streaming] Queued follow-up for pending session "
+                                f"{existing_token[:8]}... for {repo}#{issue_number}"
+                            )
+                            return "queued"
 
                     # Try completed/error sessions as fallback
                     existing_token = await streaming_store.find_session(
@@ -642,6 +710,18 @@ class RequestProcessor:
         logger.info(
             f"Created job {job_id} for {repo}#{issue_number} - worker is now free"
         )
+
+        if session_token:
+            try:
+                await SessionStore(self.job_queue.redis).set_job_id(
+                    session_token, job_id
+                )
+            except Exception as e:
+                logger.warning(
+                    f"[Streaming] Failed to record job_id on session "
+                    f"{session_token[:8]}...: {e}"
+                )
+
         return job_id
 
     async def cleanup(self):

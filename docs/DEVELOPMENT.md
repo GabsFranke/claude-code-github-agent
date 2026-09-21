@@ -42,7 +42,7 @@ Complete guide for developers working on the Claude Code GitHub Agent.
 
 ```bash
 # Clone repository
-git clone https://github.com/GabsFranke/claude-code-github-agent.git
+git clone https://github.com/your-org/claude-code-github-agent.git
 cd claude-code-github-agent
 
 # Create and activate virtual environment
@@ -127,7 +127,6 @@ claude-code-github-agent/
 │   ├── memory/               # memory_read / memory_write tools
 │   └── ...
 ├── plugins/                  # Claude Code plugins
-│   ├── pr-review-toolkit/    # PR review workflow (7 agents, review-pr command)
 │   ├── ci-failure-toolkit/   # CI failure analysis (4 agents, GitHub Actions MCP)
 │   ├── test-toolkit/         # Generic task testing
 │   ├── pr-fix/               # PR review feedback fixes (fix-review command)

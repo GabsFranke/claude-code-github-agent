@@ -182,11 +182,20 @@ class TestProcessSyncRequest:
 
                 await process_sync_request(message, mock_redis)
 
-                # Verify clone was attempted (should be called 3 times: clone, set-url, fetch)
+                # Verify clone was attempted (clone, refspec config, fetch)
                 assert mock_git.call_count >= 1
-                call_args = mock_git.call_args_list[0][0][0]
-                assert "git clone --bare" in call_args
-                assert "owner/repo.git" in call_args
+                clone_cmd = mock_git.call_args_list[0][0][0]
+                assert clone_cmd[0] == "git"
+                assert "clone" in clone_cmd and "--bare" in clone_cmd
+                # The token travels as a header, never inside the URL, so it
+                # is not written into the cloned repo's config.
+                assert "https://github.com/owner/repo.git" in clone_cmd
+                assert not any(
+                    "test_token" in a and "github.com" in a for a in clone_cmd
+                )
+                assert any(
+                    a.startswith("http.extraheader=AUTHORIZATION:") for a in clone_cmd
+                )
 
                 # Verify completion signal was set
                 mock_redis.set.assert_called_once()
@@ -235,19 +244,22 @@ class TestProcessSyncRequest:
             await process_sync_request(message, mock_redis)
 
             # Verify fetch was attempted (not clone) - should be called twice:
-            # 1. set-url to update remote with token
-            # 2. fetch to get updates
+            # 1. set-url to keep the stored remote token-free
+            # 2. fetch to get updates, authenticating via header
             assert mock_git.call_count == 2
 
-            # First call: set remote URL
-            first_call_args = mock_git.call_args_list[0][0][0]
-            assert "git --git-dir=" in first_call_args
-            assert "remote set-url origin" in first_call_args
+            # First call: reset remote URL to the plain, token-free form
+            set_url_cmd = mock_git.call_args_list[0][0][0]
+            assert "remote" in set_url_cmd and "set-url" in set_url_cmd
+            assert set_url_cmd[-1] == "https://github.com/owner/repo.git"
+            assert "test_token" not in set_url_cmd[-1]
 
-            # Second call: fetch
-            second_call_args = mock_git.call_args_list[1][0][0]
-            assert "git --git-dir=" in second_call_args
-            assert "fetch origin" in second_call_args
+            # Second call: fetch with the token in a header only
+            fetch_cmd = mock_git.call_args_list[1][0][0]
+            assert "fetch" in fetch_cmd and "origin" in fetch_cmd
+            assert any(
+                a.startswith("http.extraheader=AUTHORIZATION:") for a in fetch_cmd
+            )
 
             # Verify completion signal was set
             mock_redis.set.assert_called_once()
@@ -334,10 +346,11 @@ class TestProcessSyncRequest:
 
             # Verify clone was attempted without token (may be called multiple times)
             assert mock_git.call_count >= 1
-            call_args = mock_git.call_args_list[0][0][0]
-            assert "git clone --bare" in call_args
-            assert "https://github.com/owner/repo.git" in call_args
-            assert "x-access-token" not in call_args
+            clone_cmd = mock_git.call_args_list[0][0][0]
+            assert clone_cmd[:3] == ["git", "clone", "--bare"]
+            assert "https://github.com/owner/repo.git" in clone_cmd
+            # No token, so no auth header at all
+            assert not any("http.extraheader" in a for a in clone_cmd)
 
     @pytest.mark.asyncio
     async def test_exception_handling(self):
@@ -488,3 +501,34 @@ class TestMainLoop:
 
         # Reset shutdown event
         shutdown_event.clear()
+
+
+class TestGitAuthArgs:
+    """The token must reach git as a header, never as part of a stored URL."""
+
+    def test_no_token_means_no_auth_args(self):
+        from services.repo_sync.sync_worker import git_auth_args
+
+        assert git_auth_args(None) == []
+        assert git_auth_args("") == []
+
+    def test_token_becomes_basic_auth_header(self):
+        import base64
+
+        from services.repo_sync.sync_worker import git_auth_args
+
+        args = git_auth_args("tok123")
+
+        assert args[0] == "-c"
+        header = args[1]
+        assert header.startswith("http.extraheader=AUTHORIZATION: basic ")
+        encoded = header.rsplit(" ", 1)[1]
+        assert base64.b64decode(encoded).decode() == "x-access-token:tok123"
+
+    def test_raw_token_is_not_in_the_args(self):
+        """Only the base64 form appears, and never in a URL position."""
+        from services.repo_sync.sync_worker import git_auth_args
+
+        args = git_auth_args("tok123")
+
+        assert not any("tok123" in a for a in args)

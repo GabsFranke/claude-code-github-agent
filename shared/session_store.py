@@ -57,6 +57,7 @@ from .constants import (  # noqa: E402, F401  (intentional re-exports)
     session_cleanup_key,
     session_key,
     session_pattern,
+    streaming_job_key,
     streaming_lookup_key,
     streaming_session_key,
     subscribers_key,
@@ -75,6 +76,7 @@ __all__ = [
     "session_cleanup_key",
     "session_key",
     "session_pattern",
+    "streaming_job_key",
     "streaming_lookup_key",
     "streaming_session_key",
     "subscribers_key",
@@ -809,6 +811,61 @@ class SessionStore:  # pylint: disable=too-many-public-methods
             return token
         return None
 
+    async def list_stale_running_sessions(
+        self, stale_after_seconds: int
+    ) -> list[UnifiedSessionInfo]:
+        """Scan all streaming sessions stuck at status="running" whose job
+        never actually started (no worktree_path/session_id) and whose
+        last_run is older than *stale_after_seconds*.
+
+        These are orphans left behind when a job expires from the pending
+        queue before any sandbox worker ever picks it up (e.g. a restart
+        gap), which skips the "processing" set entirely and so is invisible
+        to ``JobQueue.reclaim_stale_jobs()``. Callers should still confirm no
+        ``WorktreeLock`` is held before treating a result as truly dead.
+        """
+        pattern = streaming_session_key("*")
+        cutoff = datetime.now(UTC).timestamp() - stale_after_seconds
+        stale: list[UnifiedSessionInfo] = []
+        cursor = 0
+        while True:
+            cursor, keys = await self.redis.scan(
+                cursor=cursor, match=pattern, count=200
+            )
+            for key in keys:
+                # streaming_session_key("*") also matches lookup keys
+                # (session:stream:lookup:...); session hash keys have
+                # exactly one segment after "session:stream:".
+                if key.count(":") != 2:
+                    continue
+                token = key.rsplit(":", 1)[-1]
+                data = await cast(Awaitable[dict], self.redis.hgetall(key))
+                if not data:
+                    continue
+                try:
+                    decoded = decode_redis_hash(data)
+                    decoded = self._normalize_streaming_data(decoded)
+                    decoded.setdefault("streaming_token", token)
+                    info = UnifiedSessionInfo.model_validate(decoded)
+                except Exception as e:
+                    logger.warning(
+                        f"[SessionStore] Skipping corrupt streaming session at {key}: {e}"
+                    )
+                    continue
+                if info.status != SessionStatus.running:
+                    continue
+                if info.worktree_path or info.session_id:
+                    continue
+                try:
+                    last_run_ts = datetime.fromisoformat(info.last_run).timestamp()
+                except ValueError:
+                    continue
+                if last_run_ts < cutoff:
+                    stale.append(info)
+            if cursor == 0:
+                break
+        return stale
+
     async def set_completed(
         self,
         token: str,
@@ -854,11 +911,29 @@ class SessionStore:  # pylint: disable=too-many-public-methods
                 mapping={
                     "status": "running",
                     "session_id": "",
+                    "last_run": _now_iso(),
                 },
             ),
         )
         await self.redis.expire(key, ttl_seconds)
         logger.info(f"[SessionStore] Streaming session {token[:8]}... -> running")
+
+    async def set_job_id(self, token: str, job_id: str) -> None:
+        """Record the JobQueue job_id currently servicing a streaming session.
+
+        Lets the orphan-recovery sweep check the job's real status instead
+        of guessing from elapsed time — see ``streaming_job_key``.
+        """
+        await self.redis.set(
+            streaming_job_key(token), job_id, ex=DEFAULT_SESSION_TTL_SECONDS
+        )
+
+    async def get_job_id(self, token: str) -> str | None:
+        """Return the JobQueue job_id last recorded for a streaming session."""
+        raw = await self.redis.get(streaming_job_key(token))
+        if raw is None:
+            return None
+        return raw.decode() if isinstance(raw, bytes) else raw
 
     async def delete_session(self, token: str) -> None:
         """Delete a streaming session and its sub-keys (inbox, subscribers)."""

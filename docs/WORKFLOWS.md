@@ -223,7 +223,7 @@ Per-event filters take priority — when an event entry has its own `filters`, t
 Prefix with a plugin command to delegate to a specialized agent:
 
 ```yaml
-template: "/pr-review-toolkit:review-pr {repo} {issue_number}"
+template: "/oh-my-claudecode:team 3:executor Review PR #{issue_number} in {repo}"
 ```
 
 ### System Context
@@ -322,7 +322,7 @@ docker-compose restart worker
 
 | Workflow | Events | Commands | Description |
 |----------|--------|----------|-------------|
-| `review-pr` | `pull_request.opened`, `pull_request.labeled` (label: `review`, `pr-review`, `review-pr`) | `/review`, `/pr-review`, `/review-pr` | Full PR review via pr-review-toolkit |
+| `review-pr` | `pull_request.opened`, `pull_request.labeled` (label: `review`, `pr-review`, `review-pr`) | `/review`, `/pr-review`, `/review-pr` | Full PR review via an oh-my-claudecode team |
 | `triage-issue` | `issues.opened`, `issues.labeled` (label: `triage`) | `/triage`, `/triage-issue` | Triage with priority and complexity assessment |
 | `fix-ci` | `workflow_job.completed` (failure only) | `/fix-ci`, `/fix-build`, `/fix-tests` | Analyze CI logs and push fix via ci-failure-toolkit |
 | `fix-review` | `pull_request.labeled` (label: `fix-review`, `fix-it`, `pr-fix`) | `/fix-it` | Read review feedback and implement fixes via pr-fix plugin |
@@ -359,7 +359,7 @@ pr-updated:
       - event: pull_request.synchronize
       - event: pull_request.reopened
   prompt:
-    template: "/pr-review-toolkit:review-pr {repo} {issue_number}"
+    template: "/oh-my-claudecode:team 3:executor Review PR #{issue_number} in {repo}"
 ```
 
 ### Mixed Filtered and Unfiltered Events
@@ -377,7 +377,7 @@ review-pr:
     commands:
       - /review
   prompt:
-    template: "/pr-review-toolkit:review-pr {repo} {issue_number}"
+    template: "/oh-my-claudecode:team 3:executor Review PR #{issue_number} in {repo}"
 ```
 
 ### Command Aliases

@@ -6,18 +6,21 @@ TDD: Tests are written BEFORE the SessionStore class exists (RED phase).
 
 import json
 import warnings
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from pydantic import ValidationError
 
 from shared.constants import (
+    DEFAULT_SESSION_TTL_SECONDS,
     history_key,
     inbox_key,
     session_cleanup_key,
     session_key,
     session_pattern,
     streaming_lookup_key,
+    streaming_session_key,
     subscribers_key,
 )
 from shared.session_store import (
@@ -859,6 +862,159 @@ class TestSessionStoreListSessions:
         result = await store.list_sessions("owner/repo")
         assert len(result) == 1
         assert result[0].session_id == "sess-456"
+
+
+class TestSessionStoreJobId:
+    """set_job_id / get_job_id — tracks the JobQueue job servicing a
+    streaming session so the recovery sweep can check real job status
+    instead of guessing from elapsed time (see streaming_job_key)."""
+
+    @pytest.mark.asyncio
+    async def test_set_job_id_writes_with_ttl(self):
+        redis = _make_redis_v2()
+        redis.set = AsyncMock(return_value=True)
+        store = SessionStore(redis_client=redis)
+
+        await store.set_job_id("tok-1", "job-123")
+
+        redis.set.assert_awaited_once()
+        args, kwargs = redis.set.call_args
+        assert args[0] == streaming_session_key("tok-1").replace(
+            "session:stream:", "session:stream:job:"
+        )
+        assert args[1] == "job-123"
+        assert kwargs["ex"] == DEFAULT_SESSION_TTL_SECONDS
+
+    @pytest.mark.asyncio
+    async def test_get_job_id_returns_value(self):
+        redis = _make_redis_v2()
+        redis.get = AsyncMock(return_value="job-123")
+        store = SessionStore(redis_client=redis)
+
+        result = await store.get_job_id("tok-1")
+
+        assert result == "job-123"
+
+    @pytest.mark.asyncio
+    async def test_get_job_id_returns_none_when_absent(self):
+        redis = _make_redis_v2()
+        redis.get = AsyncMock(return_value=None)
+        store = SessionStore(redis_client=redis)
+
+        result = await store.get_job_id("tok-1")
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_get_job_id_decodes_bytes(self):
+        redis = _make_redis_v2()
+        redis.get = AsyncMock(return_value=b"job-123")
+        store = SessionStore(redis_client=redis)
+
+        result = await store.get_job_id("tok-1")
+
+        assert result == "job-123"
+
+
+class TestSessionStoreListStaleRunningSessions:
+    """list_stale_running_sessions — recovery sweep for orphaned streaming
+    sessions whose job died before it ever started (see
+    STREAMING_SESSION_STALE_SECONDS in shared/constants.py)."""
+
+    @staticmethod
+    def _streaming_hash(
+        *,
+        status: str = "running",
+        worktree_path: str = "",
+        session_id: str = "",
+        last_run_age_seconds: int = 1000,
+    ) -> dict:
+        last_run = (
+            datetime.now(UTC) - timedelta(seconds=last_run_age_seconds)
+        ).isoformat()
+        return {
+            b"token": b"tok-orphan",
+            b"repo": b"owner/repo",
+            b"thread_type": b"pr",
+            b"thread_id": b"40",
+            b"issue_number": b"40",
+            b"workflow": b"review-pr",
+            b"status": status.encode(),
+            b"worktree_path": worktree_path.encode(),
+            b"session_id": session_id.encode(),
+            b"last_run": last_run.encode(),
+            b"created_at": last_run.encode(),
+            b"installation_id": b"999",
+            b"initial_query": b"",
+            b"user": b"someone",
+            b"ref": b"refs/pull/40/head",
+        }
+
+    @pytest.mark.asyncio
+    async def test_finds_orphaned_session(self):
+        redis = _make_redis_v2()
+        redis.scan = AsyncMock(return_value=(0, [streaming_session_key("tok-orphan")]))
+        redis.hgetall = AsyncMock(return_value=self._streaming_hash())
+        store = SessionStore(redis_client=redis)
+
+        result = await store.list_stale_running_sessions(stale_after_seconds=300)
+
+        assert len(result) == 1
+        assert result[0].streaming_token == "tok-orphan"
+        assert result[0].repo == "owner/repo"
+
+    @pytest.mark.asyncio
+    async def test_skips_lookup_keys(self):
+        redis = _make_redis_v2()
+        redis.scan = AsyncMock(
+            return_value=(
+                0,
+                [streaming_lookup_key("owner/repo", "40", "review-pr", "pr")],
+            )
+        )
+        store = SessionStore(redis_client=redis)
+
+        result = await store.list_stale_running_sessions(stale_after_seconds=300)
+
+        assert result == []
+        redis.hgetall.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_excludes_recently_updated_session(self):
+        redis = _make_redis_v2()
+        redis.scan = AsyncMock(return_value=(0, [streaming_session_key("tok-fresh")]))
+        redis.hgetall = AsyncMock(
+            return_value=self._streaming_hash(last_run_age_seconds=5)
+        )
+        store = SessionStore(redis_client=redis)
+
+        result = await store.list_stale_running_sessions(stale_after_seconds=300)
+
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_excludes_session_that_actually_started(self):
+        redis = _make_redis_v2()
+        redis.scan = AsyncMock(return_value=(0, [streaming_session_key("tok-started")]))
+        redis.hgetall = AsyncMock(
+            return_value=self._streaming_hash(worktree_path="/tmp/wt")
+        )
+        store = SessionStore(redis_client=redis)
+
+        result = await store.list_stale_running_sessions(stale_after_seconds=300)
+
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_excludes_non_running_status(self):
+        redis = _make_redis_v2()
+        redis.scan = AsyncMock(return_value=(0, [streaming_session_key("tok-done")]))
+        redis.hgetall = AsyncMock(return_value=self._streaming_hash(status="error"))
+        store = SessionStore(redis_client=redis)
+
+        result = await store.list_stale_running_sessions(stale_after_seconds=300)
+
+        assert result == []
 
 
 # ---------------------------------------------------------------------------

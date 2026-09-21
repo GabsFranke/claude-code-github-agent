@@ -1,6 +1,7 @@
 """Background worker solely responsible for syncing and caching bare git repositories."""
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -11,6 +12,29 @@ from shared.github_auth import get_github_auth_service
 from shared.logging_utils import setup_logging
 from shared.queue import RedisQueue
 from shared.signals import setup_graceful_shutdown
+
+# Branches, tags, and PR heads. Branches land under refs/remotes/origin/* so
+# they never collide with refs checked out in worktrees.
+FETCH_REFSPECS = [
+    "+refs/heads/*:refs/remotes/origin/*",
+    "+refs/tags/*:refs/tags/*",
+    "+refs/pull/*/head:refs/pull/*/head",
+]
+
+
+def git_auth_args(token: str | None) -> list[str]:
+    """Return ``-c http.extraheader=...`` so a git command can authenticate.
+
+    Passing the token this way keeps it out of ``remote.origin.url``. The bare
+    cache is shared by every job on the host and outlives all of them, so a
+    token written into its config would remain readable long after the job
+    that minted it has finished. A per-command header leaves nothing on disk.
+    """
+    if not token:
+        return []
+    basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+    return ["-c", f"http.extraheader=AUTHORIZATION: basic {basic}"]
+
 
 # Configure logging
 setup_logging(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -54,7 +78,8 @@ async def process_sync_request(message: dict, redis_client):
     except Exception as e:
         logger.warning(f"Failed to get GitHub App token: {e}")
 
-    auth_prefix = f"https://x-access-token:{token}@" if token else "https://"
+    plain_url = f"https://github.com/{repo}.git"
+    auth = git_auth_args(token)
 
     lock_key = f"agent:sync:lock:{repo}"
     complete_key = f"agent:sync:complete:{repo}:{ref}"
@@ -77,10 +102,9 @@ async def process_sync_request(message: dict, redis_client):
 
         if not os.path.exists(repo_dir):
             logger.info(f"Bare cache for {repo} not found. Cloning...")
-            clone_url = f"{auth_prefix}github.com/{repo}.git"
-
-            # Use --bare to create a pure database clone with no working tree
-            cmd = f"git clone --bare {clone_url} {repo_dir}"
+            # Use --bare to create a pure database clone with no working tree.
+            # Auth goes in a header, not the URL, so it is not saved in the clone.
+            cmd = ["git", *auth, "clone", "--bare", plain_url, repo_dir]
             code, _out, err = await execute_git_command(cmd)
 
             if code != 0:
@@ -101,29 +125,56 @@ async def process_sync_request(message: dict, redis_client):
             # After initial clone, configure remote and fetch all refs properly
             # In a bare repo, we need to manually configure the fetch refspec
             logger.info(f"Configuring fetch refspec for {repo}...")
-            config_cmd = f"git --git-dir={repo_dir} config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'"
+            config_cmd = [
+                "git",
+                f"--git-dir={repo_dir}",
+                "config",
+                "remote.origin.fetch",
+                "+refs/heads/*:refs/remotes/origin/*",
+            ]
             code, _out, err = await execute_git_command(config_cmd)
             if code != 0:
                 logger.warning(f"Failed to configure fetch refspec for {repo}: {err}")
 
             # Fetch all branches, tags, and PR refs
             logger.info(f"Fetching all refs for {repo}...")
-            cmd = f"git --git-dir={repo_dir} fetch origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '+refs/pull/*/head:refs/pull/*/head'"
+            cmd = [
+                "git",
+                *auth,
+                f"--git-dir={repo_dir}",
+                "fetch",
+                "origin",
+                *FETCH_REFSPECS,
+            ]
             code, _out, err = await execute_git_command(cmd)
             if code != 0:
                 logger.warning(f"Failed to fetch all refs for {repo}: {err}")
                 # Don't fail the whole sync, just log warning
         else:
             logger.info(f"Fetching updates for {repo}...")
-            # Update remote URL with authentication token for fetch
-            if token:
-                set_url_cmd = f"git --git-dir={repo_dir} remote set-url origin {auth_prefix}github.com/{repo}.git"
-                await execute_git_command(set_url_cmd)
+            # Keep the stored remote URL token-free. Caches created by earlier
+            # versions had the token embedded in the URL; this scrubs them.
+            set_url_cmd = [
+                "git",
+                f"--git-dir={repo_dir}",
+                "remote",
+                "set-url",
+                "origin",
+                plain_url,
+            ]
+            await execute_git_command(set_url_cmd)
 
             # Fetch all branches, tags, and PR refs into the bare repo
             # Use refs/remotes/origin/* to avoid conflicts with checked-out worktrees
             # PR refs are stored as refs/pull/*/head
-            cmd = f"git --git-dir={repo_dir} fetch origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '+refs/pull/*/head:refs/pull/*/head'"
+            cmd = [
+                "git",
+                *auth,
+                f"--git-dir={repo_dir}",
+                "fetch",
+                "origin",
+                *FETCH_REFSPECS,
+            ]
             code, _out, err = await execute_git_command(cmd)
 
             if code != 0:

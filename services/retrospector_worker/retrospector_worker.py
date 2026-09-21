@@ -90,7 +90,7 @@ async def process_retrospector_job(message: dict, redis_client) -> None:
     agent_id = session_meta.get("agent_id")  # e.g., "comment-analyzer"
     agent_type = session_meta.get(
         "agent_type"
-    )  # e.g., "pr-review-toolkit:comment-analyzer"
+    )  # e.g., "ci-failure-toolkit:test-failure-analyzer"
 
     if hook_event == "SubagentStop" and agent_id:
         # Use agent_id as the workflow name for retrospection
