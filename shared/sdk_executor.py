@@ -13,6 +13,7 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
     ResultMessage,
+    SystemMessage,
     TextBlock,
 )
 
@@ -155,7 +156,7 @@ async def _execute_sdk_once(
     }
 
     logger.info(f"Starting SDK execution (prompt: {len(prompt)} chars)...")
-    logger.info(f"Model: {options.model}")
+    logger.info(f"Model: {options.model or '(CLI default)'}")
 
     # Only show detailed info if SDK_DEBUG is enabled
     if sdk_debug:
@@ -191,7 +192,15 @@ async def _execute_sdk_once(
                     if sdk_debug:
                         logger.debug(f"Received message type: {type(message).__name__}")
 
-                    if isinstance(message, AssistantMessage):
+                    if isinstance(message, SystemMessage) and message.subtype == "init":
+                        # The CLI reports the resolved model id here; the alias
+                        # we passed (if any) is logged above as "Model:".
+                        logger.info(
+                            f"SDK session init - model={message.data.get('model')}, "
+                            f"session_id={message.data.get('session_id')}"
+                        )
+
+                    elif isinstance(message, AssistantMessage):
                         logger.info(
                             f"Received response with {len(message.content)} blocks"
                         )

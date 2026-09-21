@@ -446,6 +446,10 @@ class JobProcessor:
             or ConversationConfig().max_turns
         )
 
+        # Model tier from workflows.yaml (opus/sonnet/haiku). Unset means the
+        # CLI resolves the model itself; see tests/shared/test_model_resolution.py.
+        model_tier = self.job_data.get("model")
+
         os.environ["GITHUB_TOKEN"] = github_token
         if github_token:
             logger.info(f"GitHub token available: {len(github_token)} characters")
@@ -514,6 +518,8 @@ class JobProcessor:
             self.user_interrupt_event.clear()
 
             builder = SDKOptionsBuilder(cwd=self.workspace).with_max_turns(max_turns)
+            if model_tier:
+                builder = builder.with_model(model_tier)
             builder = configure_builder(
                 builder,
                 repo=self.repo,

@@ -4,7 +4,7 @@ import logging
 import string
 from functools import cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml  # type: ignore[import]
 from pydantic import BaseModel, Field, ValidationError, field_validator
@@ -129,12 +129,23 @@ class StreamingConfig(BaseModel):
     )
 
 
+ModelTier = Literal["opus", "sonnet", "haiku"]
+
+
 class WorkflowConfig(BaseModel):
     """Configuration for a single workflow."""
 
     triggers: TriggersConfig = Field(..., description="Event and command triggers")
     prompt: PromptConfig = Field(..., description="Prompt configuration")
     description: str = Field(default="", description="Workflow description")
+    model: ModelTier | None = Field(
+        default=None,
+        description=(
+            "Model tier for the main agent loop (opus/sonnet/haiku). The alias "
+            "is resolved by the Claude Code CLI via ANTHROPIC_DEFAULT_*_MODEL; "
+            "unset leaves resolution to settings.json / CLI defaults."
+        ),
+    )
     skip_self: bool = Field(
         default=True,
         description="Skip events triggered by the bot itself (default: true)",

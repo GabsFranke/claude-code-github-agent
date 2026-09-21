@@ -4,6 +4,10 @@
 # - prompt: How to build the prompt for Claude Agent SDK
 # - description: Human-readable description
 # - skip_self: Whether to skip events triggered by the bot itself (optional, default: true)
+# - model: Model tier for the main agent loop: opus | sonnet | haiku (optional).
+#   Aliases resolve through ANTHROPIC_DEFAULT_*_MODEL; unset leaves it to the CLI.
+#   Users can override per request with `--model <tier>` in a slash command,
+#   e.g. `/review --model opus` or `/agent --model=haiku --new ...`.
 # - conversation: Persistence settings for multi-turn conversations (optional)
 
 workflows:
@@ -52,6 +56,7 @@ workflows:
     prompt:
       template: "/oh-my-claudecode:team 3:executor Conduct a highly thorough, multi-agent code review of PR #{issue_number} in {repo}. Focus on code quality, security, and performance, and post your review summary and line-by-line comments directly on GitHub."
     description: "OMC-powered comprehensive multi-agent PR review"
+    model: opus
     conversation:
       persist: true
     streaming:

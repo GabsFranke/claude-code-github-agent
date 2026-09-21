@@ -51,6 +51,31 @@ def _parse_session_flag(user_query: str) -> tuple[str, str]:
     return "", rest
 
 
+_MODEL_FLAG_RE = re.compile(r"(?:^|\s)--model(?:=|\s+)(\S+)")
+_MODEL_TIERS = ("opus", "sonnet", "haiku")
+
+
+def _parse_model_flag(user_query: str) -> tuple[str | None, str]:
+    """Extract a ``--model <tier>`` override from a slash command.
+
+    Accepts ``--model opus`` or ``--model=opus`` anywhere in the comment and
+    strips it so it never reaches the prompt. Unknown tiers are dropped with a
+    warning; full model ids belong in ``ANTHROPIC_DEFAULT_*_MODEL``.
+    """
+    m = _MODEL_FLAG_RE.search(user_query)
+    if not m:
+        return None, user_query
+    tier = m.group(1).lower()
+    rest = (user_query[: m.start()] + " " + user_query[m.end() :]).strip()
+    rest = re.sub(r"[ \t]{2,}", " ", rest)
+    if tier not in _MODEL_TIERS:
+        logger.warning(
+            f"Ignoring --model '{tier}': expected one of {', '.join(_MODEL_TIERS)}"
+        )
+        return None, rest
+    return tier, rest
+
+
 # Type alias for process return value
 ProcessResult = str | Literal["ignored", "injected", "queued"]
 
@@ -275,6 +300,14 @@ class RequestProcessor:
 
         logger.info(f"Processing workflow '{workflow_name}' for {repo}")
 
+        # Per-request model tier: `--model opus` in the comment beats the
+        # workflow's `model:` key; neither set leaves resolution to the CLI.
+        workflow_config = self.workflow_engine.workflows[workflow_name]
+        model_flag, user_query = _parse_model_flag(user_query)
+        model_tier = model_flag or workflow_config.model
+        if model_flag:
+            logger.info(f"Model tier '{model_flag}' requested via --model flag")
+
         # Workflow validated - trigger repo sync
         logger.info(f"Triggering sync for {repo} ref {ref or 'main'}")
         from shared import get_queue
@@ -430,8 +463,7 @@ class RequestProcessor:
         session_token = None
         session_proxy_url = None
 
-        workflow_config = self.workflow_engine.workflows.get(workflow_name)
-        if workflow_config and workflow_config.streaming.enabled:
+        if workflow_config.streaming.enabled:
             session_proxy_url = os.getenv("SESSION_PROXY_URL", "").strip()
             if session_proxy_url:
                 try:
@@ -688,6 +720,7 @@ class RequestProcessor:
                 "event_data": event_data,
                 "parent_span_id": parent_span_id,  # For Langfuse trace linking
                 "context_profile": context_profile,  # Structural context config
+                "model": model_tier,
                 # Session persistence fields
                 "session_mode": session_mode,
                 "session_id": session_id,

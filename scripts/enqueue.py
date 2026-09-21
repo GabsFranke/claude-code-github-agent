@@ -38,6 +38,7 @@ Subcommands and arguments:
 |               |                           | [--thread-type] [--thread-id] [--streaming] |
 |               |                           | [--persist] [--ttl-hours] [--max-turns]     |
 |               |                           | [--auto-continue] [--summary-fallback]      |
+|               |                           | [--model {opus,sonnet,haiku}]               |
 +---------------+---------------------------+----------------------------------------------+
 """
 
@@ -209,6 +210,7 @@ def build_sandbox_message(args: argparse.Namespace) -> dict:
         "conversation_summary": None,
         "streaming_enabled": args.streaming,
         "session_token": None,
+        "model": args.model,
     }
     return {"job_id": job_id, "job_data": job_data}
 
@@ -394,6 +396,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--streaming", action="store_true", default=False, help="Enable streaming"
+    )
+    p.add_argument(
+        "--model",
+        default=None,
+        choices=["opus", "sonnet", "haiku"],
+        help="Model tier for the main agent loop (default: workflow/CLI setting)",
     )
 
     return parser
