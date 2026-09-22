@@ -12,17 +12,9 @@ class TestFixCIWorkflow:
     """Test fix-ci workflow configuration and routing."""
 
     @pytest.fixture
-    def real_workflows_yaml(self):
-        """Load the actual workflows.example.yaml file."""
-        workflow_path = Path(__file__).parent.parent.parent / "workflows.example.yaml"
-        if not workflow_path.exists():
-            pytest.skip("workflows.example.yaml not found in project root")
-        return workflow_path
-
-    @pytest.fixture
-    def engine(self, real_workflows_yaml):
-        """Create WorkflowEngine with real workflows.yaml."""
-        return WorkflowEngine(real_workflows_yaml)
+    def engine(self, repo_workflow_config):
+        """Create WorkflowEngine from the config the repository ships."""
+        return WorkflowEngine(repo_workflow_config)
 
     def test_fix_ci_workflow_exists(self, engine):
         """Test that fix-ci workflow is defined."""

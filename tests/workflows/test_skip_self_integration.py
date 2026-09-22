@@ -9,14 +9,9 @@ class TestSkipSelfWithEventActor:
     """Test skip_self behavior with different event actors."""
 
     @pytest.fixture
-    def engine(self):
-        """Load the real workflows.yaml."""
-        from pathlib import Path
-
-        workflow_path = Path(__file__).parent.parent.parent / "workflows.yaml"
-        if not workflow_path.exists():
-            pytest.skip("workflows.yaml not found")
-        return WorkflowEngine(workflow_path)
+    def engine(self, repo_workflow_config):
+        """Load the workflow config the repository ships."""
+        return WorkflowEngine(repo_workflow_config)
 
     def test_bot_opens_pr_should_skip(self, engine):
         """Bot opens PR - should skip automatic review."""
