@@ -17,3 +17,4 @@ pre-commit>=4.6.0
 -r services/webhook/requirements.txt
 -r services/agent_worker/requirements.txt
 -r services/sandbox_executor/requirements.txt
+-r services/scheduler/requirements.txt

@@ -19,10 +19,9 @@ import base64
 import json
 import logging
 import os
-from collections.abc import Awaitable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Literal, cast
+from typing import Literal
 
 import redis.asyncio as aioredis
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
@@ -95,7 +94,7 @@ async def lifespan(app: FastAPI):
     )
     # Verify connectivity
     try:
-        await cast(Awaitable[bool], _redis.ping())
+        await _redis.ping()
         logger.info("Connected to Redis at %s", config.redis_url)
     except Exception as exc:
         logger.warning(
@@ -253,7 +252,7 @@ async def health():
     """
     try:
         redis_client = get_redis()
-        await cast(Awaitable[bool], redis_client.ping())
+        await redis_client.ping()
         return {"status": "ok", "redis": "connected"}
     except RuntimeError:
         # Redis not initialised yet — service is starting
@@ -723,7 +722,7 @@ async def _ws_to_redis(websocket: WebSocket, token: str) -> None:
                 await redis_client.publish(msg_channel, user_msg)
 
                 hist_key = history_key(token)
-                await cast(Awaitable[int], redis_client.rpush(hist_key, user_msg))
+                await redis_client.rpush(hist_key, user_msg)
                 await redis_client.expire(hist_key, DEFAULT_SESSION_TTL_SECONDS)
 
             await redis_client.publish(ctl_channel, text)
