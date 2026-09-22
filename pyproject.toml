@@ -79,6 +79,10 @@ ignore_errors = true
 minversion = "7.0"
 addopts = "-ra -q --strict-markers --strict-config --cov=services --cov=shared --cov-report=term-missing --cov-report=html"
 testpaths = ["tests"]
+# No test in this suite needs two minutes. A test that blocks past this is
+# hung, and without a cap it stalls the CI job until the whole run is
+# cancelled with no traceback to work from.
+timeout = 120
 python_files = ["test_*.py", "*_test.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
