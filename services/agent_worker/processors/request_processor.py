@@ -14,6 +14,7 @@ from langfuse import Langfuse
 
 from shared import GitHubAuthService, JobQueue
 from shared.constants import (
+    MODEL_TIERS,
     SESSION_DEDUP_LOCK_TTL,
     STREAMING_SESSION_STALE_SECONDS,
     session_dedup_key,
@@ -52,7 +53,6 @@ def _parse_session_flag(user_query: str) -> tuple[str, str]:
 
 
 _MODEL_FLAG_RE = re.compile(r"(?:^|\s)--model(?:=|\s+)(\S+)")
-_MODEL_TIERS = ("opus", "sonnet", "haiku")
 
 
 def _parse_model_flag(user_query: str) -> tuple[str | None, str]:
@@ -68,9 +68,9 @@ def _parse_model_flag(user_query: str) -> tuple[str | None, str]:
     tier = m.group(1).lower()
     rest = (user_query[: m.start()] + " " + user_query[m.end() :]).strip()
     rest = re.sub(r"[ \t]{2,}", " ", rest)
-    if tier not in _MODEL_TIERS:
+    if tier not in MODEL_TIERS:
         logger.warning(
-            f"Ignoring --model '{tier}': expected one of {', '.join(_MODEL_TIERS)}"
+            f"Ignoring --model '{tier}': expected one of {', '.join(MODEL_TIERS)}"
         )
         return None, rest
     return tier, rest

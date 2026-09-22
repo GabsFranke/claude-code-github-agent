@@ -23,16 +23,15 @@ build: ## Build all Docker images. Use LANGFUSE=true to include Langfuse images.
 	@mkdir -p logs/langfuse
 	$(COMPOSE) build
 
+# Scale only what was asked for, so an unnamed worker keeps the replica
+# count from docker-compose.yml instead of being reset to 1.
+SCALE = $(if $(SANDBOX),--scale sandbox_worker=$(SANDBOX)) \
+	$(if $(MEMORY),--scale memory_worker=$(MEMORY)) \
+	$(if $(RETRO),--scale retrospector_worker=$(RETRO))
+
 up: ## Start services (detached). Optional: SANDBOX=10 MEMORY=2 RETRO=2 LANGFUSE=true
 	@mkdir -p logs/langfuse
-	@if [ -n "$(SANDBOX)$(MEMORY)$(RETRO)" ]; then \
-		$(COMPOSE) up -d \
-			--scale sandbox_worker=$(or $(SANDBOX),1) \
-			--scale memory_worker=$(or $(MEMORY),1) \
-			--scale retrospector_worker=$(or $(RETRO),1); \
-	else \
-		$(COMPOSE) up -d; \
-	fi
+	$(COMPOSE) up -d $(SCALE)
 
 down: ## Stop services. Use LANGFUSE=true to also stop Langfuse services.
 	$(COMPOSE) down

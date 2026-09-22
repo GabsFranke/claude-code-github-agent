@@ -14,6 +14,7 @@ from typing import Any
 
 from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
 
+from shared.constants import MODEL_TIERS, replica_count
 from shared.langfuse_hooks import setup_langfuse_hooks
 from shared.post_processing import flush_pending_post_jobs as _flush_pending_post_jobs
 from shared.transcript_writer import IncrementalTranscriptHook
@@ -112,6 +113,28 @@ class SDKOptionsBuilder:
             Self for method chaining
         """
         self._model = model
+        return self
+
+    def with_model_tier(self, tier: str) -> "SDKOptionsBuilder":
+        """Use a model tier alias (opus/sonnet/haiku).
+
+        The alias is resolved by the Claude Code CLI through
+        ANTHROPIC_DEFAULT_<TIER>_MODEL. An unrecognised tier is ignored with a
+        warning, leaving resolution to the CLI's own default.
+
+        Args:
+            tier: One of ``MODEL_TIERS``
+
+        Returns:
+            Self for method chaining
+        """
+        if tier not in MODEL_TIERS:
+            logger.warning(
+                f"Ignoring unknown model tier {tier!r}; "
+                f"expected one of {', '.join(MODEL_TIERS)}"
+            )
+            return self
+        self._model = tier
         return self
 
     def with_sonnet(self) -> "SDKOptionsBuilder":
@@ -425,10 +448,8 @@ class SDKOptionsBuilder:
         Returns:
             Self for method chaining
         """
-        memory_enabled = os.getenv("MEMORY_WORKER_ENABLED", "true").lower() == "true"
-        retrospector_enabled = (
-            os.getenv("RETROSPECTOR_ENABLED", "true").lower() == "true"
-        )
+        memory_enabled = replica_count("MEMORY_WORKER_REPLICAS") > 0
+        retrospector_enabled = replica_count("RETROSPECTOR_REPLICAS") > 0
 
         # Capture context from builder for hooks to use
         repo_context = self._repo_context

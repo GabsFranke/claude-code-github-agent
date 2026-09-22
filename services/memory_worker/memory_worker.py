@@ -19,6 +19,7 @@ import sys
 
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
+from shared.constants import replica_count, resolve_model_tier
 from shared.dlq import enqueue_for_retry, is_transient_error
 from shared.logging_utils import setup_logging
 from shared.queue import RedisQueue
@@ -88,7 +89,9 @@ Extract memorable facts from the session transcript and update the memory files 
 
     # Build SDK options using the factory builder
     # Use pre-fetched context if available, otherwise fetch
-    builder = SDKOptionsBuilder(cwd=memory_dir).with_haiku()
+    tier = resolve_model_tier("MEMORY_WORKER_MODEL", "haiku")
+    logger.info(f"Memory extraction model tier: {tier}")
+    builder = SDKOptionsBuilder(cwd=memory_dir).with_model_tier(tier)
 
     if claude_md is not None or memory_index is not None:
         # Use pre-fetched context (passed from sandbox worker)
@@ -138,6 +141,17 @@ Extract memorable facts from the session transcript and update the memory files 
 
 async def main() -> None:
     """Main memory worker loop with DLQ support."""
+    if replica_count("MEMORY_WORKER_REPLICAS") < 1:
+        # Compose gives this service 0 replicas when it is off, so normally
+        # there is no container to reach this. It catches a direct run.
+        logger.info(
+            "Memory worker is disabled (MEMORY_WORKER_REPLICAS is 0); idling. "
+            "Set MEMORY_WORKER_REPLICAS=1 to process memory jobs."
+        )
+        setup_graceful_shutdown(shutdown_event, logger)
+        await shutdown_event.wait()
+        return
+
     logger.info("Starting memory worker")
     setup_graceful_shutdown(shutdown_event, logger)
 

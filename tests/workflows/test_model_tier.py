@@ -40,6 +40,13 @@ class TestWorkflowModelTier:
         engine = WorkflowEngine(str(config_file))
         assert engine.workflows["wf"].model == "opus"
 
-    def test_repo_review_pr_uses_opus(self):
+    def test_repo_workflows_only_use_tier_aliases(self):
+        """Whatever the repo pins must be a tier, not a dated id.
+
+        Which workflow gets which tier is an operator decision that changes
+        with cost and context-window tradeoffs, so this asserts the vocabulary
+        rather than any particular assignment.
+        """
         engine = WorkflowEngine(str(REPO_ROOT / "workflows.yaml"))
-        assert engine.workflows["review-pr"].model == "opus"
+        pinned = {name: wf.model for name, wf in engine.workflows.items() if wf.model}
+        assert all(tier in ("opus", "sonnet", "haiku") for tier in pinned.values())

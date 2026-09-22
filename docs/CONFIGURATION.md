@@ -124,10 +124,29 @@ The `~/.claude/` directory is bind-mounted read-write, so plugins and skills ins
 
 ## Post-session Workers
 
+Both post-session workers are **off by default**: each runs an additional Claude
+session after every job. Turn them on explicitly when you want that cost.
+
+They are configured by a replica count rather than a boolean, so one number is
+both the switch and the scale. `docker compose` reads it as the service's
+`scale:`, and at `0` no container is created at all: nothing to idle, nothing to
+restart. `1` runs one, `2` runs two. `make up MEMORY=2` overrides the count for a
+run without editing `.env`.
+
+The same number gates the `Stop` hooks in `sandbox_worker`, so a worker with no
+container also has no jobs queued for it. Running a worker module directly with
+its count at `0` is the one case where a process exists anyway; it logs that it
+is off and idles rather than consuming queued jobs.
+
+Tier aliases resolve through the matching `ANTHROPIC_DEFAULT_*_MODEL` variable, so
+model ids stay in one place.
+
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MEMORY_WORKER_ENABLED` | `true` | Extract and persist knowledge from session transcripts |
-| `RETROSPECTOR_ENABLED` | `true` | Analyze sessions and propose instruction improvements |
+| `MEMORY_WORKER_REPLICAS` | `0` | `memory_worker` instances: extract and persist knowledge from session transcripts. `0` creates no container |
+| `MEMORY_WORKER_MODEL` | `haiku` | Model tier for memory extraction: `opus`, `sonnet`, or `haiku` |
+| `RETROSPECTOR_REPLICAS` | `0` | `retrospector_worker` instances: analyze sessions and propose instruction improvements. `0` creates no container |
+| `RETROSPECTOR_MODEL` | `sonnet` | Model tier for retrospection: `opus`, `sonnet`, or `haiku` |
 | `REPO_SYNC_LOCK_TIMEOUT` | `300` | Lock timeout for repo sync operations (seconds) |
 | `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | `1` | Disable non-essential Claude Code SDK network traffic (telemetry, updates). Used by sandbox_worker, memory_worker, and retrospector_worker |
 

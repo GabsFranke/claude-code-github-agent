@@ -36,6 +36,7 @@ mock_sdk.ClaudeAgentOptions = MagicMock
 mock_sdk.ClaudeSDKClient = MagicMock
 mock_sdk.HookMatcher = MagicMock
 mock_sdk.ResultMessage = MagicMock
+mock_sdk.SystemMessage = MagicMock
 mock_sdk.TextBlock = MagicMock
 sys.modules["claude_agent_sdk"] = mock_sdk
 

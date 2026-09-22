@@ -9,10 +9,73 @@ Environment variable overrides:
     JOB_TTL_SECONDS              — job data TTL in Redis (default: 3600)
     MAX_AUTO_CONTINUES           — max auto-continue iterations (default: 10)
     WEBHOOK_DEDUP_TTL_SECONDS    — webhook delivery dedup window (default: 86400)
+    MEMORY_WORKER_REPLICAS       — memory_worker instances to run (default: 0)
+    MEMORY_WORKER_MODEL          — tier for the memory worker (default: haiku)
+    RETROSPECTOR_REPLICAS        — retrospector_worker instances to run (default: 0)
+    RETROSPECTOR_MODEL           — tier for the retrospector worker (default: sonnet)
 """
 
+import logging
 import os
 from datetime import UTC, datetime
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Model tiers
+# ---------------------------------------------------------------------------
+
+# CLI aliases, never dated model ids: the Claude Code CLI maps each of these
+# through ANTHROPIC_DEFAULT_<TIER>_MODEL, so ids stay in one place (the env)
+# and cannot silently expire in code. See tests/shared/test_model_resolution.py.
+MODEL_TIERS: tuple[str, ...] = ("opus", "sonnet", "haiku")
+
+
+def resolve_model_tier(env_var: str, default: str) -> str:
+    """Read a model tier from the environment, falling back to ``default``.
+
+    An unset or blank value yields the default; an unrecognised one logs a
+    warning and yields the default, so a typo degrades rather than failing a
+    worker at startup.
+    """
+    raw = (os.getenv(env_var) or "").strip().lower()
+    if not raw:
+        return default
+    if raw not in MODEL_TIERS:
+        logger.warning(
+            "%s=%r is not one of %s; using %s",
+            env_var,
+            raw,
+            ", ".join(MODEL_TIERS),
+            default,
+        )
+        return default
+    return raw
+
+
+def replica_count(env_var: str, default: int = 0) -> int:
+    """How many instances of an optional worker are configured; 0 means off.
+
+    The same number is both the compose ``scale`` for the service and the
+    switch the rest of the system reads, so a worker that has no container
+    also has no work queued for it. Anything unparseable degrades to the
+    default rather than failing a service at startup.
+    """
+    raw = (os.getenv(env_var) or "").strip()
+    if not raw:
+        return default
+    try:
+        count = int(raw)
+    except ValueError:
+        logger.warning(
+            "%s=%r is not a whole number of replicas; using %d",
+            env_var,
+            raw,
+            default,
+        )
+        return default
+    return max(count, 0)
+
 
 # ---------------------------------------------------------------------------
 # TTLs — sourced from ConversationConfig.ttl_hours in the normal flow,

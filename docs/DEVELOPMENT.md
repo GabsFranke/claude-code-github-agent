@@ -292,6 +292,11 @@ docker compose up --build -d
 
 Services: webhook, worker, sandbox_worker, mcp_proxy, repo_sync, memory_worker, retrospector_worker, Redis
 
+`memory_worker` and `retrospector_worker` are created only when
+`MEMORY_WORKER_REPLICAS` / `RETROSPECTOR_REPLICAS` are 1 or more (both default
+to `0`, which creates no container). See
+[Configuration](CONFIGURATION.md#post-session-workers).
+
 Volumes: repo-cache, redis-data
 
 **Host `~/.claude/` integration**: The sandbox worker bind-mounts `~/.claude/` from your host. Plugins and skills installed with Claude Code CLI on the host are automatically discovered inside Docker. MCP server tool permissions are also auto-discovered when `ALLOW_HOST_MCP=true`, but only HTTP-based host servers reachable via `host.docker.internal` will function — stdio-based host MCP servers are not proxied. See [CONFIGURATION.md](CONFIGURATION.md) for details.

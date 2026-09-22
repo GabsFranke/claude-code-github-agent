@@ -123,8 +123,8 @@ services:
       - CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=${CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS:-0}
       - ALLOW_HOST_MCP=${ALLOW_HOST_MCP:-true}
       - ENABLE_BUILTIN_PLUGINS=${ENABLE_BUILTIN_PLUGINS:-false}
-      - MEMORY_WORKER_ENABLED=${MEMORY_WORKER_ENABLED:-true}
-      - RETROSPECTOR_ENABLED=${RETROSPECTOR_ENABLED:-true}
+      - MEMORY_WORKER_REPLICAS=${MEMORY_WORKER_REPLICAS:-0}
+      - RETROSPECTOR_REPLICAS=${RETROSPECTOR_REPLICAS:-0}
       # Custom API port forwarding (socat: localhost:PORT → host.docker.internal:PORT)
       - SOCAT_API_FORWARD=${SOCAT_API_FORWARD:-}
     depends_on:
@@ -162,6 +162,10 @@ services:
       retries: 3
 
   memory_worker:
+    # 0 replicas means no container is created at all. The same number gates
+    # the Stop hooks in sandbox_worker, so a worker that is not running also
+    # has nothing queued for it. `make up MEMORY=2` overrides it for a run.
+    scale: ${MEMORY_WORKER_REPLICAS:-0}
     build:
       context: .
       dockerfile: services/memory_worker/Dockerfile
@@ -182,6 +186,10 @@ services:
       - ANTHROPIC_AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN}
       - ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL}
       - ANTHROPIC_DEFAULT_HAIKU_MODEL=${ANTHROPIC_DEFAULT_HAIKU_MODEL}
+      - ANTHROPIC_DEFAULT_SONNET_MODEL=${ANTHROPIC_DEFAULT_SONNET_MODEL}
+      - ANTHROPIC_DEFAULT_OPUS_MODEL=${ANTHROPIC_DEFAULT_OPUS_MODEL}
+      - MEMORY_WORKER_REPLICAS=${MEMORY_WORKER_REPLICAS:-0}
+      - MEMORY_WORKER_MODEL=${MEMORY_WORKER_MODEL:-haiku}
       - ANTHROPIC_VERTEX_PROJECT_ID=${ANTHROPIC_VERTEX_PROJECT_ID}
       - ANTHROPIC_VERTEX_REGION=${ANTHROPIC_VERTEX_REGION}
       - CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-1}
@@ -204,6 +212,8 @@ services:
       retries: 3
 
   retrospector_worker:
+    # See memory_worker above: 0 means no container, not an idle one.
+    scale: ${RETROSPECTOR_REPLICAS:-0}
     build:
       context: .
       dockerfile: services/retrospector_worker/Dockerfile
@@ -226,6 +236,10 @@ services:
       - ANTHROPIC_AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN}
       - ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL}
       - ANTHROPIC_DEFAULT_SONNET_MODEL=${ANTHROPIC_DEFAULT_SONNET_MODEL}
+      - ANTHROPIC_DEFAULT_HAIKU_MODEL=${ANTHROPIC_DEFAULT_HAIKU_MODEL}
+      - ANTHROPIC_DEFAULT_OPUS_MODEL=${ANTHROPIC_DEFAULT_OPUS_MODEL}
+      - RETROSPECTOR_REPLICAS=${RETROSPECTOR_REPLICAS:-0}
+      - RETROSPECTOR_MODEL=${RETROSPECTOR_MODEL:-sonnet}
       - ANTHROPIC_VERTEX_PROJECT_ID=${ANTHROPIC_VERTEX_PROJECT_ID}
       - ANTHROPIC_VERTEX_REGION=${ANTHROPIC_VERTEX_REGION}
       - CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-1}
