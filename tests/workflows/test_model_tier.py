@@ -5,15 +5,11 @@ alias is resolved by the Claude Code CLI through ``ANTHROPIC_DEFAULT_*_MODEL``,
 so this layer only validates and forwards it.
 """
 
-from pathlib import Path
-
 import pytest
 import yaml
 from pydantic import ValidationError
 
 from workflows.engine import WorkflowConfig, WorkflowEngine
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
 
 BASE = {"triggers": {"commands": ["/x"]}, "prompt": {"template": "x"}}
 
@@ -40,13 +36,13 @@ class TestWorkflowModelTier:
         engine = WorkflowEngine(str(config_file))
         assert engine.workflows["wf"].model == "opus"
 
-    def test_repo_workflows_only_use_tier_aliases(self):
+    def test_repo_workflows_only_use_tier_aliases(self, repo_workflow_config):
         """Whatever the repo pins must be a tier, not a dated id.
 
         Which workflow gets which tier is an operator decision that changes
         with cost and context-window tradeoffs, so this asserts the vocabulary
         rather than any particular assignment.
         """
-        engine = WorkflowEngine(str(REPO_ROOT / "workflows.yaml"))
+        engine = WorkflowEngine(str(repo_workflow_config))
         pinned = {name: wf.model for name, wf in engine.workflows.items() if wf.model}
         assert all(tier in ("opus", "sonnet", "haiku") for tier in pinned.values())

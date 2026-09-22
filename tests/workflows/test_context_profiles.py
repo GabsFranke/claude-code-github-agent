@@ -16,8 +16,8 @@ class TestContextProfile:
 
 class TestWorkflowContextProfiles:
     @pytest.fixture
-    def engine(self) -> WorkflowEngine:
-        return WorkflowEngine()
+    def engine(self, repo_workflow_config) -> WorkflowEngine:
+        return WorkflowEngine(repo_workflow_config)
 
     def test_triage_issue_has_custom_thread_history(self, engine: WorkflowEngine):
         profile = engine.get_context_profile("triage-issue")
