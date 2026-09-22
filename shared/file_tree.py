@@ -9,12 +9,6 @@ import os
 from collections.abc import Iterator
 from pathlib import Path
 
-
-def collection_name_for_repo(repo: str) -> str:
-    """Convert a repo slug (owner/repo) to a SurrealDB-safe collection name."""
-    return repo.replace("/", "__")
-
-
 try:
     import pathspec  # type: ignore[import-untyped]
 

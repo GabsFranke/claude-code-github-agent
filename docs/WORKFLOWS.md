@@ -21,10 +21,6 @@ my-workflow:
     template: "Do something with {repo} #{issue_number}"
     system_context: "my-context.md"        # optional, filename from prompts/ or inline
   context:
-    repomap_budget: 4096                   # token budget for structural context
-    personalized: true                     # personalize repomap toward changed files
-    include_test_files: true               # include test files in personalization
-    priority_focus: ["build_system"]       # focus areas for repomap ranking
     thread_history:                        # inject issue/PR comment history
       enabled: true                        # default: true
       max_comments: 100                    # default: 100
@@ -39,10 +35,6 @@ my-workflow:
 | `triggers.commands` | At least one of events/commands | `[]` | Slash command triggers |
 | `prompt.template` | Yes | — | Prompt with placeholders (`{repo}`, `{issue_number}`, `{user_query}`) or plugin invocation |
 | `prompt.system_context` | No | `None` | Agent instructions. Filename from `prompts/` or inline string |
-| `context.repomap_budget` | No | `2048` | Token budget for the repomap |
-| `context.personalized` | No | `false` | Personalize repomap toward changed files |
-| `context.include_test_files` | No | `true` | Include test files in personalization |
-| `context.priority_focus` | No | `[]` | Focus areas for repomap ranking (e.g. `build_system`, `test_structure`) |
 | `context.thread_history.enabled` | No | `true` | Whether to inject issue/PR comment history into the agent's context |
 | `context.thread_history.max_comments` | No | `100` | Maximum number of comments to fetch from GitHub |
 | `context.thread_history.include_pr_reviews` | No | `true` | Whether to include PR review comments (inline code comments). Only applies to PRs |
@@ -61,7 +53,6 @@ conversation:
   persist: true           # save session state after each run
   ttl_hours: 720          # how long before the session expires (default: 720 = 30 days)
   auto_continue: true     # automatically resume on next trigger (default: false)
-  max_turns: 50           # turn limit before forcing a new session (optional)
   summary_fallback: true  # inject a summary if the full session can't be resumed (default: true)
 ```
 
@@ -231,7 +222,7 @@ Per-event filters take priority — when an event entry has its own `filters`, t
 Prefix with a plugin command to delegate to a specialized agent:
 
 ```yaml
-template: "/pr-review-toolkit:review-pr {repo} {issue_number}"
+template: "/oh-my-claudecode:team 3:executor Review PR #{issue_number} in {repo}"
 ```
 
 ### System Context
@@ -305,8 +296,6 @@ workflows:
     prompt:
       template: "Analyze {repo} #{issue_number}"
       system_context: "my-context.md"
-    context:
-      repomap_budget: 2048
     streaming:
       enabled: true
 ```
@@ -332,7 +321,7 @@ docker-compose restart worker
 
 | Workflow | Events | Commands | Description |
 |----------|--------|----------|-------------|
-| `review-pr` | `pull_request.opened`, `pull_request.labeled` (label: `review`, `pr-review`, `review-pr`) | `/review`, `/pr-review`, `/review-pr` | Full PR review via pr-review-toolkit |
+| `review-pr` | `pull_request.opened`, `pull_request.labeled` (label: `review`, `pr-review`, `review-pr`) | `/review`, `/pr-review`, `/review-pr` | Full PR review via an oh-my-claudecode team |
 | `triage-issue` | `issues.opened`, `issues.labeled` (label: `triage`) | `/triage`, `/triage-issue` | Triage with priority and complexity assessment |
 | `fix-ci` | `workflow_job.completed` (failure only) | `/fix-ci`, `/fix-build`, `/fix-tests` | Analyze CI logs and push fix via ci-failure-toolkit |
 | `fix-review` | `pull_request.labeled` (label: `fix-review`, `fix-it`, `pr-fix`) | `/fix-it` | Read review feedback and implement fixes via pr-fix plugin |
@@ -369,7 +358,7 @@ pr-updated:
       - event: pull_request.synchronize
       - event: pull_request.reopened
   prompt:
-    template: "/pr-review-toolkit:review-pr {repo} {issue_number}"
+    template: "/oh-my-claudecode:team 3:executor Review PR #{issue_number} in {repo}"
 ```
 
 ### Mixed Filtered and Unfiltered Events
@@ -387,7 +376,7 @@ review-pr:
     commands:
       - /review
   prompt:
-    template: "/pr-review-toolkit:review-pr {repo} {issue_number}"
+    template: "/oh-my-claudecode:team 3:executor Review PR #{issue_number} in {repo}"
 ```
 
 ### Command Aliases

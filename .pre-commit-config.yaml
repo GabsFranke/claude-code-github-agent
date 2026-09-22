@@ -1,6 +1,6 @@
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.5.0
+    rev: v6.0.0
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
@@ -12,29 +12,36 @@ repos:
       - id: debug-statements
       - id: mixed-line-ending
 
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.15
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+        files: ^(services|shared|subagents|hooks|plugins|tests)/
+
   - repo: https://github.com/psf/black
-    rev: 26.1.0
+    rev: 26.5.1
     hooks:
       - id: black
         language_version: python
         files: ^(services|shared|subagents|hooks|plugins|tests)/
 
   - repo: https://github.com/pycqa/isort
-    rev: 5.13.2
+    rev: 8.0.1
     hooks:
       - id: isort
         args: ["--profile", "black"]
         files: ^(services|shared|subagents|hooks|plugins|tests)/
 
   - repo: https://github.com/pycqa/flake8
-    rev: 7.0.0
+    rev: 7.3.0
     hooks:
       - id: flake8
         additional_dependencies: [flake8-bugbear]
         files: ^(services|shared|subagents|hooks|plugins|tests)/
 
   - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.8.0
+    rev: v2.1.0
     hooks:
       - id: mypy
         additional_dependencies: [types-redis, types-requests]
@@ -45,6 +52,24 @@ repos:
             --allow-untyped-defs,
             --no-warn-unused-ignores,
             --exclude=multiprocessing,
+          ]
+        files: ^(services|shared|subagents|hooks|plugins)/
+        exclude: ^tests/
+
+  - repo: local
+    hooks:
+      - id: pylint
+        name: pylint
+        entry: pylint
+        language: python
+        language_version: python3.12
+        additional_dependencies: [pylint>=4.0.5]
+        types: [python]
+        require_serial: true
+        args:
+          [
+            "--init-hook",
+            "import sys; from pathlib import Path; sys.path.insert(0, str(Path('.').resolve()))",
           ]
         files: ^(services|shared|subagents|hooks|plugins)/
         exclude: ^tests/

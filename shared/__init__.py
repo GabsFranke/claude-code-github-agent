@@ -5,11 +5,11 @@ This package uses lazy imports to avoid forcing heavy dependencies
 of utilities. Import what you need directly:
 
     from shared.logging_utils import setup_logging        # no heavy deps
-    from shared.streaming_session import StreamingSessionStore  # redis only
+    from shared.session_store import SessionStore         # redis only
 
 Using `from shared import X` still works — it just defers the import
 until first access, so missing optional deps only fail if you actually
-use the module that needs them.
+use the module that needs it.
 """
 
 import importlib as _importlib
@@ -31,7 +31,6 @@ _LAZY_NAMES = {
     "CommandExecutionError": ".exceptions",
     "ConfigurationError": ".exceptions",
     "GitHubAPIError": ".exceptions",
-    "IndexingTimeoutError": ".exceptions",
     "QueueError": ".exceptions",
     "RateLimitError": ".exceptions",
     "RepositorySyncError": ".exceptions",
@@ -72,7 +71,6 @@ _LAZY_NAMES = {
     "RedisQueue": ".queue",
     "PubSubQueue": ".queue",
     "get_queue": ".queue",
-    "wait_for_indexing": ".queue",
     "wait_for_repo_sync": ".queue",
     # Rate limiting
     "RateLimiter": ".rate_limiter",
@@ -84,6 +82,8 @@ _LAZY_NAMES = {
     "async_retry": ".retry",
     # Signals
     "setup_graceful_shutdown": ".signals",
+    # Webhook dedup
+    "WebhookDeduplicator": ".webhook_dedup",
     # Utils
     "_MISSING": ".utils",
     "resolve_path": ".utils",

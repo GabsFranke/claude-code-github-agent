@@ -1,6 +1,7 @@
 # Environment
 .env
 .env.local
+.env.internal
 *.pem
 
 # Python
@@ -32,8 +33,8 @@ ENV/
 .venv
 
 # node
-services/session_proxy/client/node_modules
-services/session_proxy/client/dist
+services/session_service/client/node_modules
+services/session_service/client/dist
 
 # IDE
 .vscode/
@@ -69,13 +70,23 @@ coverage.xml
 # Secrets
 *.key
 private-key.pem
+# Defence in depth: the agent's credential file now lives outside the
+# checkout, but a stale one from an older build must never be stageable.
+.git-credentials
 
 # ngrok
 ngrok.yml
 
+.omc
+.omo
 .claude
+.codegraph
 claude-plugins-official/
 plans/
 
 # Repository setup configuration (may contain sensitive commands)
 repo-setup.yaml
+
+# Local workflow configurations
+workflows.yaml
+workflow.yml

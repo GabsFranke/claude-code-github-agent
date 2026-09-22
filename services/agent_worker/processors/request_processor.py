@@ -6,15 +6,27 @@ import logging
 import os
 import re
 import uuid
-from typing import TYPE_CHECKING, Literal, Optional
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Any, Literal, Optional
 
 import httpx
 from langfuse import Langfuse
 
 from shared import GitHubAuthService, JobQueue
-from shared.session_store import SessionStore, resolve_thread_type
-from shared.streaming_session import StreamingSessionStore
+from shared.constants import (
+    MODEL_TIERS,
+    SESSION_DEDUP_LOCK_TTL,
+    STREAMING_SESSION_STALE_SECONDS,
+    session_dedup_key,
+)
+from shared.session_store import (
+    SessionStore,
+    _is_stale_running,
+    _parse_timestamp,
+    resolve_thread_type,
+)
 from shared.utils import build_session_url
+from shared.worktree_lock import WorktreeKey, WorktreeLock
 from workflows import WorkflowEngine
 
 from .repository_context_loader import RepositoryContextLoader
@@ -45,8 +57,70 @@ def _parse_session_flag(user_query: str) -> tuple[str, str]:
     return "", rest
 
 
+_MODEL_FLAG_RE = re.compile(r"(?:^|\s)--model(?:=|\s+)(\S+)")
+
+
+def _parse_model_flag(user_query: str) -> tuple[str | None, str]:
+    """Extract a ``--model <tier>`` override from a slash command.
+
+    Accepts ``--model opus`` or ``--model=opus`` anywhere in the comment and
+    strips it so it never reaches the prompt. Unknown tiers are dropped with a
+    warning; full model ids belong in ``ANTHROPIC_DEFAULT_*_MODEL``.
+    """
+    m = _MODEL_FLAG_RE.search(user_query)
+    if not m:
+        return None, user_query
+    tier = m.group(1).lower()
+    rest = (user_query[: m.start()] + " " + user_query[m.end() :]).strip()
+    rest = re.sub(r"[ \t]{2,}", " ", rest)
+    if tier not in MODEL_TIERS:
+        logger.warning(
+            f"Ignoring --model '{tier}': expected one of {', '.join(MODEL_TIERS)}"
+        )
+        return None, rest
+    return tier, rest
+
+
 # Type alias for process return value
-ProcessResult = str | Literal["ignored"]
+ProcessResult = str | Literal["ignored", "injected", "queued"]
+
+
+async def _inject_into_running_session(
+    token: str,
+    user_query: str,
+    redis: Any,
+    repo: str,
+    thread_type: Literal["pr", "issue", "discussion"],
+    issue_number: int,
+    workflow: str,
+) -> None:
+    """Push a follow-up message into a running session and interrupt the agent.
+
+    This is the core of the conversation-continuity flow: when a new message
+    arrives via a GitHub comment while the agent is already running, instead
+    of creating a duplicate job, we inject the message directly into the
+    running session's inbox and trigger an interrupt.
+
+    The worker's auto-continue loop will:
+      1. Detect the interrupt (via cancel signal / user_interrupt_event)
+      2. Cancel the current SDK turn
+      3. Pop the follow-up message from the inbox
+      4. Start a new SDK turn with the follow-up as prompt
+    """
+    # 1. Push to inbox → worker drains it in the auto-continue loop
+    store = SessionStore(redis)
+    await store.push_inbox_message(token, user_query)
+
+    # 2. Send cancel signal → interrupts current SDK turn immediately
+    key = WorktreeKey(repo, thread_type, str(issue_number), workflow)
+    lock = WorktreeLock(redis, key)
+    await lock.send_cancel_signal()
+
+    # 3. Publish to message stream → browser displays + history persists
+    from shared.session_stream import SessionStreamBridge
+
+    bridge = SessionStreamBridge(token, redis)
+    await bridge.publish_user_message(user_query)
 
 
 class RequestProcessor:
@@ -163,6 +237,43 @@ class RequestProcessor:
                 repo, issue_number, event_data, user_query, user, ref, workflow_name
             )
 
+    async def _orphaned_session_age(
+        self, streaming_store: SessionStore, token: str
+    ) -> float | None:
+        """Return how long a "running" session has been orphaned, or ``None``.
+
+        A session is orphaned when its job never started (no worktree_path/
+        session_id), no live job_id is recorded for it, and last_run is
+        older than STREAMING_SESSION_STALE_SECONDS. A recorded job_id that
+        the JobQueue still reports as pending/processing is authoritative:
+        the job is in flight no matter how long it has taken (queue backlog,
+        slow repo sync), so elapsed time alone never declares it dead.
+        """
+        info = await streaming_store.get_streaming_session(token)
+        if not info or info.worktree_path or info.session_id:
+            return None
+
+        job_id = await streaming_store.get_job_id(token)
+        if job_id:
+            status = await self.job_queue.get_job_status(job_id)
+            if status in ("pending", "processing"):
+                return None
+
+        # Share one decision with SessionStore.list_stale_running_sessions so
+        # the sweep and this pre-flight check cannot disagree about whether a
+        # given session is dead. See _is_stale_running for why an empty
+        # last_run and a corrupt one are treated differently.
+        cutoff = (
+            datetime.now(UTC) - timedelta(seconds=STREAMING_SESSION_STALE_SECONDS)
+        ).timestamp()
+        if not _is_stale_running(info, cutoff):
+            return None
+
+        last_run_at = _parse_timestamp(info.last_run)
+        if last_run_at is None:
+            return float(STREAMING_SESSION_STALE_SECONDS + 1)
+        return (datetime.now(UTC) - last_run_at).total_seconds()
+
     async def _execute(
         self,
         repo: str,
@@ -200,6 +311,14 @@ class RequestProcessor:
             return "ignored"
 
         logger.info(f"Processing workflow '{workflow_name}' for {repo}")
+
+        # Per-request model tier: `--model opus` in the comment beats the
+        # workflow's `model:` key; neither set leaves resolution to the CLI.
+        workflow_config = self.workflow_engine.workflows[workflow_name]
+        model_flag, user_query = _parse_model_flag(user_query)
+        model_tier = model_flag or workflow_config.model
+        if model_flag:
+            logger.info(f"Model tier '{model_flag}' requested via --model flag")
 
         # Workflow validated - trigger repo sync
         logger.info(f"Triggering sync for {repo} ref {ref or 'main'}")
@@ -276,19 +395,6 @@ class RequestProcessor:
                         session_mode = "resume"
                         session_id = existing_session.session_id
 
-                    # Check turn limit
-                    if (
-                        session_mode != "new"
-                        and existing_session.turn_count >= conversation_config.max_turns
-                    ):
-                        logger.info(
-                            f"Session reached turn limit "
-                            f"({existing_session.turn_count}/{conversation_config.max_turns}), "
-                            f"starting fresh"
-                        )
-                        session_mode = "new"
-                        session_id = None
-
                     # Provide summary as fallback
                     if (
                         session_mode in ("resume", "continue")
@@ -315,6 +421,11 @@ class RequestProcessor:
             if claude_md:
                 logger.info("Fetched CLAUDE.md for system context")
         except Exception as e:
+            if event_data.get("trigger_type") == "schedule":
+                logger.warning(
+                    f"Skipping scheduled job for {repo} because it is not accessible (likely bot is uninstalled): {e}"
+                )
+                return "ignored"
             logger.warning(
                 f"Failed to fetch CLAUDE.md from {repo}, continuing without repository context: {e}"
             )
@@ -335,7 +446,10 @@ class RequestProcessor:
 
         # Generate parent span ID for trace linking (if enabled)
         parent_span_id = None
-        if os.getenv("LANGFUSE_TRACE_LINKING", "true").lower() == "true":
+        if (
+            os.getenv("LANGFUSE_ENABLED", "false").lower() in ("true", "1", "yes")
+            and os.getenv("LANGFUSE_TRACE_LINKING", "true").lower() == "true"
+        ):
             parent_span_id = str(uuid.uuid4())
             logger.debug(
                 f"Generated parent span ID for trace linking: {parent_span_id}"
@@ -348,15 +462,162 @@ class RequestProcessor:
         session_token = None
         session_proxy_url = None
 
-        workflow_config = self.workflow_engine.workflows.get(workflow_name)
-        if workflow_config and workflow_config.streaming.enabled:
+        if workflow_config.streaming.enabled:
             session_proxy_url = os.getenv("SESSION_PROXY_URL", "").strip()
             if session_proxy_url:
                 try:
                     await self.job_queue.ensure_connected()
-                    streaming_store = StreamingSessionStore(self.job_queue.redis)
+                    redis = self.job_queue.redis
 
-                    # Find existing streaming session (any status) for stable URLs
+                    # ── Session-aware job dedup (atomic SETNX) ──────────
+                    dedup_key = session_dedup_key(
+                        repo, thread_type, str(issue_number or 0), workflow_name
+                    )
+                    acquired = await redis.set(
+                        dedup_key, "1", nx=True, ex=SESSION_DEDUP_LOCK_TTL
+                    )
+                    if not acquired:
+                        dedup_store = SessionStore(redis)
+                        existing_token = await dedup_store.find_active_session(
+                            repo=repo,
+                            issue_number=issue_number or 0,
+                            workflow=workflow_name,
+                            thread_type=thread_type,
+                        )
+                        if existing_token:
+                            await _inject_into_running_session(
+                                token=existing_token,
+                                user_query=user_query,
+                                redis=redis,
+                                repo=repo,
+                                thread_type=thread_type,
+                                issue_number=issue_number or 0,
+                                workflow=workflow_name,
+                            )
+                            logger.info(
+                                f"[Streaming] Injected follow-up into running session "
+                                f"{existing_token[:8]}... for {repo}#{issue_number}"
+                            )
+                            return "injected"
+
+                        existing_token = await dedup_store.find_session(
+                            repo=repo,
+                            issue_number=issue_number or 0,
+                            workflow=workflow_name,
+                            thread_type=thread_type,
+                        )
+                        if existing_token:
+                            await dedup_store.push_inbox_message(
+                                existing_token, user_query
+                            )
+                            logger.info(
+                                f"[Streaming] Queued follow-up for pending session "
+                                f"{existing_token[:8]}... for {repo}#{issue_number}"
+                            )
+                            return "queued"
+
+                        # Stale lock — no session found, clear and fall through
+                        await redis.delete(dedup_key)
+
+                    streaming_store = SessionStore(redis)
+
+                    # Find existing streaming session for stable URLs.
+                    # Prefer find_active_session (running only) to avoid
+                    # racing with session_proxy's resume handler which
+                    # independently checks status and creates resume jobs.
+                    existing_token = await streaming_store.find_active_session(
+                        repo=repo,
+                        issue_number=issue_number or 0,
+                        workflow=workflow_name,
+                        thread_type=thread_type,
+                    )
+                    if existing_token:
+                        # Active session exists — this is a follow-up message
+                        # sent while the agent is already working.
+                        # Check if a worker is actually processing (lock held).
+                        wt_key = WorktreeKey(
+                            repo=repo,
+                            thread_type=thread_type,
+                            thread_id=str(issue_number or 0),
+                            workflow=workflow_name,
+                        )
+                        lock = WorktreeLock(self.job_queue.redis, wt_key)
+                        lock_info = await lock.get_lock_info()
+
+                        if lock_info:
+                            # Worker is running → inject as follow-up, interrupt
+                            await _inject_into_running_session(
+                                token=existing_token,
+                                user_query=user_query,
+                                redis=self.job_queue.redis,
+                                repo=repo,
+                                thread_type=thread_type,
+                                issue_number=issue_number or 0,
+                                workflow=workflow_name,
+                            )
+                            logger.info(
+                                f"[Streaming] Injected follow-up into running session "
+                                f"{existing_token[:8]}... for {repo}#{issue_number}"
+                            )
+                            return "injected"
+
+                        # Session is running but no active worker. This
+                        # normally means a job is pending (worker hasn't
+                        # started yet) or the worker crashed mid-run, in
+                        # which case reclaim_stale_jobs() will re-queue it
+                        # and it'll pick up the inbox message once it starts.
+                        #
+                        # But if the job never even started — no
+                        # worktree_path/session_id was ever set — and it's
+                        # been stuck like this for a while, the original job
+                        # most likely expired out of the pending queue before
+                        # any worker popped it (e.g. a worker shutdown/
+                        # restart gap) and was dead-lettered. Dead-lettered
+                        # jobs never reach the "processing" set, so
+                        # reclaim_stale_jobs() will never find or re-queue
+                        # them — the session would stay a zombie forever,
+                        # silently swallowing every future event. Detect that
+                        # and fall through to create a fresh job instead.
+                        orphaned_age = await self._orphaned_session_age(
+                            streaming_store, existing_token
+                        )
+
+                        if orphaned_age is not None:
+                            logger.warning(
+                                f"[Streaming] Session {existing_token[:8]}... for "
+                                f"{repo}#{issue_number} has been 'running' with no "
+                                "worktree/session_id and no active worker for "
+                                f"{orphaned_age:.0f}s — its job was likely lost "
+                                "before ever starting; recreating it"
+                            )
+                            await streaming_store.set_completed(
+                                existing_token, is_error=True
+                            )
+                            # Fall through to the "completed/error session"
+                            # reuse path below, which will reuse this token
+                            # and enqueue a real job.
+                        else:
+                            # Push the message to the inbox — the worker will
+                            # pick it up after it starts or the reclaim will
+                            # re-queue the job and find it later.
+                            await streaming_store.push_inbox_message(
+                                existing_token, user_query
+                            )
+                            # Also publish for browser display
+                            from shared.session_stream import SessionStreamBridge
+
+                            bridge = SessionStreamBridge(
+                                token=existing_token,
+                                redis=self.job_queue.redis,
+                            )
+                            await bridge.publish_user_message(user_query)
+                            logger.info(
+                                f"[Streaming] Queued follow-up for pending session "
+                                f"{existing_token[:8]}... for {repo}#{issue_number}"
+                            )
+                            return "queued"
+
+                    # Try completed/error sessions as fallback
                     existing_token = await streaming_store.find_session(
                         repo=repo,
                         issue_number=issue_number or 0,
@@ -365,7 +626,6 @@ class RequestProcessor:
                     )
                     if existing_token:
                         session_token = existing_token
-                        # Set session back to running for the new invocation
                         ttl_hours = conversation_config.ttl_hours
                         await streaming_store.set_running(
                             session_token, ttl_seconds=ttl_hours * 3600
@@ -377,39 +637,39 @@ class RequestProcessor:
                     else:
                         # Generate a new session token
                         session_token = str(uuid.uuid4())
-                        ttl_hours = conversation_config.ttl_hours
-                        installation_id = event_data.get("installation_id", "")
-                        conversation_config_json = json.dumps(
-                            conversation_config.model_dump()
-                        )
-                        # Build the full human-readable URL (base + path)
-                        owner, _, repo_name = repo.partition("/")
-                        full_session_url = build_session_url(
-                            session_proxy_url,
-                            owner,
-                            repo_name,
-                            thread_type,
-                            issue_number or 0,
-                            workflow_name,
-                        )
-                        await streaming_store.create_session(
-                            token=session_token,
-                            repo=repo,
-                            issue_number=issue_number or 0,
-                            workflow=workflow_name,
-                            session_proxy_url=full_session_url,
-                            ttl_seconds=ttl_hours * 3600,
-                            installation_id=installation_id,
-                            initial_query=user_query,
-                            thread_type=thread_type,
-                            ref=final_ref,
-                            user=user,
-                            conversation_config=conversation_config_json,
-                        )
-                        logger.info(
-                            f"[Streaming] Created session {session_token[:8]}... "
-                            f"for {repo}#{issue_number}"
-                        )
+                    ttl_hours = conversation_config.ttl_hours
+                    installation_id = event_data.get("installation_id", "")
+                    conversation_config_json = json.dumps(
+                        conversation_config.model_dump()
+                    )
+                    # Build the full human-readable URL (base + path)
+                    owner, _, repo_name = repo.partition("/")
+                    full_session_url = build_session_url(
+                        session_proxy_url,
+                        owner,
+                        repo_name,
+                        thread_type,
+                        issue_number or 0,
+                        workflow_name,
+                    )
+                    await streaming_store.create_session(
+                        token=session_token,
+                        repo=repo,
+                        issue_number=issue_number or 0,
+                        workflow=workflow_name,
+                        session_proxy_url=full_session_url,
+                        ttl_seconds=ttl_hours * 3600,
+                        installation_id=installation_id,
+                        initial_query=user_query,
+                        thread_type=thread_type,
+                        ref=final_ref,
+                        user=user,
+                        conversation_config=conversation_config_json,
+                    )
+                    logger.info(
+                        f"[Streaming] Created session {session_token[:8]}... "
+                        f"for {repo}#{issue_number}"
+                    )
 
                     # Publish initial user query to the session history
                     if user_query and session_token:
@@ -459,6 +719,7 @@ class RequestProcessor:
                 "event_data": event_data,
                 "parent_span_id": parent_span_id,  # For Langfuse trace linking
                 "context_profile": context_profile,  # Structural context config
+                "model": model_tier,
                 # Session persistence fields
                 "session_mode": session_mode,
                 "session_id": session_id,
@@ -467,7 +728,6 @@ class RequestProcessor:
                 "conversation_config": {
                     "persist": conversation_config.persist,
                     "ttl_hours": conversation_config.ttl_hours,
-                    "max_turns": conversation_config.max_turns,
                     "auto_continue": conversation_config.auto_continue,
                     "summary_fallback": conversation_config.summary_fallback,
                 },
@@ -481,6 +741,18 @@ class RequestProcessor:
         logger.info(
             f"Created job {job_id} for {repo}#{issue_number} - worker is now free"
         )
+
+        if session_token:
+            try:
+                await SessionStore(self.job_queue.redis).set_job_id(
+                    session_token, job_id
+                )
+            except Exception as e:
+                logger.warning(
+                    f"[Streaming] Failed to record job_id on session "
+                    f"{session_token[:8]}...: {e}"
+                )
+
         return job_id
 
     async def cleanup(self):

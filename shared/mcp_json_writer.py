@@ -57,6 +57,22 @@ def generate_mcp_json(
         },
     }
 
+    # ── CodeGraph (installed in Docker image; falls back gracefully if missing) ──
+
+    # CodeGraph runs as a stdio MCP server directly (no proxy needed).
+    # If the `codegraph` binary is not on PATH (e.g. running outside Docker),
+    # the MCP server simply won't start — Claude Code logs a warning and
+    # continues. The agent will not have graph-oriented tools (callers, impact,
+    # trace, etc.) but can still use built-in file search.
+    servers["codegraph"] = {
+        "type": "stdio",
+        "command": "codegraph",
+        "args": ["serve", "--mcp"],
+        "env": {
+            "REPO_PATH": worktree_path,
+        },
+    }
+
     # ── Auto-Discovered Local Servers ─────────────────────────────
 
     mcp_servers_dir = os.path.join(app_root, "mcp_servers")

@@ -23,10 +23,10 @@ class TestWebhookFilterIntegration:
 
     @pytest.fixture
     def engine(self):
-        """Create engine from real workflows.yaml."""
-        workflow_path = Path(__file__).parent.parent.parent / "workflows.yaml"
+        """Create engine from real workflows.example.yaml."""
+        workflow_path = Path(__file__).parent.parent.parent / "workflows.example.yaml"
         if not workflow_path.exists():
-            pytest.skip("workflows.yaml not found")
+            pytest.skip("workflows.example.yaml not found")
         return WorkflowEngine(workflow_path)
 
     # --- workflow_job.completed with success conclusion ---
@@ -59,13 +59,13 @@ class TestWebhookFilterIntegration:
     def test_non_matching_label_is_filtered_out(self, engine):
         """A pull_request.labeled payload with an unrelated label is rejected."""
         payload = {"label": {"name": "documentation"}}
-        result = engine.check_filters("fix-review", payload, "pull_request.labeled")
+        result = engine.check_filters("review-pr", payload, "pull_request.labeled")
         assert result is False
 
     def test_matching_label_is_accepted(self, engine):
         """A pull_request.labeled payload with a matching label passes."""
-        payload = {"label": {"name": "fix-review"}}
-        result = engine.check_filters("fix-review", payload, "pull_request.labeled")
+        payload = {"label": {"name": "review"}}
+        result = engine.check_filters("review-pr", payload, "pull_request.labeled")
         assert result is True
 
     # --- Commands bypass filter checks ---
@@ -77,12 +77,12 @@ class TestWebhookFilterIntegration:
         the check_filters path. We verify this by confirming get_workflow_for_command
         works regardless of payload content.
         """
-        workflow = engine.get_workflow_for_command("/fix-it")
-        assert workflow == "fix-review"
+        workflow = engine.get_workflow_for_command("/review")
+        assert workflow == ["review-pr"]
 
         # Even /fix-ci command works without any payload at all
         workflow = engine.get_workflow_for_command("/fix-ci")
-        assert workflow == "fix-ci"
+        assert workflow == ["fix-ci"]
 
     def test_command_routing_independent_of_event_filters(self, engine):
         """Command-based routing does not require any event filter to pass.
@@ -90,7 +90,6 @@ class TestWebhookFilterIntegration:
         This simulates what happens in main.py: when command is set,
         the code does NOT call check_filters at all.
         """
-        # The command mapping exists
-        assert engine.get_workflow_for_command("/fix-it") == "fix-review"
+        assert engine.get_workflow_for_command("/review") == ["review-pr"]
         # No filter check is needed for commands - the check_filters guard
         # in main.py line 198 (`if not command:`) ensures bypass.

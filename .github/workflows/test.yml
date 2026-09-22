@@ -85,9 +85,116 @@ jobs:
       - name: Run isort
         run: isort --check-only services/ shared/ subagents/ hooks/ plugins/ tests/
 
+      - name: Run flake8
+        run: flake8 services/ shared/ subagents/ hooks/ plugins/ tests/
+
       - name: Run ruff
         run: ruff check services/ shared/ subagents/ hooks/ plugins/ tests/
 
       - name: Run mypy
         run: mypy services shared subagents hooks plugins --ignore-missing-imports
-        continue-on-error: true
+
+  deployment:
+    name: Deployment smoke test
+    runs-on: ubuntu-latest
+
+    env:
+      WEBHOOK_SECRET: ci-deployment-test-secret
+      WEBHOOK_URL: http://localhost:10000
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # A fresh checkout has no workflows.yaml or repo-setup.yaml - both are
+      # gitignored operator config. The images fall back to the tracked
+      # .example files. If a Dockerfile ever COPYs the gitignored name
+      # directly again, this step fails and nothing below runs.
+      - name: Build images from a clean checkout
+        run: |
+          docker build -f services/webhook/Dockerfile -t webhook:ci .
+          docker build -f services/scheduler/Dockerfile -t scheduler:ci .
+          docker build -f services/session_service/Dockerfile -t session-service:ci .
+
+      # The service must refuse to start without a webhook secret, otherwise
+      # every request to the one publicly reachable port would be trusted.
+      - name: Verify the service fails closed without a webhook secret
+        run: |
+          if docker run --rm \
+            -e PYTHONPATH=/app -e PORT=8080 \
+            -e GITHUB_APP_ID=123456 -e GITHUB_INSTALLATION_ID=789012 \
+            -e GITHUB_PRIVATE_KEY="$(printf '%s\n' '-----BEGIN RSA PRIVATE KEY-----' 'ci-placeholder' '-----END RSA PRIVATE KEY-----')" \
+            webhook:ci; then
+            echo "::error::webhook started without GITHUB_WEBHOOK_SECRET - fail-closed guard is broken"
+            exit 1
+          fi
+          echo "Confirmed: the service refuses to start unsigned."
+
+      - name: Start Redis and the webhook service
+        run: |
+          docker network create bot-ci
+          docker run -d --name redis --network bot-ci redis:7-alpine
+          docker run -d --name webhook --network bot-ci -p 10000:8080 \
+            -e PYTHONPATH=/app \
+            -e PORT=8080 \
+            -e QUEUE_TYPE=redis \
+            -e REDIS_URL=redis://redis:6379 \
+            -e GITHUB_APP_ID=123456 \
+            -e GITHUB_INSTALLATION_ID=789012 \
+            -e GITHUB_WEBHOOK_SECRET="$WEBHOOK_SECRET" \
+            -e GITHUB_PRIVATE_KEY="$(printf '%s\n' '-----BEGIN RSA PRIVATE KEY-----' 'ci-placeholder' '-----END RSA PRIVATE KEY-----')" \
+            webhook:ci
+
+      # session-service imports its siblings relatively, so it only works when
+      # loaded as a package. Booting it here catches an import layout that
+      # passes the unit tests but dies on startup in the container.
+      - name: Start the session service
+        run: |
+          docker run -d --name session-service --network bot-ci -p 10001:8000             -e PYTHONPATH=/app             -e REDIS_URL=redis://redis:6379             session-service:ci
+
+      - name: Wait for the services to serve traffic
+        run: |
+          wait_for() {
+            for i in $(seq 1 45); do
+              if curl -fsS "$2/health" >/dev/null 2>&1; then
+                echo "$1 healthy after ${i}s."
+                return 0
+              fi
+              sleep 1
+            done
+            echo "::error::$1 never became healthy"
+            docker logs "$1"
+            return 1
+          }
+          wait_for webhook "$WEBHOOK_URL"
+          wait_for session-service http://localhost:10001
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run deployment tests
+        env:
+          RUN_DEPLOYMENT_TESTS: "1"
+        run: |
+          pytest tests/integration/test_webhook_handlers.py -v --no-cov
+
+      - name: Dump service logs on failure
+        if: failure()
+        run: |
+          echo "--- webhook ---"; docker logs webhook || true
+          echo "--- session-service ---"; docker logs session-service || true
+          echo "--- redis ---"; docker logs redis || true
+
+      - name: Tear down
+        if: always()
+        run: |
+          docker rm -f webhook session-service redis || true
+          docker network rm bot-ci || true

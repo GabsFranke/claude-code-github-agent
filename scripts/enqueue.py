@@ -6,7 +6,6 @@ Run with --dry-run to see the message without pushing it.
 Usage:
     python scripts/enqueue.py sync --repo owner/repo --ref main
     python scripts/enqueue.py cleanup --action expire_thread --repo owner/repo --thread-type pr --thread-id 42
-    python scripts/enqueue.py indexing --repo owner/repo --ref main --trigger manual
     python scripts/enqueue.py memory --repo owner/repo --transcript-path /tmp/test.jsonl --hook-event Stop
     python scripts/enqueue.py retrospector --repo owner/repo --transcript-path /tmp/test.jsonl --hook-event Stop
     python scripts/enqueue.py agent --repo owner/repo --issue-number 42 --ref main --user tester --workflow-name review
@@ -21,7 +20,6 @@ Subcommands and arguments:
 |               |                           |   expire_thread: --thread-type --thread-id   |
 |               |                           |   revive_thread: --thread-type --thread-id   |
 |               |                           |   cleanup_branch: --branch                   |
-| indexing      | agent:indexing:requests  | --repo REQ  --ref REQ  [--trigger manual]   |
 | memory        | agent:memory:requests    | --repo REQ  --transcript-path REQ            |
 |               |                           | --hook-event {Stop,SubagentStop}             |
 |               |                           | [--claude-md] [--memory-index]               |
@@ -38,8 +36,9 @@ Subcommands and arguments:
 |               |                           | [--user] [--workflow-name] [--prompt]       |
 |               |                           | [--github-token] [--session-mode]            |
 |               |                           | [--thread-type] [--thread-id] [--streaming] |
-|               |                           | [--persist] [--ttl-hours] [--max-turns]     |
+|               |                           | [--persist] [--ttl-hours]                   |
 |               |                           | [--auto-continue] [--summary-fallback]      |
+|               |                           | [--model {opus,sonnet,haiku}]               |
 +---------------+---------------------------+----------------------------------------------+
 """
 
@@ -86,10 +85,6 @@ QUEUE_REGISTRY = {
         "queue": "agent:worktree:cleanup",
         "description": "Sandbox executor — worktree cleanup (expire/revive threads, cleanup branches)",
     },
-    "indexing": {
-        "queue": "agent:indexing:requests",
-        "description": "Indexing worker — semantic code indexing",
-    },
     "memory": {
         "queue": "agent:memory:requests",
         "description": "Memory worker — extract memories from transcripts",
@@ -125,10 +120,6 @@ def build_cleanup_message(args: argparse.Namespace) -> dict:
     elif action == "cleanup_branch":
         msg["branch"] = args.branch
     return msg
-
-
-def build_indexing_message(args: argparse.Namespace) -> dict:
-    return {"repo": args.repo, "ref": args.ref, "trigger": args.trigger}
 
 
 def build_memory_message(args: argparse.Namespace) -> dict:
@@ -212,13 +203,13 @@ def build_sandbox_message(args: argparse.Namespace) -> dict:
         "conversation_config": {
             "persist": args.persist,
             "ttl_hours": args.ttl_hours,
-            "max_turns": args.max_turns,
             "auto_continue": args.auto_continue,
             "summary_fallback": args.summary_fallback,
         },
         "conversation_summary": None,
         "streaming_enabled": args.streaming,
         "session_token": None,
+        "model": args.model,
     }
     return {"job_id": job_id, "job_data": job_data}
 
@@ -226,7 +217,6 @@ def build_sandbox_message(args: argparse.Namespace) -> dict:
 BUILDERS = {
     "sync": build_sync_message,
     "cleanup": build_cleanup_message,
-    "indexing": build_indexing_message,
     "memory": build_memory_message,
     "retrospector": build_retrospector_message,
     "agent": build_agent_message,
@@ -324,14 +314,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--thread-id", help="Thread ID (issue/PR number)")
     p.add_argument("--branch", help="Branch name (for cleanup_branch action)")
 
-    # -- indexing --
-    p = sub.add_parser("indexing", help="Enqueue an indexing job")
-    add_common_args(p)
-    p.add_argument("--ref", required=True, help="Git ref")
-    p.add_argument(
-        "--trigger", default="manual", help="Trigger reason (default: manual)"
-    )
-
     # -- memory --
     p = sub.add_parser("memory", help="Enqueue a memory extraction job")
     add_common_args(p)
@@ -404,7 +386,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--persist", action="store_true", default=True, help="Persist conversation"
     )
     p.add_argument("--ttl-hours", type=int, default=720, help="Conversation TTL hours")
-    p.add_argument("--max-turns", type=int, default=50, help="Max turns")
     p.add_argument(
         "--auto-continue", action="store_true", default=True, help="Auto-continue"
     )
@@ -413,6 +394,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--streaming", action="store_true", default=False, help="Enable streaming"
+    )
+    p.add_argument(
+        "--model",
+        default=None,
+        choices=["opus", "sonnet", "haiku"],
+        help="Model tier for the main agent loop (default: workflow/CLI setting)",
     )
 
     return parser

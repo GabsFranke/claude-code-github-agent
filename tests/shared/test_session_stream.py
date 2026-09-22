@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from shared.constants import CTL_CHANNEL, MSG_CHANNEL
+
 
 # Set up distinct fake SDK types so isinstance checks work properly
 class _FakeAssistantMessage:
@@ -82,8 +84,7 @@ class TestSessionStreamBridgeInit:
 
         assert bridge._token == "test-token-1234"
         assert bridge._redis is redis
-        assert bridge._channel == "session:msg:test-token-1234"
-        assert bridge._history_key == "session:history:test-token-1234"
+        assert bridge._channel == MSG_CHANNEL.format("test-token-1234")
 
 
 class TestSessionStreamBridgePublish:
@@ -104,7 +105,7 @@ class TestSessionStreamBridgePublish:
 
         channel = redis.publish.call_args[0][0]
         payload = redis.publish.call_args[0][1]
-        assert channel == "session:msg:test-token-1234"
+        assert channel == MSG_CHANNEL.format("test-token-1234")
         data = json.loads(payload)
         assert data["type"] == "my_type"
         assert data["data"] == {"key": "val"}
@@ -280,7 +281,7 @@ class TestControlChannelInit:
 
         assert ctl._token == "test-token-1234"
         assert ctl._redis is redis
-        assert ctl._channel == "session:ctl:test-token-1234"
+        assert ctl._channel == CTL_CHANNEL.format("test-token-1234")
         assert ctl._task is None
         assert ctl._stopped is False
         assert ctl._interrupt_event is None

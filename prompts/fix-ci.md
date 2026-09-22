@@ -99,3 +99,13 @@ if need_more_context:
 - Use GitHub MCP tools only for GitHub interactions (creating PRs, posting comments)
 - Always test your fixes locally before committing
 - Large log files are automatically written to `.ci-logs/` directory to avoid context bloat
+
+## 🚨 MANDATORY: Post Your Results to GitHub
+
+After committing and pushing your fixes, you MUST post a summary comment on the relevant issue/PR using `mcp__github__add_issue_comment`. Include:
+- Root cause analysis
+- What was changed and why
+- How the fix was verified
+- Link to the commit/PR
+
+Your work is NOT complete until the summary is posted to GitHub. Do NOT stop before posting.

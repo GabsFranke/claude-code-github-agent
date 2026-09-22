@@ -44,8 +44,13 @@ def setup_claude_settings():
         if os.getenv(var):
             custom_env[var] = os.getenv(var)
 
-    # Langfuse env vars
-    if os.getenv("LANGFUSE_PUBLIC_KEY") and os.getenv("LANGFUSE_SECRET_KEY"):
+    # Langfuse env vars — only enabled when LANGFUSE_ENABLED is truthy
+    # (set LANGFUSE_ENABLED=true in .env and include docker-compose.langfuse.yml)
+    if (
+        os.getenv("LANGFUSE_ENABLED", "false").lower() in ("true", "1", "yes")
+        and os.getenv("LANGFUSE_PUBLIC_KEY")
+        and os.getenv("LANGFUSE_SECRET_KEY")
+    ):
         custom_env.update(
             {
                 "TRACE_TO_LANGFUSE": "true",

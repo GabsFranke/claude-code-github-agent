@@ -1,37 +1,31 @@
 import asyncio
 import logging
 import os
-import re
 import shutil
+import subprocess
 import tempfile
 import time
 import uuid
 from pathlib import Path
 from typing import Any
 
-import httpx
-
 from repo_setup import RepoSetupEngine
 from shared import (
-    IndexingTimeoutError,
     JobQueue,
     RepositorySyncError,
     SDKError,
     SDKTimeoutError,
     WorktreeCreationError,
     execute_git_command,
-    wait_for_indexing,
     wait_for_repo_sync,
 )
 from shared.constants import (
     CLOSED_SESSION_TTL_HOURS,
     FALLBACK_CONVERSATION_TTL_HOURS,
     MAX_AUTO_CONTINUES as MAX_AUTO_CONTINUES_CONST,
+    session_dedup_key,
 )
-from shared.context_builder import (
-    find_priority_focus_files,
-    generate_structural_context,
-)
+from shared.context_builder import generate_structural_context
 from shared.sdk_executor import execute_sdk
 from shared.sdk_factory import SDKOptionsBuilder
 from shared.session_store import SessionStore
@@ -39,6 +33,7 @@ from shared.utils import build_session_url
 from shared.worktree_lock import WorktreeKey, WorktreeLock
 from shared.worktree_manager import get_worktree_path, reuse_or_create_worktree
 
+from .git_setup import configure_git, credentials_path, init_submodules
 from .utils import configure_builder, find_transcript_path, write_transcript_meta
 
 logger = logging.getLogger(__name__)
@@ -64,6 +59,7 @@ class JobProcessor:
         self.streaming_bridge: Any = None
         self.streaming_control: Any = None
         self.user_interrupt_event: asyncio.Event = asyncio.Event()
+        self.session_service = SessionStore(self.job_queue.redis)
 
         self.repo = job_data.get("repo", "unknown")
         self.issue_number = job_data.get("issue_number", 0)
@@ -83,8 +79,17 @@ class JobProcessor:
                 return
 
             await self._setup_worktree()
-            await self._configure_git()
-            await self._run_repo_setup()
+            await configure_git(
+                self.workspace, self.job_data["github_token"], self.job_id
+            )
+            await init_submodules(self.workspace, self.repo)
+            if self.session_mode not in ("resume", "continue"):
+                await self._run_repo_setup()
+            else:
+                logger.info(
+                    f"Skipping repo setup on {self.session_mode} — "
+                    f"worktree already provisioned"
+                )
             await self._prepare_context()
             result = await self._execute_sdk_loop()
 
@@ -92,6 +97,12 @@ class JobProcessor:
                 await self._save_session(result)
                 if result.get("is_cancelled"):
                     await self._mark_cancelled(result)
+                elif result.get("is_error"):
+                    await self._handle_error(
+                        SDKError(
+                            f"SDK reported error: {result.get('response', 'unknown error')[:200]}"
+                        )
+                    )
                 else:
                     await self._mark_success(result)
 
@@ -128,44 +139,45 @@ class JobProcessor:
         # Always regenerate the token when installation_id is available.
         # Reclaimed jobs may carry a stale (expired) token from backup, and
         # checking "if not github_token" would skip regeneration for those.
-        if self.job_data.get("installation_id"):
+        #
+        # Fall back through: job_data.installation_id → event_data →
+        # GITHUB_INSTALLATION_ID env var (last resort for sessions where
+        # the transcript meta was lost before the fix was applied).
+        installation_id = (
+            self.job_data.get("installation_id")
+            or self.job_data.get("event_data", {}).get("installation_id", "")
+            or os.getenv("GITHUB_INSTALLATION_ID", "")
+        )
+        if installation_id:
             try:
                 from shared.github_auth import GitHubAuthService
 
-                auth = GitHubAuthService(
-                    installation_id=str(self.job_data["installation_id"])
-                )
+                auth = GitHubAuthService(installation_id=str(installation_id))
                 async with auth:
                     self.job_data["github_token"] = await auth.get_token()
                 logger.info(
-                    f"Generated GitHub token from installation_id {self.job_data['installation_id']}"
+                    f"Generated GitHub token from installation_id {installation_id}"
                 )
             except Exception as e:
                 logger.warning(
                     f"Failed to generate GitHub token from installation_id: {e}"
                 )
 
+        # Ensure we have a valid GitHub token before proceeding.
+        # Resume/reclaim jobs carry installation_id but may not include
+        # github_token — if regeneration fails, fail the job explicitly
+        # instead of crashing later with a cryptic KeyError in _configure_git
+        # or _execute_sdk_loop.
+        if not self.job_data.get("github_token"):
+            raise WorktreeCreationError(
+                "GitHub token unavailable: installation_id missing or "
+                "token generation failed. Ensure GITHUB_APP_ID, "
+                "GITHUB_PRIVATE_KEY, and installation_id are configured."
+            )
+
         self.repo_dir = await wait_for_repo_sync(
             self.repo, self.ref, self.job_queue.redis
         )
-
-        # Wait for code indexing to complete so the agent has full
-        # code intelligence (code graph + embeddings + routes) available.
-        # Catch ALL exceptions so a Redis pub/sub issue or missing
-        # channel never kills the job — the agent can still work
-        # without indexed code intelligence.
-        try:
-            await wait_for_indexing(self.repo, self.ref, self.job_queue.redis)
-        except IndexingTimeoutError:
-            logger.warning(
-                f"Indexing wait timed out for {self.repo} "
-                f"- proceeding with degraded code intelligence"
-            )
-        except Exception as e:
-            logger.warning(
-                f"Indexing wait failed for {self.repo}: {e} "
-                f"- proceeding with degraded code intelligence"
-            )
 
         conversation_config = self.job_data.get("conversation_config") or {}
         self.persist_session = conversation_config.get("persist", False)
@@ -316,48 +328,6 @@ class JobProcessor:
                 if code != 0:
                     raise WorktreeCreationError(f"Failed to create worktree: {err}")
 
-    async def _configure_git(self):
-        credentials_file = os.path.join(self.workspace, ".git-credentials")
-        config_code, _, config_err = await execute_git_command(
-            ["git", "config", "credential.helper", f"store --file={credentials_file}"],
-            cwd=self.workspace,
-        )
-        if config_code != 0:
-            raise WorktreeCreationError(
-                f"Failed to configure git credentials: {config_err}"
-            )
-
-        fd = os.open(credentials_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        try:
-            os.write(
-                fd,
-                f"https://x-access-token:{self.job_data['github_token']}@github.com\n".encode(),
-            )
-        finally:
-            os.close(fd)
-
-        bot_username = os.getenv("BOT_USERNAME", "Claude Code Agent")
-        bot_email = os.getenv(
-            "BOT_USER_EMAIL", "claude-code-agent[bot]@users.noreply.github.com"
-        )
-
-        _safe_pattern = re.compile(r"^[a-zA-Z0-9\s.\-\[\]@]+$")
-        if not _safe_pattern.match(bot_username):
-            raise ValueError(
-                f"BOT_USERNAME contains invalid characters: {bot_username!r}"
-            )
-        if not _safe_pattern.match(bot_email):
-            raise ValueError(
-                f"BOT_USER_EMAIL contains invalid characters: {bot_email!r}"
-            )
-
-        await execute_git_command(
-            ["git", "config", "user.name", bot_username], cwd=self.workspace
-        )
-        await execute_git_command(
-            ["git", "config", "user.email", bot_email], cwd=self.workspace
-        )
-
     async def _run_repo_setup(self):
         try:
             setup_engine = RepoSetupEngine()
@@ -373,81 +343,36 @@ class JobProcessor:
                     logger.warning(
                         f"Some setup commands failed for {self.repo}, continuing anyway..."
                     )
-                    for result in setup_result["results"]:
-                        if not result.get("success"):
-                            cmd_info = result.get(
-                                "commands", result.get("command", "unknown")
-                            )
-                            if isinstance(cmd_info, list):
-                                cmd_info = " && ".join(cmd_info)
-                            logger.warning(
-                                f"Failed command(s): {cmd_info} - {result.get('error', 'unknown error')}"
-                            )
+                    self._log_setup_failures(setup_result["results"])
                 else:
                     logger.info(
-                        f"Setup completed successfully for {self.repo} in {setup_result['elapsed_seconds']:.1f}s"
+                        f"Setup completed successfully for {self.repo} "
+                        f"in {setup_result['elapsed_seconds']:.1f}s"
                     )
         except Exception as e:
             logger.warning(
-                f"Error during repository setup for {self.repo}: {e}. Continuing with job execution...",
+                f"Error during repository setup for {self.repo}: {e}. "
+                f"Continuing with job execution...",
                 exc_info=True,
             )
 
+    @staticmethod
+    def _log_setup_failures(results: list) -> None:
+        """Log individual failed setup commands from a setup result."""
+        for result in results:
+            if not result.get("success"):
+                cmd_info = result.get("commands", result.get("command", "unknown"))
+                if isinstance(cmd_info, list):
+                    cmd_info = " && ".join(cmd_info)
+                logger.warning(
+                    f"Failed command(s): {cmd_info} - "
+                    f"{result.get('error', 'unknown error')}"
+                )
+
     async def _prepare_context(self):
         try:
-            mentioned_files = []
-            context_budget = 4096
-            include_test_files = True
-
-            context_profile = self.job_data.get("context_profile", {})
-            if context_profile:
-                context_budget = context_profile.get(
-                    "repomap_budget", 4096
-                )  # noqa: E501 repomap_budget kept for config compat
-                include_test_files = context_profile.get("include_test_files", True)
-
-            if context_profile.get("personalized", False):
-                github_token = self.job_data.get("github_token")
-                if self.issue_number and github_token:
-                    try:
-                        async with httpx.AsyncClient() as client:
-                            url = f"https://api.github.com/repos/{self.repo}/pulls/{self.issue_number}/files"
-                            headers = {
-                                "Authorization": f"Bearer {github_token}",
-                                "Accept": "application/vnd.github.v3+json",
-                            }
-                            resp = await client.get(url, headers=headers, timeout=10.0)
-                            if resp.status_code == 200:
-                                files = resp.json()
-                                mentioned_files = [
-                                    f["path"] for f in files if "path" in f
-                                ]
-                                logger.info(
-                                    f"Personalizing context toward {len(mentioned_files)} changed files"
-                                )
-                    except Exception as e:
-                        logger.debug(
-                            f"PR file fetch skipped (not a PR or API error): {e}"
-                        )
-
-                priority_focus = context_profile.get("priority_focus", [])
-                if priority_focus:
-                    focus_files = find_priority_focus_files(
-                        Path(self.workspace), priority_focus
-                    )
-                    mentioned_files.extend(focus_files)
-                    if focus_files:
-                        logger.info(
-                            f"Added {len(focus_files)} priority focus files for areas: {priority_focus}"
-                        )
-
             self.file_tree_text = await generate_structural_context(
                 repo_path=Path(self.workspace),
-                repo=self.repo,
-                mentioned_files=mentioned_files,
-                token_budget=context_budget,
-                include_test_files=include_test_files,
-                cache_dir=Path.home() / ".claude",
             )
             logger.info(
                 f"Generated structural context: file_tree={len(self.file_tree_text)} chars"
@@ -491,12 +416,33 @@ class JobProcessor:
 
         write_mcp_json(worktree_path=self.workspace, repo=self.repo)
 
+        # Initialize CodeGraph index (installed in Dockerfile; graceful fallback
+        # if run outside Docker or binary is missing)
+        try:
+            subprocess.run(
+                ["codegraph", "init", "-i"],
+                cwd=self.workspace,
+                timeout=60,
+                capture_output=True,
+                check=False,
+            )
+            logger.info("CodeGraph index initialized for %s", self.workspace)
+        except FileNotFoundError:
+            logger.info("CodeGraph not installed, skipping index build")
+        except subprocess.TimeoutExpired:
+            logger.warning("CodeGraph init timed out for %s", self.workspace)
+        except Exception as e:
+            logger.debug("CodeGraph init skipped: %s", e)
+
     async def _execute_sdk_loop(self):
-        model = os.getenv("ANTHROPIC_DEFAULT_SONNET_MODEL", "claude-sonnet-4-20250514")
         github_token = self.job_data["github_token"]
         system_context = self.job_data.get("system_context")
         claude_md = self.job_data.get("claude_md")
         memory_index = self.job_data.get("memory_index")
+
+        # Model tier from workflows.yaml (opus/sonnet/haiku). Unset means the
+        # CLI resolves the model itself; see tests/shared/test_model_resolution.py.
+        model_tier = self.job_data.get("model")
 
         os.environ["GITHUB_TOKEN"] = github_token
         if github_token:
@@ -511,7 +457,6 @@ class JobProcessor:
             session_token = self.job_data["session_token"]
             try:
                 from shared.session_stream import ControlChannel, SessionStreamBridge
-                from shared.streaming_session import StreamingSessionStore
 
                 self.streaming_bridge = SessionStreamBridge(
                     token=session_token, redis=self.job_queue.redis
@@ -528,12 +473,10 @@ class JobProcessor:
                     issue_number=self.issue_number,
                     workflow=self.workflow_name,
                 )
-                session_meta = await StreamingSessionStore(
-                    self.job_queue.redis
-                ).get_session(session_token)
-                run_count = int(
-                    str(session_meta.get("run_count", "1")) if session_meta else "1"
+                session_meta = await self.session_service.get_streaming_session(
+                    session_token
                 )
+                run_count = session_meta.run_count if session_meta else 1
                 await self.streaming_bridge.publish(
                     "run_start",
                     {"run_number": run_count, "session_id": self.session_id},
@@ -568,7 +511,9 @@ class JobProcessor:
             interrupted = False
             self.user_interrupt_event.clear()
 
-            builder = SDKOptionsBuilder(cwd=self.workspace).with_model(model)
+            builder = SDKOptionsBuilder(cwd=self.workspace)
+            if model_tier:
+                builder = builder.with_model(model_tier)
             builder = configure_builder(
                 builder,
                 repo=self.repo,
@@ -704,10 +649,7 @@ class JobProcessor:
                 raise RuntimeError("SDK execution returned no result")
 
             if self.streaming_bridge is not None and self.job_data.get("session_token"):
-                from shared.streaming_session import StreamingSessionStore
-
-                store = StreamingSessionStore(self.job_queue.redis)
-                inbox_messages = await store.pop_inbox_messages(
+                inbox_messages = await self.session_service.pop_inbox_messages(
                     self.job_data["session_token"]
                 )
 
@@ -725,7 +667,9 @@ class JobProcessor:
                         issue_number=self.issue_number,
                         workflow=self.workflow_name,
                     )
-                    await store.set_running(self.job_data["session_token"])
+                    await self.session_service.set_running(
+                        self.job_data["session_token"]
+                    )
                     logger.info(
                         f"[Streaming] Auto-continue #{continue_count + 1} for {self.job_data['session_token'][:8]}..."
                     )
@@ -748,10 +692,7 @@ class JobProcessor:
                 is_error = (result or {}).get("is_error", False)
                 new_session_id = (result or {}).get("session_id") if result else None
                 if self.job_data.get("session_token"):
-                    from shared.streaming_session import StreamingSessionStore
-
-                    store = StreamingSessionStore(self.job_queue.redis)
-                    await store.set_completed(
+                    await self.session_service.set_completed(
                         token=self.job_data["session_token"],
                         is_error=is_error,
                         repo=self.repo,
@@ -818,24 +759,24 @@ class JobProcessor:
 
         if new_session_id and self.job_data.get("session_token"):
             try:
-                from shared.streaming_session import StreamingSessionStore
-
-                stream_store = StreamingSessionStore(self.job_queue.redis)
                 if self.streaming_bridge is None:
-                    await stream_store.update_session_id(
+                    await self.session_service.update_session_id(
                         self.job_data["session_token"], new_session_id
                     )
                 transcript_path = find_transcript_path(
                     new_session_id, self.workspace or ""
                 )
                 if transcript_path:
-                    await stream_store.update_transcript_path(
+                    await self.session_service.update_transcript_path(
                         self.job_data["session_token"], transcript_path
                     )
                     write_transcript_meta(
                         transcript_path,
                         {
-                            "installation_id": self.job_data.get("installation_id", ""),
+                            "installation_id": self.job_data.get("installation_id")
+                            or self.job_data.get("event_data", {}).get(
+                                "installation_id", ""
+                            ),
                             "ref": self.ref,
                             "user": self.job_data.get("user", "remote-control"),
                             "thread_type": self.thread_type,
@@ -889,15 +830,14 @@ class JobProcessor:
         if self.job_data.get("session_token"):
             try:
                 from shared.session_stream import SessionStreamBridge
-                from shared.streaming_session import StreamingSessionStore
 
-                err_store = StreamingSessionStore(self.job_queue.redis)
-                await err_store.set_completed(
+                await self.session_service.set_completed(
                     token=self.job_data["session_token"],
                     is_error=True,
                     repo=self.repo,
                     issue_number=self.issue_number,
                     workflow=self.workflow_name,
+                    session_id=self.session_id,
                 )
                 err_bridge = SessionStreamBridge(
                     self.job_data["session_token"], self.job_queue.redis
@@ -937,6 +877,18 @@ class JobProcessor:
         )
 
     async def _cleanup(self):
+        # Release session dedup lock (SETNX-based) so follow-up
+        # requests can create new jobs for this session.
+        if self.persist_session:
+            try:
+                dedup_key = session_dedup_key(
+                    self.repo, self.thread_type, self.thread_id, self.workflow_name
+                )
+                await self.job_queue.redis.delete(dedup_key)
+                logger.debug(f"Released dedup lock for {dedup_key}")
+            except Exception as e:
+                logger.warning(f"Failed to release dedup lock: {e}")
+
         if self.worktree_lock:
             try:
                 await self.worktree_lock.release()
@@ -952,11 +904,18 @@ class JobProcessor:
             pass
 
         try:
-            if self.workspace:
-                per_job_creds = os.path.join(self.workspace, ".git-credentials")
-                if os.path.exists(per_job_creds):
-                    os.remove(per_job_creds)
-                    logger.debug("Cleaned up per-job git credentials")
+            # Keyed on job_id, so this no longer depends on self.workspace
+            # being set — a job that died after configure_git but before the
+            # workspace was recorded still gets its token removed.
+            per_job_creds = credentials_path(self.job_id)
+            if os.path.exists(per_job_creds):
+                os.remove(per_job_creds)
+                logger.debug("Cleaned up per-job git credentials")
+                # Unset global credential helper to avoid stale references
+                # when the credentials file no longer exists
+                await execute_git_command(
+                    ["git", "config", "--global", "--unset", "credential.helper"]
+                )
         except Exception as e:
             logger.warning(f"Failed to cleanup credentials: {e}")
 

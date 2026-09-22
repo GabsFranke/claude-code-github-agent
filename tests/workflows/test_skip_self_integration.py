@@ -9,14 +9,9 @@ class TestSkipSelfWithEventActor:
     """Test skip_self behavior with different event actors."""
 
     @pytest.fixture
-    def engine(self):
-        """Load the real workflows.yaml."""
-        from pathlib import Path
-
-        workflow_path = Path(__file__).parent.parent.parent / "workflows.yaml"
-        if not workflow_path.exists():
-            pytest.skip("workflows.yaml not found")
-        return WorkflowEngine(workflow_path)
+    def engine(self, repo_workflow_config):
+        """Load the workflow config the repository ships."""
+        return WorkflowEngine(repo_workflow_config)
 
     def test_bot_opens_pr_should_skip(self, engine):
         """Bot opens PR - should skip automatic review."""
@@ -40,39 +35,42 @@ class TestSkipSelfWithEventActor:
 
     def test_human_comments_on_bot_pr_should_not_skip(self, engine):
         """Human comments /review on bot's PR - should process."""
-        workflow_name = engine.get_workflow_for_command("/review")
-        if not workflow_name:
+        workflow_names = engine.get_workflow_for_command("/review")
+        if not workflow_names:
             pytest.skip("No workflow for /review command")
 
+        workflow_name = workflow_names[0]
         # Human is the comment author (sender) - should not skip
         # Even though the PR owner is the bot
         assert engine.should_skip_self(workflow_name, "human-user", "bot-user") is False
 
     def test_bot_comments_on_own_pr_should_skip(self, engine):
-        """Bot comments /review on its own PR - should skip."""
-        workflow_name = engine.get_workflow_for_command("/review")
-        if not workflow_name:
+        """Bot comments /review on its own PR - should skip if skip_self is true, but review-pr has skip_self: false."""
+        workflow_names = engine.get_workflow_for_command("/review")
+        if not workflow_names:
             pytest.skip("No workflow for /review command")
 
-        # Bot is the comment author (sender) - should skip
-        assert engine.should_skip_self(workflow_name, "bot-user", "bot-user") is True
+        workflow_name = workflow_names[0]
+        # review-pr has skip_self: false to allow trigger-chaining, so it should not skip
+        assert engine.should_skip_self(workflow_name, "bot-user", "bot-user") is False
 
     def test_bot_comments_on_human_pr_should_skip(self, engine):
-        """Bot comments /review on human's PR - should skip."""
-        workflow_name = engine.get_workflow_for_command("/review")
-        if not workflow_name:
+        """Bot comments /review on human's PR - should skip if skip_self is true, but review-pr has skip_self: false."""
+        workflow_names = engine.get_workflow_for_command("/review")
+        if not workflow_names:
             pytest.skip("No workflow for /review command")
 
-        # Bot is the comment author (sender) - should skip
-        # Even though the PR owner is human
-        assert engine.should_skip_self(workflow_name, "bot-user", "bot-user") is True
+        workflow_name = workflow_names[0]
+        # review-pr has skip_self: false to allow trigger-chaining, so it should not skip
+        assert engine.should_skip_self(workflow_name, "bot-user", "bot-user") is False
 
     def test_generic_workflow_with_skip_self_false(self, engine):
         """Generic workflow with skip_self=false should never skip."""
-        workflow_name = engine.get_workflow_for_command("/agent")
-        if not workflow_name:
+        workflow_names = engine.get_workflow_for_command("/agent")
+        if not workflow_names:
             pytest.skip("No workflow for /agent command")
 
+        workflow_name = workflow_names[0]
         # Check if skip_self is false for generic workflow
         if engine.workflows[workflow_name].skip_self is False:
             # Should not skip even if bot is the actor

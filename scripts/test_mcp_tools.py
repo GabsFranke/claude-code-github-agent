@@ -6,9 +6,6 @@ Supports two modes:
   - RPC mode (--rpc): Spawn the server subprocess, JSON-RPC over stdin/stdout.
 
 Usage:
-  python scripts/test_mcp_tools.py codebase_tools --list
-  python scripts/test_mcp_tools.py codebase_tools --tool find_definitions --symbol_name Application
-  python scripts/test_mcp_tools.py codebase_tools --rpc --tool find_definitions --symbol_name Application
   python scripts/test_mcp_tools.py memory --tool memory_read --repo owner/name
   python scripts/test_mcp_tools.py github_actions --tool get_workflow_run_summary --owner X --repo Y --run_id Z
 """
@@ -130,14 +127,6 @@ def print_tool_info(tool: dict) -> None:
 # ---------------------------------------------------------------------------
 
 
-def list_codebase_tools_direct() -> None:
-    from mcp_servers.codebase_tools.server import _tool_definitions
-
-    print("codebase_tools (direct mode):")
-    for tool in _tool_definitions():
-        print_tool_info(tool)
-
-
 async def list_memory_tools_direct() -> None:
     from mcp_servers.memory.server import handle_request
 
@@ -158,35 +147,6 @@ async def list_github_actions_tools_direct() -> None:
 # ---------------------------------------------------------------------------
 # Direct mode runners
 # ---------------------------------------------------------------------------
-
-
-def run_codebase_direct(tool_name: str, kwargs: dict, repo_path: str | None) -> None:
-    from mcp_servers.codebase_tools.tools import init_repo
-
-    path = repo_path or os.getcwd()
-    print(f"Initializing repo at {path} ...", file=sys.stderr)
-    try:
-        init_repo(str(path))
-    except Exception as e:
-        print(f"Error initializing repo: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    import mcp_servers.codebase_tools.tools as tmod
-
-    func = getattr(tmod, tool_name, None)
-    if func is None:
-        print(f"Error: Unknown tool '{tool_name}' in codebase_tools", file=sys.stderr)
-        sys.exit(1)
-
-    try:
-        result = func(**kwargs)
-        print_json(result)
-    except TypeError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
-    except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
 
 
 def run_memory_direct(tool_name: str, kwargs: dict) -> None:
@@ -232,8 +192,15 @@ async def run_github_actions_direct(tool_name: str, kwargs: dict) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def _send_jsonrpc(process: asyncio.subprocess.Process, method: str, params: dict) -> None:
-    request: dict[str, Any] = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+async def _send_jsonrpc(
+    process: asyncio.subprocess.Process, method: str, params: dict
+) -> None:
+    request: dict[str, Any] = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": method,
+        "params": params,
+    }
     line = json.dumps(request) + "\n"
     if process.stdin is None:
         raise RuntimeError("Process stdin unavailable")
@@ -261,26 +228,24 @@ async def run_rpc(
     indent: int | None = None if no_pretty else 2
 
     scripts = {
-        "codebase_tools": _PROJECT_ROOT / "mcp_servers/codebase_tools/server.py",
         "memory": _PROJECT_ROOT / "mcp_servers/memory/server.py",
         "github_actions": _PROJECT_ROOT / "mcp_servers/github_actions/server.py",
     }
 
     env = os.environ.copy()
-    if server_name == "codebase_tools":
-        rp = repo_path or os.getcwd()
-        env.setdefault("REPO_PATH", str(Path(rp).resolve()))
     if server_name == "memory":
         env.setdefault("GITHUB_REPOSITORY", "unknown/repo")
 
     missing = {
-        "codebase_tools": [],
         "memory": [],
         "github_actions": ["GITHUB_TOKEN"],
     }.get(server_name, [])
     for var in missing:
         if var not in env:
-            print(f"Error: Missing env var {var} for {server_name} RPC mode", file=sys.stderr)
+            print(
+                f"Error: Missing env var {var} for {server_name} RPC mode",
+                file=sys.stderr,
+            )
             sys.exit(1)
 
     process = await asyncio.create_subprocess_exec(
@@ -300,11 +265,6 @@ async def run_rpc(
             print_json(init_resp, indent=indent, is_error=True)
             return
 
-        # Wait for background init (codebase_tools spawns init_repo in thread)
-        if server_name == "codebase_tools" and wait_timeout > 0:
-            print(f"Waiting {wait_timeout}s for index build ...", file=sys.stderr)
-            await asyncio.sleep(wait_timeout)
-
         if tool_name is None:
             # List tools
             await _send_jsonrpc(process, "tools/list", {})
@@ -315,7 +275,9 @@ async def run_rpc(
                 print_tool_info(tool)
         else:
             # Call tool
-            await _send_jsonrpc(process, "tools/call", {"name": tool_name, "arguments": kwargs})
+            await _send_jsonrpc(
+                process, "tools/call", {"name": tool_name, "arguments": kwargs}
+            )
             resp = await _recv_jsonrpc(process)
 
             if "error" in resp:
@@ -337,7 +299,7 @@ async def run_rpc(
             process.terminate()
             try:
                 await asyncio.wait_for(process.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 process.kill()
 
 
@@ -352,16 +314,14 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         allow_abbrev=False,
         epilog="""Examples:
-  %(prog)s codebase_tools --list
-  %(prog)s codebase_tools --tool find_definitions --symbol_name Application
-  %(prog)s codebase_tools --rpc --tool find_definitions --symbol_name main
-  %(prog)s memory --tool memory_read --repo GabsFranke/myrepo
+  %(prog)s memory --tool memory_read --repo your-org/myrepo
   %(prog)s github_actions --tool get_workflow_run_summary --owner X --repo Y --run_id Z
+  %(prog)s memory --rpc --list
 """,
     )
     parser.add_argument(
         "server",
-        choices=["codebase_tools", "memory", "github_actions"],
+        choices=["memory", "github_actions"],
         help="Which MCP server to target",
     )
     parser.add_argument(
@@ -379,18 +339,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--rpc",
         action="store_true",
         help="Use JSON-RPC subprocess mode instead of direct function call",
-    )
-    parser.add_argument(
-        "--repo-path",
-        type=str,
-        default=None,
-        help="Repository path for codebase_tools (default: current directory)",
-    )
-    parser.add_argument(
-        "--wait-timeout",
-        type=int,
-        default=3,
-        help="Seconds to wait for codebase_tools index build in RPC mode (default: 3)",
     )
     parser.add_argument(
         "--no-pretty",
@@ -418,8 +366,6 @@ def main() -> None:
                 server_name=args.server,
                 tool_name=None if args.list else args.tool,
                 kwargs=kwargs,
-                repo_path=args.repo_path,
-                wait_timeout=args.wait_timeout,
                 no_pretty=args.no_pretty,
             )
         )
@@ -427,9 +373,7 @@ def main() -> None:
 
     # Direct mode
     if args.list:
-        if args.server == "codebase_tools":
-            list_codebase_tools_direct()
-        elif args.server == "memory":
+        if args.server == "memory":
             asyncio.run(list_memory_tools_direct())
         elif args.server == "github_actions":
             asyncio.run(list_github_actions_tools_direct())
@@ -440,9 +384,7 @@ def main() -> None:
         print("\nError: Specify a tool name or use --list", file=sys.stderr)
         sys.exit(1)
 
-    if args.server == "codebase_tools":
-        run_codebase_direct(args.tool, kwargs, args.repo_path)
-    elif args.server == "memory":
+    if args.server == "memory":
         run_memory_direct(args.tool, kwargs)
     elif args.server == "github_actions":
         asyncio.run(run_github_actions_direct(args.tool, kwargs))

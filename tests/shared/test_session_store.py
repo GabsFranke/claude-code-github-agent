@@ -4,8 +4,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from shared.constants import DEFAULT_SESSION_TTL_HOURS
-from shared.session_store import SessionStore, _session_key, resolve_thread_type
+from shared.constants import DEFAULT_SESSION_TTL_HOURS, session_key
+from shared.session_store import SessionStore, resolve_thread_type
 
 
 def _make_redis():
@@ -55,6 +55,7 @@ class TestResolveThreadType:
         assert resolve_thread_type({}) == "issue"
 
 
+@pytest.mark.deprecated("Legacy SessionStore — now merged into unified SessionStore")
 class TestSessionStoreSaveSession:
     @pytest.mark.asyncio
     async def test_new_session_sets_fields(self):
@@ -71,10 +72,19 @@ class TestSessionStoreSaveSession:
             ref="main",
         )
 
-        assert redis.hset.call_count == 9
-        assert redis.hsetnx.call_count == 1
-        _, field, _ = redis.hsetnx.call_args[0]
-        assert field == "created_at"
+        assert redis.hset.call_count == 1
+        key = redis.hset.call_args[0][0]
+        mapping = redis.hset.call_args[1]["mapping"]
+        assert key == session_key("owner/repo", "issue", "42", "review-pr")
+        assert mapping["status"] == "active"
+        assert mapping["session_id"] == "sess-123"
+        assert mapping["ref"] == "main"
+        # created_at and turn_count are both seeded via HSETNX. turn_count
+        # must not be in the HSET mapping above: an unconditional write there
+        # would zero the accumulator on every save.
+        seeded = {call[0][1] for call in redis.hsetnx.call_args_list}
+        assert seeded == {"created_at", "turn_count"}
+        assert "turn_count" not in mapping
         assert redis.hincrby.call_count == 0
         assert redis.expire.call_count == 1
         _, ttl = redis.expire.call_args[0]
@@ -95,9 +105,8 @@ class TestSessionStoreSaveSession:
             ref="main",
         )
 
-        assert redis.hsetnx.call_count == 1
-        _, field, _ = redis.hsetnx.call_args[0]
-        assert field == "created_at"
+        seeded = {call[0][1] for call in redis.hsetnx.call_args_list}
+        assert "created_at" in seeded
 
     @pytest.mark.asyncio
     async def test_accumulates_turn_count(self):
@@ -185,6 +194,7 @@ class TestSessionStoreSaveSession:
         assert ttl == 24 * 3600
 
 
+@pytest.mark.deprecated("Legacy SessionStore — now merged into unified SessionStore")
 class TestSessionStoreGetSession:
     @pytest.mark.asyncio
     async def test_returns_session_info(self):
@@ -228,9 +238,10 @@ class TestSessionStoreGetSession:
         assert result is None
 
 
+@pytest.mark.deprecated("Legacy SessionStore — now merged into unified SessionStore")
 class TestSessionStoreCloseSession:
     @pytest.mark.asyncio
-    async def test_deletes_session_key(self):
+    async def test_deletessession_key(self):
         redis = _make_redis()
         store = SessionStore(redis_client=redis)
 
@@ -292,6 +303,7 @@ class TestSessionStoreCloseSession:
         assert redis.delete.call_count == 1
 
 
+@pytest.mark.deprecated("Legacy SessionStore — now merged into unified SessionStore")
 class TestSessionStoreExpireSession:
     @pytest.mark.asyncio
     async def test_sets_ttl_when_exists(self):
@@ -337,6 +349,7 @@ class TestSessionStoreExpireSession:
         assert redis.expire.call_count >= 1
 
 
+@pytest.mark.deprecated("Legacy SessionStore — now merged into unified SessionStore")
 class TestSessionStoreUpdateSummary:
     @pytest.mark.asyncio
     async def test_calls_hset(self):
@@ -363,6 +376,7 @@ class TestSessionStoreUpdateSummary:
         )
 
 
+@pytest.mark.deprecated("Legacy SessionStore — now merged into unified SessionStore")
 class TestSessionStoreIncrementTurnCount:
     @pytest.mark.asyncio
     async def test_calls_hincrby(self):
@@ -392,6 +406,7 @@ class TestSessionStoreIncrementTurnCount:
         )
 
 
+@pytest.mark.deprecated("Legacy SessionStore — now merged into unified SessionStore")
 class TestSessionStoreListSessions:
     @pytest.mark.asyncio
     async def test_scans_and_parses(self):
@@ -400,7 +415,7 @@ class TestSessionStoreListSessions:
             return_value=(
                 0,
                 [
-                    _session_key("owner/repo", "issue", "42", "review-pr"),
+                    session_key("owner/repo", "issue", "42", "review-pr"),
                 ],
             )
         )
@@ -439,8 +454,8 @@ class TestSessionStoreListSessions:
             return_value=(
                 0,
                 [
-                    _session_key("owner/repo", "issue", "42", "review-pr"),
-                    _session_key("owner/repo", "issue", "43", "review-pr"),
+                    session_key("owner/repo", "issue", "42", "review-pr"),
+                    session_key("owner/repo", "issue", "43", "review-pr"),
                 ],
             )
         )

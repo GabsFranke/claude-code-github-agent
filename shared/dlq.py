@@ -28,14 +28,26 @@ TRANSIENT_MARKERS = (
 )
 
 
-def is_transient_error(exc: Exception) -> bool:
+def is_transient_error(exc: BaseException, max_depth: int = 10) -> bool:
     """Check if an error is transient and worth retrying.
+
+    Walks the exception chain (__cause__) to find transient markers in
+    wrapped exceptions. For example, an SDKError wrapping a connection
+    reset should be treated as transient even though the SDKError message
+    itself does not contain transient keywords.
 
     Non-transient errors (config issues, missing API keys, validation)
     should go straight to the DLQ without retry.
     """
-    msg = str(exc).lower()
-    return any(marker.lower() in msg for marker in TRANSIENT_MARKERS)
+    current: BaseException | None = exc
+    depth = 0
+    while current is not None and depth < max_depth:
+        msg = str(current).lower()
+        if any(marker.lower() in msg for marker in TRANSIENT_MARKERS):
+            return True
+        current = current.__cause__
+        depth += 1
+    return False
 
 
 async def enqueue_for_retry(

@@ -6,6 +6,8 @@ import logging
 import uuid
 from typing import Any
 
+from redis.exceptions import TimeoutError as RedisTimeoutError
+
 from .constants import (
     JOB_DATA_PREFIX,
     JOB_STATUS_PREFIX,
@@ -71,6 +73,9 @@ class JobQueue:
                     self.redis_url,
                     decode_responses=True,
                     password=self.password,
+                    socket_timeout=60,  # Must exceed blpop timeout to avoid spurious TimeoutError
+                    socket_connect_timeout=10,
+                    retry_on_timeout=True,
                 )
                 logger.debug("Connected to Redis for job queue")
             except ImportError as e:
@@ -86,6 +91,19 @@ class JobQueue:
                 ) from e
             except OSError as e:
                 raise QueueError(f"Failed to connect to Redis: {e}") from e
+
+    async def _reconnect(self) -> None:
+        """Close stale connection and re-establish it.
+
+        Connection failures are logged but not raised so callers can
+        retry on the next iteration instead of crashing.
+        """
+        await self.close()
+        try:
+            logger.info("Reconnecting to Redis for job queue...")
+            await self._connect()
+        except QueueError as e:
+            logger.warning(f"Reconnection failed, will retry: {e}")
 
     @staticmethod
     def _validate_job_id(job_id: str) -> bool:
@@ -248,8 +266,12 @@ class JobQueue:
                     exc_info=True,
                 )
             return None
-        except OSError as e:
+        except (OSError, RedisTimeoutError) as e:
+            # redis.exceptions.TimeoutError is NOT a subclass of OSError,
+            # so we must catch it explicitly to force reconnection on stale
+            # connections.
             logger.error(f"Redis error getting next job: {e}", exc_info=True)
+            await self._reconnect()
             return None
 
     async def complete_job(

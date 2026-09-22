@@ -289,7 +289,12 @@ async def create_redis_rate_limiter_backend(
     try:
         url = redis_url or "redis://localhost:6379"
         redis_client = await redis.from_url(
-            url, decode_responses=True, password=password
+            url,
+            decode_responses=True,
+            password=password,
+            socket_timeout=60,
+            socket_connect_timeout=10,
+            retry_on_timeout=True,
         )
         # Test connection
         await redis_client.ping()

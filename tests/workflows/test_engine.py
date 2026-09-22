@@ -1,7 +1,5 @@
 """Unit tests for workflow engine."""
 
-from pathlib import Path
-
 import pytest
 import yaml
 
@@ -78,7 +76,7 @@ class TestWorkflowEngine:
                         "commands": ["/review", "/pr-review"],
                     },
                     "prompt": {
-                        "template": "/pr-review-toolkit:review-pr {repo} {issue_number}",
+                        "template": "/oh-my-claudecode:review {repo} {issue_number}",
                         "system_context": "review.md",
                     },
                     "description": "Review a pull request",
@@ -161,10 +159,10 @@ class TestWorkflowEngine:
         """Test command to workflow mapping."""
         engine = WorkflowEngine(temp_workflow_file)
 
-        assert engine._command_map["/review"] == "review-pr"
-        assert engine._command_map["/pr-review"] == "review-pr"
-        assert engine._command_map["/triage"] == "triage-issue"
-        assert engine._command_map["/agent"] == "generic"
+        assert engine._command_map["/review"] == ["review-pr"]
+        assert engine._command_map["/pr-review"] == ["review-pr"]
+        assert engine._command_map["/triage"] == ["triage-issue"]
+        assert engine._command_map["/agent"] == ["generic"]
 
     def test_get_workflow_for_event_with_action(self, temp_workflow_file):
         """Test getting workflow for event with action."""
@@ -196,7 +194,7 @@ class TestWorkflowEngine:
 
         workflow = engine.get_workflow_for_command("/review")
 
-        assert workflow == "review-pr"
+        assert workflow == ["review-pr"]
 
     def test_get_workflow_for_command_not_found(self, temp_workflow_file):
         """Test getting workflow for unknown command."""
@@ -204,7 +202,7 @@ class TestWorkflowEngine:
 
         workflow = engine.get_workflow_for_command("/unknown")
 
-        assert workflow is None
+        assert workflow == []
 
     def test_build_prompt_simple(self, temp_workflow_file, tmp_path):
         """Test building simple prompt without system context."""
@@ -278,7 +276,7 @@ class TestWorkflowEngine:
             issue_number=789,
         )
 
-        assert "/pr-review-toolkit:review-pr owner/repo 789" in prompt
+        assert "/oh-my-claudecode:review owner/repo 789" in prompt
         assert system_context is not None
         assert "Focus on code quality" in system_context
 
@@ -306,7 +304,7 @@ class TestWorkflowEngine:
         # The engine looks for prompts/ relative to workflows/engine.py
         # So it will find the real prompts/ directory in the project
         # Just verify the basic template is there
-        assert "/pr-review-toolkit:review-pr owner/repo 100" in prompt
+        assert "/oh-my-claudecode:review owner/repo 100" in prompt
 
     def test_build_prompt_with_system_context_and_user_query(
         self, temp_workflow_file, temp_prompts_dir, monkeypatch
@@ -407,7 +405,7 @@ class TestWorkflowEngine:
         workflow1 = engine.get_workflow_for_command("/review")
         workflow2 = engine.get_workflow_for_command("/pr-review")
 
-        assert workflow1 == workflow2 == "review-pr"
+        assert workflow1 == workflow2 == ["review-pr"]
 
     def test_system_context_variable_substitution(
         self, temp_workflow_file, temp_prompts_dir, monkeypatch
@@ -465,36 +463,25 @@ class TestWorkflowEngine:
 
 
 class TestWorkflowEngineIntegration:
-    """Integration tests for WorkflowEngine with real workflows.yaml."""
+    """Integration tests for WorkflowEngine against the shipped config."""
 
-    def test_load_real_workflows_yaml(self):
-        """Test loading the actual workflows.yaml file."""
-        # Assumes workflows.yaml exists in project root
-        workflow_path = Path(__file__).parent.parent.parent / "workflows.yaml"
-
-        if not workflow_path.exists():
-            pytest.skip("workflows.yaml not found in project root")
-
-        engine = WorkflowEngine(workflow_path)
+    def test_load_real_workflows_yaml(self, repo_workflow_config):
+        """Test loading the workflow config the repository ships."""
+        engine = WorkflowEngine(repo_workflow_config)
 
         assert len(engine.workflows) > 0
         assert "review-pr" in engine.workflows or "generic" in engine.workflows
 
-    def test_real_workflow_routing(self):
-        """Test routing with real workflows.yaml."""
-        workflow_path = Path(__file__).parent.parent.parent / "workflows.yaml"
-
-        if not workflow_path.exists():
-            pytest.skip("workflows.yaml not found in project root")
-
-        engine = WorkflowEngine(workflow_path)
+    def test_real_workflow_routing(self, repo_workflow_config):
+        """Test routing with the workflow config the repository ships."""
+        engine = WorkflowEngine(repo_workflow_config)
 
         # Test common patterns
         pr_workflow = engine.get_workflow_for_event("pull_request", "opened")
         assert pr_workflow
 
         review_workflow = engine.get_workflow_for_command("/review")
-        assert review_workflow is not None
+        assert review_workflow  # non-empty list
 
     def test_missing_system_context_file_validation(self, tmp_path):
         """Test that missing system context files are caught at initialization."""

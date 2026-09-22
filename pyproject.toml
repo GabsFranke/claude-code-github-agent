@@ -34,6 +34,8 @@ combine_as_imports = true
 disable = [
     "C0111",  # missing-docstring - we have docstrings where needed
     "C0103",  # invalid-name - allow short variable names
+    "E0401",  # import-error - external deps may not be in lint env
+    "E0611",  # no-name-in-module - false positive from lazy __getattr__ imports
     "R0903",  # too-few-public-methods - dataclasses are fine
     "R0913",  # too-many-arguments - sometimes necessary
     "W0212",  # protected-access - allow when needed
@@ -77,6 +79,10 @@ ignore_errors = true
 minversion = "7.0"
 addopts = "-ra -q --strict-markers --strict-config --cov=services --cov=shared --cov-report=term-missing --cov-report=html"
 testpaths = ["tests"]
+# No test in this suite needs two minutes. A test that blocks past this is
+# hung, and without a cap it stalls the CI job until the whole run is
+# cancelled with no traceback to work from.
+timeout = 120
 python_files = ["test_*.py", "*_test.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
@@ -84,6 +90,8 @@ markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests",
     "unit: marks tests as unit tests",
+    "deprecated: marks tests covering deprecated interfaces (legacy SessionStore / StreamingSessionStore)",
+    "skip: marks tests for removed/skipped functionality",
 ]
 
 [tool.coverage.run]

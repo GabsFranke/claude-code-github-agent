@@ -7,7 +7,6 @@ import pytest
 
 import shared.post_processing as pp
 from shared.post_processing import (
-    enqueue_indexing_job,
     enqueue_memory_job,
     enqueue_retrospector_job,
     flush_pending_post_jobs,
@@ -89,39 +88,6 @@ class TestEnqueueRetrospectorJob:
         assert payload["session_meta"] == {"test": True}
 
 
-class TestEnqueueIndexingJob:
-    @pytest.mark.asyncio
-    async def test_pushes_to_correct_key(self):
-        redis = _make_redis()
-        pp._redis = redis
-
-        await enqueue_indexing_job(
-            repo="owner/repo",
-            hook_event="Stop",
-            ref="refs/heads/main",
-        )
-
-        call_args = redis.rpush.call_args
-        assert call_args[0][0] == "agent:indexing:requests"
-        payload = json.loads(call_args[0][1])
-        assert payload["repo"] == "owner/repo"
-        assert payload["ref"] == "refs/heads/main"
-        assert payload["trigger"] == "job_stop"
-
-    @pytest.mark.asyncio
-    async def test_default_ref_is_main(self):
-        redis = _make_redis()
-        pp._redis = redis
-
-        await enqueue_indexing_job(
-            repo="owner/repo",
-            hook_event="Stop",
-        )
-
-        payload = json.loads(redis.rpush.call_args[0][1])
-        assert payload["ref"] == "main"
-
-
 class TestFlushPendingPostJobs:
     @pytest.mark.asyncio
     async def test_empty_list_is_noop(self):
@@ -183,12 +149,6 @@ class TestFlushPendingPostJobs:
                 "workflow_name": "review-pr",
                 "session_meta": {},
             },
-            {
-                "type": "indexing",
-                "repo": "owner/repo",
-                "event": "Stop",
-                "ref": "main",
-            },
         ]
 
         await flush_pending_post_jobs(jobs)
@@ -196,7 +156,6 @@ class TestFlushPendingPostJobs:
         keys = [call[0][0] for call in redis.rpush.call_args_list]
         assert "agent:memory:requests" in keys
         assert "agent:retrospector:requests" in keys
-        assert "agent:indexing:requests" in keys
 
     @pytest.mark.asyncio
     async def test_retry_on_first_failure(self):

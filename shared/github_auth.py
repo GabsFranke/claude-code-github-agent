@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import re
 import time
 
 import httpx
@@ -149,6 +150,54 @@ class GitHubAuthService:
 
         except httpx.RequestError as e:
             raise GitHubAPIError(f"GitHub API request failed: {e}") from e
+
+    async def get_installation_repositories(self) -> list[str]:
+        """Fetch the list of repositories this installation has access to.
+
+        Returns:
+            List of repository full names (e.g., ["owner/repo1", "owner/repo2"])
+        """
+        token = await self.get_token()
+        headers = {
+            "Authorization": f"token {token}",
+            "Accept": "application/vnd.github.v3+json",
+        }
+
+        close_client = False
+        client = self._http_client
+        if not client:
+            client = httpx.AsyncClient(timeout=30.0)
+            close_client = True
+
+        try:
+            repos = []
+            url: str | None = "https://api.github.com/installation/repositories"
+            while url:
+                response = await client.get(url, headers=headers)
+                if response.status_code != 200:
+                    logger.error(
+                        f"Failed to fetch installation repositories: {response.status_code} {response.text}"
+                    )
+                    break
+                data = response.json()
+                for repo in data.get("repositories", []):
+                    repos.append(repo["full_name"])
+
+                # Handle pagination if there are many repos
+                link_header = response.headers.get("Link", "")
+                url = None
+                if link_header:
+                    links = link_header.split(",")
+                    for link in links:
+                        if 'rel="next"' in link:
+                            match = re.search(r"<(.*)>", link)
+                            if match:
+                                url = match.group(1)
+                                break
+            return repos
+        finally:
+            if close_client:
+                await client.aclose()
 
 
 # Global singleton instance for convenience

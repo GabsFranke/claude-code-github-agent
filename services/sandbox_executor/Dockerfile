@@ -5,10 +5,10 @@ RUN useradd -m -u 1000 -s /bin/bash bot
 
 WORKDIR /app
 
-# Install common bash tools that agents use
+# Install common bash tools first (curl needed for NodeSource setup)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    jq \
     curl \
+    jq \
     git \
     vim \
     nano \
@@ -19,6 +19,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     sudo \
     ripgrep \
     socat \
+    tmux \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Node.js via NodeSource (includes npm) + codegraph CLI
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && npm install -g @colbymchenry/codegraph \
     && rm -rf /var/lib/apt/lists/*
 
 # The sandbox needs the shared agent definitions and shared utilities
@@ -32,7 +39,10 @@ COPY mcp_servers/ ./mcp_servers/
 COPY repo_setup/ ./repo_setup/
 
 # Copy repo-setup.yaml configuration
-COPY repo-setup.yaml ./repo-setup.yaml
+# Same clean-clone fallback as workflows.yaml above: repo-setup.yaml is
+# gitignored, repo-setup.example.yaml is tracked.
+COPY repo-setup*.yaml ./
+RUN [ -f repo-setup.yaml ] || cp repo-setup.example.yaml repo-setup.yaml
 
 # Hook scripts
 COPY hooks/langfuse_hook.py /app/hooks/langfuse_hook.py

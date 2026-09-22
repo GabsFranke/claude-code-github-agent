@@ -12,17 +12,9 @@ class TestFixCIWorkflow:
     """Test fix-ci workflow configuration and routing."""
 
     @pytest.fixture
-    def real_workflows_yaml(self):
-        """Load the actual workflows.yaml file."""
-        workflow_path = Path(__file__).parent.parent.parent / "workflows.yaml"
-        if not workflow_path.exists():
-            pytest.skip("workflows.yaml not found in project root")
-        return workflow_path
-
-    @pytest.fixture
-    def engine(self, real_workflows_yaml):
-        """Create WorkflowEngine with real workflows.yaml."""
-        return WorkflowEngine(real_workflows_yaml)
+    def engine(self, repo_workflow_config):
+        """Create WorkflowEngine from the config the repository ships."""
+        return WorkflowEngine(repo_workflow_config)
 
     def test_fix_ci_workflow_exists(self, engine):
         """Test that fix-ci workflow is defined."""
@@ -44,9 +36,9 @@ class TestFixCIWorkflow:
     def test_fix_ci_command_triggers(self, engine):
         """Test that fix-ci commands are properly mapped."""
         # Test all command aliases
-        assert engine.get_workflow_for_command("/fix-ci") == "fix-ci"
-        assert engine.get_workflow_for_command("/fix-build") == "fix-ci"
-        assert engine.get_workflow_for_command("/fix-tests") == "fix-ci"
+        assert engine.get_workflow_for_command("/fix-ci") == ["fix-ci"]
+        assert engine.get_workflow_for_command("/fix-build") == ["fix-ci"]
+        assert engine.get_workflow_for_command("/fix-tests") == ["fix-ci"]
 
     def test_fix_ci_prompt_template(self, engine):
         """Test that fix-ci prompt template is correctly configured."""
@@ -56,8 +48,8 @@ class TestFixCIWorkflow:
         assert prompt_config.template is not None
         template = prompt_config.template
 
-        # Should use the ci-failure-toolkit command
-        assert "/ci-failure-toolkit:fix-ci" in template
+        # Should use the oh-my-claudecode autopilot command
+        assert "/oh-my-claudecode:autopilot" in template
         assert "{repo}" in template
         assert "{issue_number}" in template
 
@@ -78,7 +70,7 @@ class TestFixCIWorkflow:
         )
 
         # Should contain the command with repo and run ID
-        assert "/ci-failure-toolkit:fix-ci" in prompt
+        assert "/oh-my-claudecode:autopilot" in prompt
         assert "owner/test-repo" in prompt
         assert "12345" in prompt
         # Should NOT have system context - plugin provides its own
@@ -139,9 +131,9 @@ class TestFixCIWorkflowJobEvent:
 
     def test_workflow_job_event_routing(self):
         """Test that workflow_job.completed routes to fix-ci."""
-        workflow_path = Path(__file__).parent.parent.parent / "workflows.yaml"
+        workflow_path = Path(__file__).parent.parent.parent / "workflows.example.yaml"
         if not workflow_path.exists():
-            pytest.skip("workflows.yaml not found")
+            pytest.skip("workflows.example.yaml not found")
 
         engine = WorkflowEngine(workflow_path)
 
@@ -154,9 +146,9 @@ class TestFixCIWorkflowJobEvent:
 
     def test_workflow_job_without_action(self):
         """Test that workflow_job without action doesn't trigger."""
-        workflow_path = Path(__file__).parent.parent.parent / "workflows.yaml"
+        workflow_path = Path(__file__).parent.parent.parent / "workflows.example.yaml"
         if not workflow_path.exists():
-            pytest.skip("workflows.yaml not found")
+            pytest.skip("workflows.example.yaml not found")
 
         engine = WorkflowEngine(workflow_path)
 
@@ -173,10 +165,10 @@ class TestFixCIPromptGeneration:
 
     @pytest.fixture
     def engine(self):
-        """Create WorkflowEngine with real workflows.yaml."""
-        workflow_path = Path(__file__).parent.parent.parent / "workflows.yaml"
+        """Create WorkflowEngine with real workflows.example.yaml."""
+        workflow_path = Path(__file__).parent.parent.parent / "workflows.example.yaml"
         if not workflow_path.exists():
-            pytest.skip("workflows.yaml not found")
+            pytest.skip("workflows.example.yaml not found")
         return WorkflowEngine(workflow_path)
 
     def test_fix_ci_prompt_with_run_id(self, engine):
@@ -187,7 +179,7 @@ class TestFixCIPromptGeneration:
             issue_number=67890,  # This would be the run_id
         )
 
-        assert "/ci-failure-toolkit:fix-ci" in prompt
+        assert "/oh-my-claudecode:autopilot" in prompt
         assert "owner/repo" in prompt
         assert "67890" in prompt
         # Plugin provides its own context
@@ -201,7 +193,7 @@ class TestFixCIPromptGeneration:
             issue_number=123,  # This would be the PR number
         )
 
-        assert "/ci-failure-toolkit:fix-ci" in prompt
+        assert "/oh-my-claudecode:autopilot" in prompt
         assert "owner/repo" in prompt
         # Plugin provides its own context
         assert system_context is None
@@ -218,7 +210,7 @@ class TestFixCIPromptGeneration:
         # The prompt should NOT include content from prompts/fix-ci.md
         # The plugin provides its own context
         assert len(prompt) > 0
-        assert "/ci-failure-toolkit:fix-ci" in prompt
+        assert "/oh-my-claudecode:autopilot" in prompt
         assert system_context is None
 
 
@@ -227,9 +219,9 @@ class TestFixCIWorkflowValidation:
 
     def test_fix_ci_triggers_configuration(self):
         """Test that fix-ci has proper triggers configured."""
-        workflow_path = Path(__file__).parent.parent.parent / "workflows.yaml"
+        workflow_path = Path(__file__).parent.parent.parent / "workflows.example.yaml"
         if not workflow_path.exists():
-            pytest.skip("workflows.yaml not found")
+            pytest.skip("workflows.example.yaml not found")
 
         with open(workflow_path, encoding="utf-8") as f:
             workflows_data = yaml.safe_load(f)
@@ -260,9 +252,9 @@ class TestFixCIWorkflowValidation:
 
     def test_fix_ci_prompt_configuration(self):
         """Test that fix-ci prompt is properly configured."""
-        workflow_path = Path(__file__).parent.parent.parent / "workflows.yaml"
+        workflow_path = Path(__file__).parent.parent.parent / "workflows.example.yaml"
         if not workflow_path.exists():
-            pytest.skip("workflows.yaml not found")
+            pytest.skip("workflows.example.yaml not found")
 
         with open(workflow_path, encoding="utf-8") as f:
             workflows_data = yaml.safe_load(f)
@@ -272,7 +264,7 @@ class TestFixCIWorkflowValidation:
 
         # Should have template
         assert "template" in prompt
-        assert "/ci-failure-toolkit:fix-ci" in prompt["template"]
+        assert "/oh-my-claudecode:autopilot" in prompt["template"]
 
         # Should NOT have system_context - plugin provides its own
         assert "system_context" not in prompt or prompt.get("system_context") is None

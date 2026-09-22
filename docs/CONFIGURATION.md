@@ -52,7 +52,6 @@ ANTHROPIC_VERTEX_REGION=us-central1
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MAX_TURNS` | `50` | Maximum Claude SDK turns per session (1–200) |
 | `SDK_EXECUTION_TIMEOUT` | `1800` | SDK execution timeout in seconds. The `WorkerConfig` model also exposes this as `sdk_timeout` (env var `SDK_TIMEOUT`), but `sdk_executor.py` reads `SDK_EXECUTION_TIMEOUT` directly |
 | `SDK_MAX_RETRIES` | `3` | Retry attempts on transient SDK errors |
 | `SDK_RETRY_BASE_DELAY` | `5.0` | Base delay (seconds) for exponential backoff |
@@ -99,21 +98,6 @@ ANTHROPIC_VERTEX_REGION=us-central1
 
 > **Security**: The `.env.example` file and `docker-compose.yml` use default passwords (`changeme`, `clickhouse`, `miniosecret`) for MinIO, ClickHouse, and Langfuse services. **These must be changed for production deployments.**
 
-## Semantic Code Search
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `INDEXING_ENABLED` | `false` | Enable the indexing worker. Note: `docker-compose.yml` may override this to `true` for the indexing_worker service |
-| `GEMINI_API_KEY` | — | Required for Gemini embeddings |
-| `SURREALDB_URL` | `ws://localhost:8000/rpc` | SurrealDB WebSocket URL |
-| `SURREALDB_USER` | `root` | SurrealDB username |
-| `SURREALDB_PASS` | `root` | SurrealDB password |
-| `SURREALDB_NS` | `bot` | SurrealDB namespace |
-| `SURREALDB_DB` | `codebase` | SurrealDB database name |
-| `EMBEDDING_MODEL` | `gemini-embedding-001` | Gemini embedding model |
-| `EMBEDDING_DIMENSION` | `1024` | Output vector dimensionality |
-| `EMBEDDING_BATCH_SIZE` | `20` | Texts per embedding API call |
-
 ## Host Integration
 
 | Variable | Default | Description |
@@ -122,16 +106,46 @@ ANTHROPIC_VERTEX_REGION=us-central1
 | `WORKER_SESSION_PERSIST` | `true` | Persist conversation state so users can continue multi-turn sessions |
 | `SESSION_PROXY_URL` | `http://localhost:10001` | URL for the session proxy WebSocket service. Used by worker and sandbox services to generate live-view links |
 
+### Docker Networking
+
+Containers cannot reach host `localhost` — use `host.docker.internal` instead. This applies to any service running on your host that the containers need to access (Ollama, oc-go-cc, OpenCode, etc.):
+
+| Variable | Correct (container → host) | Wrong (container → itself) |
+|----------|---------------------------|---------------------------|
+| `ANTHROPIC_BASE_URL` | `http://host.docker.internal:3456` | `http://localhost:3456` |
+| Any MCP server URL | `http://host.docker.internal:PORT` | `http://localhost:PORT` |
+
+**Alternative**: Set `SOCAT_API_FORWARD=3456` in `.env` to add automatic socat forwarding (`localhost:3456` → `host.docker.internal:3456`) without changing your `settings.json` URL. This works for all three workers (sandbox, memory, retrospector).
+
 When `ALLOW_HOST_MCP=true`, the SDK builder reads MCP server names from your host `~/.claude.json` and adds their tool patterns (`mcp__{name}__*`) to the agent's allowed tool list. This grants **tool permissions only** — it does not bridge those servers through the MCP proxy. For host MCP servers to actually work inside Docker, they must be independently reachable from the container. HTTP-based servers work if they're accessible via `host.docker.internal`, but stdio-based host servers will not work unless separately proxied.
 
 The `~/.claude/` directory is bind-mounted read-write, so plugins and skills installed on the host via Claude Code CLI are also discovered automatically. On first run, built-in plugins and skills are seeded into `~/.claude/` (without overwriting existing files).
 
 ## Post-session Workers
 
+Both post-session workers are **off by default**: each runs an additional Claude
+session after every job. Turn them on explicitly when you want that cost.
+
+They are configured by a replica count rather than a boolean, so one number is
+both the switch and the scale. `docker compose` reads it as the service's
+`scale:`, and at `0` no container is created at all: nothing to idle, nothing to
+restart. `1` runs one, `2` runs two. `make up MEMORY=2` overrides the count for a
+run without editing `.env`.
+
+The same number gates the `Stop` hooks in `sandbox_worker`, so a worker with no
+container also has no jobs queued for it. Running a worker module directly with
+its count at `0` is the one case where a process exists anyway; it logs that it
+is off and idles rather than consuming queued jobs.
+
+Tier aliases resolve through the matching `ANTHROPIC_DEFAULT_*_MODEL` variable, so
+model ids stay in one place.
+
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MEMORY_WORKER_ENABLED` | `true` | Extract and persist knowledge from session transcripts |
-| `RETROSPECTOR_ENABLED` | `true` | Analyze sessions and propose instruction improvements |
+| `MEMORY_WORKER_REPLICAS` | `0` | `memory_worker` instances: extract and persist knowledge from session transcripts. `0` creates no container |
+| `MEMORY_WORKER_MODEL` | `haiku` | Model tier for memory extraction: `opus`, `sonnet`, or `haiku` |
+| `RETROSPECTOR_REPLICAS` | `0` | `retrospector_worker` instances: analyze sessions and propose instruction improvements. `0` creates no container |
+| `RETROSPECTOR_MODEL` | `sonnet` | Model tier for retrospection: `opus`, `sonnet`, or `haiku` |
 | `REPO_SYNC_LOCK_TIMEOUT` | `300` | Lock timeout for repo sync operations (seconds) |
 | `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | `1` | Disable non-essential Claude Code SDK network traffic (telemetry, updates). Used by sandbox_worker, memory_worker, and retrospector_worker |
 

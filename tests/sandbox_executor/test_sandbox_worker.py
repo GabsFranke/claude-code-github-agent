@@ -29,18 +29,99 @@ class TestSignalHandling:
 
     def test_sandbox_worker_uses_shared_signal_handling(self):
         """Test sandbox worker uses shared signal handling from shared.signals."""
-        # This test verifies that the sandbox_worker module imports and uses
-        # the shared setup_graceful_shutdown function instead of
-        # implementing its own signal handlers.
         from services.sandbox_executor import sandbox_worker
 
-        # Verify shutdown_event exists (used by shared signal handler)
         assert hasattr(sandbox_worker, "shutdown_event")
         assert isinstance(sandbox_worker.shutdown_event, asyncio.Event)
 
 
 class TestProcessJob:
     """Test process_job function."""
+
+    @staticmethod
+    def _create_patches(execute_sdk_config):
+        """Create all patches needed for process_job tests.
+
+        Returns (patches_flat, engine_patch) — call start() on each item
+        in patches_flat, stop() in reverse after test completes.
+        """
+        mkdtemp_patch = patch(
+            "services.sandbox_executor.processor.tempfile.mkdtemp",
+            return_value="/tmp/test_workspace",
+        )
+        engine_patch = patch(
+            "services.sandbox_executor.processor.RepoSetupEngine",
+        )
+
+        # conftest sets GITHUB_INSTALLATION_ID, so _setup_worktree would
+        # otherwise build a real GitHubAuthService and call api.github.com.
+        mock_auth = MagicMock()
+        mock_auth.get_token = AsyncMock(return_value="test_token")
+        mock_auth.__aenter__ = AsyncMock(return_value=mock_auth)
+        mock_auth.__aexit__ = AsyncMock(return_value=False)
+
+        patches_flat = [
+            # --- core behaviour ---
+            patch.dict(os.environ, _SAFE_ENV_OVERRIDES),
+            patch(
+                "services.sandbox_executor.processor.wait_for_repo_sync",
+                new_callable=AsyncMock,
+                return_value="/var/cache/repos/owner/repo.git",
+            ),
+            patch(
+                "services.sandbox_executor.processor.execute_git_command",
+                new_callable=AsyncMock,
+                return_value=(0, "", ""),
+            ),
+            patch(
+                "services.sandbox_executor.git_setup.execute_git_command",
+                new_callable=AsyncMock,
+                return_value=(0, "", ""),
+            ),
+            patch(
+                "services.sandbox_executor.processor.execute_sdk",
+                new_callable=AsyncMock,
+                **execute_sdk_config,
+            ),
+            mkdtemp_patch,
+            patch(
+                "services.sandbox_executor.processor.configure_git",
+                new_callable=AsyncMock,
+            ),
+            # --- filesystem / cleanup ---
+            # "processor.os" resolves to the global os module, so every patch
+            # here replaces the attribute process-wide for the duration of the
+            # test. Only patch what processor.py actually calls. os.close in
+            # particular must stay real: on POSIX, subprocess.Popen closes the
+            # parent end of its error pipe with os.close, and a mocked close
+            # leaves the parent blocked forever in os.read() waiting for an EOF
+            # that can never arrive. That deadlocked the whole CI test run.
+            patch("services.sandbox_executor.processor.os.rmdir"),
+            patch("services.sandbox_executor.processor.os.remove"),
+            patch(
+                "services.sandbox_executor.processor.os.path.exists",
+                return_value=False,
+            ),
+            # _prepare_context shells out to `codegraph init`; a unit test must
+            # not spawn a real process.
+            patch("services.sandbox_executor.processor.subprocess.run"),
+            # --- no real GitHub traffic ---
+            patch("shared.github_auth.GitHubAuthService", return_value=mock_auth),
+            patch(
+                "shared.thread_history.fetch_and_format_thread_history",
+                new_callable=AsyncMock,
+                return_value="",
+            ),
+            engine_patch,
+            patch("shared.mcp_json_writer.write_mcp_json"),
+            patch(
+                "services.sandbox_executor.processor.generate_structural_context",
+                new_callable=AsyncMock,
+                return_value="",
+            ),
+        ]
+
+        return patches_flat, engine_patch
 
     @pytest.mark.asyncio
     async def test_successful_job_processing(self):
@@ -51,7 +132,7 @@ class TestProcessJob:
         mock_queue.complete_job = AsyncMock()
         mock_queue.redis = AsyncMock()
 
-        job_id = "550e8400-e29b-41d4-a716-446655440000"  # Valid UUID
+        job_id = "550e8400-e29b-41d4-a716-446655440000"
         job_data = {
             "prompt": "Test prompt",
             "github_token": "test_token",
@@ -60,75 +141,37 @@ class TestProcessJob:
             "user": "testuser",
         }
 
-        with (
-            patch.dict(os.environ, _SAFE_ENV_OVERRIDES),
-            patch(
-                "services.sandbox_executor.processor.wait_for_repo_sync",
-                new_callable=AsyncMock,
-                return_value="/var/cache/repos/owner/repo.git",
-            ),
-            patch(
-                "services.sandbox_executor.processor.execute_git_command",
-                new_callable=AsyncMock,
-                return_value=(0, "", ""),
-            ),
-            patch(
-                "services.sandbox_executor.processor.execute_sdk",
-                new_callable=AsyncMock,
-                return_value={
+        patches_flat, engine_patch = self._create_patches(
+            execute_sdk_config={
+                "return_value": {
                     "response": "Test response",
                     "num_turns": 1,
                     "duration_ms": 1000,
                     "is_error": False,
                     "messages": [],
                 },
-            ),
-            patch(
-                "services.sandbox_executor.processor.tempfile.mkdtemp"
-            ) as mock_mkdtemp,
-            patch("services.sandbox_executor.processor.os.rmdir"),
-            patch("services.sandbox_executor.processor.os.chdir", create=True),
-            patch(
-                "services.sandbox_executor.processor.os.getcwd",
-                return_value="/original",
-                create=True,
-            ),
-            patch("services.sandbox_executor.processor.os.makedirs", create=True),
-            patch("services.sandbox_executor.processor.os.open"),
-            patch("services.sandbox_executor.processor.os.write"),
-            patch("services.sandbox_executor.processor.os.close"),
-            patch("services.sandbox_executor.processor.os.remove"),
-            patch(
-                "services.sandbox_executor.processor.os.path.exists",
-                return_value=False,
-            ),
-            patch(
-                "services.sandbox_executor.processor.RepoSetupEngine"
-            ) as mock_engine_class,
-            patch("shared.mcp_json_writer.write_mcp_json"),
-            patch(
-                "services.sandbox_executor.processor.generate_structural_context",
-                new_callable=AsyncMock,
-                return_value="",
-            ),
-        ):
-            # Mock workspace path
-            mock_mkdtemp.return_value = "/tmp/test_workspace"
+            }
+        )
 
-            # Mock repo setup engine
+        # Start patches manually to avoid 20-block nesting limit
+        for p in patches_flat:
+            p.start()
+        try:
             mock_engine = MagicMock()
             mock_engine.get_setup_config.return_value = None
-            mock_engine_class.return_value = mock_engine
+            engine_patch.return_value = mock_engine
 
             await process_job(mock_queue, job_id, job_data)
 
-            # Verify job was marked as complete
             mock_queue.complete_job.assert_called_once()
             call_args = mock_queue.complete_job.call_args
             assert call_args[0][0] == job_id
             assert call_args[0][1]["status"] == "success"
             assert call_args[0][1]["response"] == "Test response"
             assert call_args[1]["status"] == "success"
+        finally:
+            for p in reversed(patches_flat):
+                p.stop()
 
     @pytest.mark.asyncio
     async def test_failed_job_processing(self):
@@ -139,7 +182,7 @@ class TestProcessJob:
         mock_queue.complete_job = AsyncMock()
         mock_queue.redis = AsyncMock()
 
-        job_id = "550e8400-e29b-41d4-a716-446655440001"  # Valid UUID
+        job_id = "550e8400-e29b-41d4-a716-446655440001"
         job_data = {
             "prompt": "Test",
             "github_token": "token",
@@ -148,69 +191,30 @@ class TestProcessJob:
             "user": "user",
         }
 
-        with (
-            patch.dict(os.environ, _SAFE_ENV_OVERRIDES),
-            patch(
-                "services.sandbox_executor.processor.wait_for_repo_sync",
-                new_callable=AsyncMock,
-                return_value="/var/cache/repos/owner/repo.git",
-            ),
-            patch(
-                "services.sandbox_executor.processor.execute_git_command",
-                new_callable=AsyncMock,
-                return_value=(0, "", ""),
-            ),
-            patch(
-                "services.sandbox_executor.processor.execute_sdk",
-                new_callable=AsyncMock,
-                side_effect=Exception("Execution failed"),
-            ),
-            patch(
-                "services.sandbox_executor.processor.tempfile.mkdtemp"
-            ) as mock_mkdtemp,
-            patch("services.sandbox_executor.processor.os.rmdir"),
-            patch("services.sandbox_executor.processor.os.chdir", create=True),
-            patch(
-                "services.sandbox_executor.processor.os.getcwd",
-                return_value="/original",
-                create=True,
-            ),
-            patch("services.sandbox_executor.processor.os.makedirs", create=True),
-            patch("services.sandbox_executor.processor.os.open"),
-            patch("services.sandbox_executor.processor.os.write"),
-            patch("services.sandbox_executor.processor.os.close"),
-            patch("services.sandbox_executor.processor.os.remove"),
-            patch(
-                "services.sandbox_executor.processor.os.path.exists",
-                return_value=False,
-            ),
-            patch(
-                "services.sandbox_executor.processor.RepoSetupEngine"
-            ) as mock_engine_class,
-            patch("shared.mcp_json_writer.write_mcp_json"),
-            patch(
-                "services.sandbox_executor.processor.generate_structural_context",
-                new_callable=AsyncMock,
-                return_value="",
-            ),
-        ):
-            # Mock workspace path
-            mock_mkdtemp.return_value = "/tmp/test_workspace"
+        patches_flat, engine_patch = self._create_patches(
+            execute_sdk_config={
+                "side_effect": Exception("Execution failed"),
+            }
+        )
 
-            # Mock repo setup engine
+        for p in patches_flat:
+            p.start()
+        try:
             mock_engine = MagicMock()
             mock_engine.get_setup_config.return_value = None
-            mock_engine_class.return_value = mock_engine
+            engine_patch.return_value = mock_engine
 
             await process_job(mock_queue, job_id, job_data)
 
-            # Verify job was marked as failed
             mock_queue.complete_job.assert_called_once()
             call_args = mock_queue.complete_job.call_args
             assert call_args[0][0] == job_id
             assert call_args[0][1]["status"] == "error"
             assert "Execution failed" in call_args[0][1]["error"]
             assert call_args[1]["status"] == "error"
+        finally:
+            for p in reversed(patches_flat):
+                p.stop()
 
 
 class TestMainLoop:
@@ -222,8 +226,6 @@ class TestMainLoop:
         from services.sandbox_executor.sandbox_worker import main, shutdown_event
 
         mock_queue = AsyncMock()
-
-        # First call returns a job, second call triggers shutdown
         call_count = 0
 
         async def get_next_job_side_effect(timeout=5):
@@ -266,12 +268,9 @@ class TestMainLoop:
             ) as mock_process,
         ):
             await main()
-
-            # Verify job was processed
             mock_process.assert_called_once()
             mock_queue.close.assert_called_once()
 
-        # Reset shutdown event
         shutdown_event.clear()
 
     @pytest.mark.asyncio
@@ -280,8 +279,6 @@ class TestMainLoop:
         from services.sandbox_executor.sandbox_worker import main, shutdown_event
 
         mock_queue = AsyncMock()
-
-        # First call raises error, second call triggers shutdown
         call_count = 0
 
         async def get_next_job_side_effect(timeout=5):
@@ -315,11 +312,8 @@ class TestMainLoop:
             ),
         ):
             await main()
-
-            # Verify cleanup happened
             mock_queue.close.assert_called_once()
 
-        # Reset shutdown event
         shutdown_event.clear()
 
     @pytest.mark.asyncio
@@ -331,7 +325,6 @@ class TestMainLoop:
         mock_queue.get_next_job = AsyncMock(return_value=None)
         mock_queue.close = AsyncMock()
 
-        # Set shutdown immediately
         shutdown_event.set()
 
         with (
@@ -349,9 +342,6 @@ class TestMainLoop:
             ),
         ):
             await main()
-
-            # Verify cleanup happened
             mock_queue.close.assert_called_once()
 
-        # Reset shutdown event
         shutdown_event.clear()

@@ -9,7 +9,6 @@ _NOISY_LOGGERS = (
     "urllib3",
     "google_genai",
     "google.auth",
-    "surrealdb",
     "redis",
     "asyncio",
     "filelock",

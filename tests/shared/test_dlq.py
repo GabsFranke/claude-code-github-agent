@@ -39,6 +39,36 @@ class TestIsTransientError:
     def test_empty_message_not_transient(self):
         assert is_transient_error(Exception("")) is False
 
+    def test_chain_walks_cause_for_transient_marker(self):
+        """Exception chain: SDKError wraps a connection reset should be transient."""
+        inner = ConnectionError("Connection reset")
+        outer = Exception("SDK execution failed")
+        outer.__cause__ = inner
+        assert is_transient_error(outer) is True
+
+    def test_chain_without_transient_returns_false(self):
+        """Exception chain with no transient markers anywhere returns False."""
+        inner = ValueError("bad input")
+        outer = Exception("wrapped error")
+        outer.__cause__ = inner
+        assert is_transient_error(outer) is False
+
+    def test_chain_respects_max_depth(self):
+        """Chain deeper than max_depth returns False even if transient exists deeper."""
+        # Build a chain where the transient marker is at depth 3
+        transient = ConnectionError("timeout")
+        mid1 = Exception("a")
+        mid2 = Exception("b")
+        outer = Exception("c")
+        transient.__cause__ = None
+        mid1.__cause__ = transient
+        mid2.__cause__ = mid1
+        outer.__cause__ = mid2
+        # At max_depth=2, it should NOT find the marker (at depth 3)
+        assert is_transient_error(outer, max_depth=2) is False
+        # At max_depth=5, it SHOULD find the marker
+        assert is_transient_error(outer, max_depth=5) is True
+
 
 class TestEnqueueForRetry:
     @pytest.mark.asyncio

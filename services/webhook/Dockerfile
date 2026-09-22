@@ -7,7 +7,11 @@ COPY shared/ ./shared/
 
 # Copy workflows module
 COPY workflows/ ./workflows/
-COPY workflows.yaml ./workflows.yaml
+# The glob matches the tracked workflows.example.yaml plus the operator's
+# workflows.yaml when it exists. workflows.yaml is gitignored, so the
+# fallback is what keeps this image buildable from a clean clone.
+COPY workflows*.yaml ./
+RUN [ -f workflows.yaml ] || cp workflows.example.yaml workflows.yaml
 COPY prompts/ ./prompts/
 
 # Copy webhook service

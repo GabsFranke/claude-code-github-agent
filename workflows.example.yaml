@@ -1,0 +1,184 @@
+# Workflow definitions for GitHub Agent using Oh My Claude Code (OMC)
+# Each workflow defines:
+# - triggers: What GitHub events or user commands trigger it
+# - prompt: How to build the prompt for Claude Agent SDK
+# - description: Human-readable description
+# - skip_self: Whether to skip events triggered by the bot itself (optional, default: true)
+# - model: Model tier for the main agent loop: opus | sonnet | haiku (optional).
+#   Aliases resolve through ANTHROPIC_DEFAULT_*_MODEL; unset leaves it to the CLI.
+#   Users can override per request with `--model <tier>` in a slash command,
+#   e.g. `/review --model opus` or `/agent --model=haiku --new ...`.
+# - conversation: Persistence settings for multi-turn conversations (optional)
+
+workflows:
+  # Upgraded Triage Workflow: The Central Orchestrator
+  triage-issue:
+    triggers:
+      events:
+        - event: issues.opened
+        - event: pull_request.opened
+        - event: issues.labeled
+          filters:
+            label.name: "triage"
+        - event: pull_request.labeled
+          filters:
+            label.name: "triage"
+      commands:
+        - /triage
+        - /triage-issue
+    prompt:
+      template: "Triage issue #{issue_number} in {repo}"
+      system_context: "triage.md"
+    description: "Central triage orchestrator for issues and pull requests"
+    context:
+      thread_history:
+        max_comments: 50
+    conversation:
+      persist: true
+      auto_continue: true
+    streaming:
+      enabled: true
+    skip_self: true
+
+  # OMC-native version of review-pr
+  review-pr:
+    triggers:
+      events:
+        - event: pull_request.opened
+        - event: pull_request.labeled
+          filters:
+            label.name: ["review", "pr-review", "review-pr", "omc-review"]
+      commands:
+        - /review
+        - /pr-review
+        - /review-pr
+        - /omc-review
+    prompt:
+      template: "/oh-my-claudecode:team 3:executor Conduct a highly thorough, multi-agent code review of PR #{issue_number} in {repo}. Focus on code quality, security, and performance, and post your review summary and line-by-line comments directly on GitHub."
+    description: "OMC-powered comprehensive multi-agent PR review"
+    model: opus
+    conversation:
+      persist: true
+    streaming:
+      enabled: true
+    skip_self: false
+
+  # OMC-native version of fix-ci
+  fix-ci:
+    triggers:
+      events:
+        - event: workflow_job.completed
+          filters:
+            workflow_job.conclusion: "failure"
+      commands:
+        - /fix-ci
+        - /fix-build
+        - /fix-tests
+        - /omc-fix-ci
+    prompt:
+      template: "/oh-my-claudecode:autopilot Analyze the CI/CD test failure for job #{issue_number} in {repo}. Fetch the logs, diagnose the root cause, fix the files using specialized agents, verify the fix locally, and commit/push the solution."
+    description: "OMC-powered autonomous fix for CI/CD test failures"
+    conversation:
+      persist: true
+    streaming:
+      enabled: true
+    skip_self: false
+
+  # OMC Orchestration Mode: Autopilot
+  omc-autopilot:
+    triggers:
+      events:
+        - event: issues.labeled
+          filters:
+            label.name: "autopilot"
+      commands:
+        - /autopilot
+    prompt:
+      template: "/oh-my-claudecode:autopilot {user_query}"
+    description: "Launch OMC Autopilot to autonomously build a feature or fix a bug in an isolated worktree"
+    conversation:
+      persist: true
+    streaming:
+      enabled: true
+    skip_self: false
+
+  # OMC Orchestration Mode: Team Swarm
+  omc-team:
+    triggers:
+      events:
+        - event: pull_request.labeled
+          filters:
+            label.name: "team-swarm"
+      commands:
+        - /team
+    prompt:
+      template: "/oh-my-claudecode:team 3:executor {user_query}"
+    description: "Orchestrate a team of specialized agents to plan, implement, and verify complex requests"
+    conversation:
+      persist: true
+    streaming:
+      enabled: true
+    skip_self: false
+
+  # OMC Orchestration Mode: Ralph
+  omc-ralph:
+    triggers:
+      commands:
+        - /ralph
+    prompt:
+      template: "/oh-my-claudecode:ralph {user_query}"
+    description: "Launch Ralph mode linking Swarm planning and Autopilot execution"
+    conversation:
+      persist: true
+    streaming:
+      enabled: true
+    skip_self: false
+
+  # OMC Orchestration Mode: Ultrawork
+  omc-ultrawork:
+    triggers:
+      commands:
+        - /get-work
+        - /ultrawork
+    prompt:
+      template: "/oh-my-claudecode:ultrawork {user_query}"
+    description: "Continuous focused codebase execution loops"
+    conversation:
+      persist: true
+    streaming:
+      enabled: true
+    skip_self: false
+
+  # Generic prompt execution fallback
+  generic:
+    triggers:
+      commands:
+        - /agent
+    prompt:
+      template: "{user_query}"
+      system_context: "generic.md"
+    description: "Generic agent request"
+    conversation:
+      persist: true
+      auto_continue: true
+    streaming:
+      enabled: true
+    skip_self: false
+
+  # Nightly code health and technical debt scanner
+  nightly-health:
+    triggers:
+      schedule:
+        cron: "0 2 * * *"          # Every day at 2:00 AM
+        timezone: "UTC"
+        repos: []                   # No repos = schedule is disabled. Use ["*"] for all, or ["owner/repo"]
+        enabled: true              # Disabled by default
+    prompt:
+      template: "Conduct a nightly code health scan, dependency check, and technical debt assessment for {repo}."
+      system_context: "nightly-health.md"
+    description: "Nightly health audit and tech debt monitoring"
+    conversation:
+      persist: true
+    streaming:
+      enabled: true
+    skip_self: true

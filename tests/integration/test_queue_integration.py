@@ -5,6 +5,7 @@ import asyncio
 import pytest
 
 from shared.queue import RedisQueue
+from tests.conftest import TEST_REDIS_PASSWORD, TEST_REDIS_URL
 
 
 @pytest.mark.integration
@@ -16,9 +17,9 @@ class TestQueueIntegration:
     async def test_publish_and_subscribe(self, redis_client):
         """Test publishing and subscribing with real Redis."""
         queue = RedisQueue(
-            redis_url="redis://localhost:6379",
+            redis_url=TEST_REDIS_URL,
             queue_name="test_integration",
-            password="S5e_V7kdhPOI9DNJfBvYodxJgeQCG8Xup2mG3rBPwDU",
+            password=TEST_REDIS_PASSWORD,
         )
 
         # Publish a message
@@ -55,9 +56,9 @@ class TestQueueIntegration:
     async def test_multiple_messages(self, redis_client):
         """Test handling multiple messages."""
         queue = RedisQueue(
-            redis_url="redis://localhost:6379",
+            redis_url=TEST_REDIS_URL,
             queue_name="test_multi",
-            password="S5e_V7kdhPOI9DNJfBvYodxJgeQCG8Xup2mG3rBPwDU",
+            password=TEST_REDIS_PASSWORD,
         )
 
         # Publish multiple messages

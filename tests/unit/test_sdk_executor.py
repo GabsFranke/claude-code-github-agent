@@ -318,3 +318,38 @@ class TestExecuteSDKRetry:
                 )
 
             mock_execute.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_message_parse_error_re_raised_as_transient(self, mock_options):
+        """MessageParseError from SDK streaming interrupted → transient-classified."""
+        MockMessageParseError = type("MockMessageParseError", (Exception,), {})
+        MockMessageParseError.__qualname__ = "MessageParseError"
+
+        with patch("shared.sdk_executor.ClaudeSDKClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
+            mock_client.query = AsyncMock()
+
+            # Return a fresh broken generator each call (retries create new clients)
+            def broken_messages_factory():
+                async def gen():
+                    raise MockMessageParseError(
+                        "Missing required field in assistant message: 'signature'"
+                    )
+                    yield
+
+                return gen()
+
+            mock_client.receive_messages = broken_messages_factory
+            mock_client_class.return_value = mock_client
+
+            # The error should be re-raised with "streaming connection" in message
+            # which triggers is_transient_error → retry. After max_retries=2,
+            # the last error propagates out.
+            with pytest.raises(SDKError, match="streaming connection interrupted"):
+                await execute_sdk(
+                    prompt="test",
+                    options=mock_options,
+                    max_retries=2,
+                )

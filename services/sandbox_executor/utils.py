@@ -89,6 +89,7 @@ def configure_builder(
         .with_agents(AGENTS)
         .with_langfuse_hooks(parent_span_id=parent_span_id)
         .with_transcript_staging(repo, workflow_name, ref=ref)
+        .with_incremental_transcript()
         .with_writable_dir(str(Path.home() / ".claude" / "memory" / repo / "memory"))
         .with_system_prompt(system_context)
         .with_repository_context(claude_md=claude_md, memory_index=memory_index)

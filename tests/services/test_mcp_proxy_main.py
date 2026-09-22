@@ -51,7 +51,7 @@ class TestBuildSubprocessEnv:
             {"PATH": "/usr/bin", "HOME": "/home/user", "LANG": "en_US.UTF-8"},
             clear=True,
         ):
-            env = _build_subprocess_env()
+            env = _build_subprocess_env("memory")
         assert env.get("PATH") == "/usr/bin"
         assert env.get("HOME") == "/home/user"
         assert env.get("LANG") == "en_US.UTF-8"
@@ -68,7 +68,7 @@ class TestBuildSubprocessEnv:
             },
             clear=True,
         ):
-            env = _build_subprocess_env()
+            env = _build_subprocess_env("memory")
         assert "ANTHROPIC_API_KEY" not in env
         assert "REDIS_PASSWORD" not in env
         assert "PATH" in env
@@ -85,7 +85,7 @@ class TestBuildSubprocessEnv:
             },
             clear=True,
         ):
-            env = _build_subprocess_env()
+            env = _build_subprocess_env("memory")
         assert env.get("REPO_URL") == "https://github.com/owner/repo"
         assert env.get("GITHUB_TOKEN") == "ghs_test"
         assert env.get("MCP_CONFIG") == "test"
@@ -101,6 +101,39 @@ class TestBuildSubprocessEnv:
             },
             clear=True,
         ):
-            env = _build_subprocess_env()
+            env = _build_subprocess_env("memory")
         assert "RANDOM_VAR" not in env
         assert "AWS_SECRET_KEY" not in env
+
+
+class TestPerServerSecrets:
+    """A secret must reach only the MCP server declared to need it.
+
+    SCHEDULER_INTERNAL_TOKEN authenticates the scheduler's one-shot endpoint.
+    Injecting it into every spawned server is unnecessary blast radius on a
+    credential whose whole purpose is to bound who can enqueue agent jobs.
+    """
+
+    def test_scheduler_receives_its_token(self):
+        with patch.dict(os.environ, {"SCHEDULER_INTERNAL_TOKEN": "s3cret"}, clear=True):
+            env = _build_subprocess_env("scheduler")
+
+        assert env.get("SCHEDULER_INTERNAL_TOKEN") == "s3cret"
+
+    def test_other_servers_do_not(self):
+        with patch.dict(os.environ, {"SCHEDULER_INTERNAL_TOKEN": "s3cret"}, clear=True):
+            for server in ("memory", "github_actions", "unknown"):
+                env = _build_subprocess_env(server)
+                assert "SCHEDULER_INTERNAL_TOKEN" not in env, server
+
+    def test_token_is_not_overridable_by_an_allowed_prefix(self):
+        """The name must not fall under a prefix a query param can set.
+
+        Query parameters matching an allowed prefix are injected into the
+        subprocess env, so a secret named e.g. MCP_* could be substituted by
+        the caller.
+        """
+        from services.mcp_proxy.main import _get_allowed_env_prefixes
+
+        for prefix in _get_allowed_env_prefixes():
+            assert not "SCHEDULER_INTERNAL_TOKEN".startswith(prefix)

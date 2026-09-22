@@ -109,13 +109,14 @@ class TestSetupClaudeSettings:
     @patch.dict(
         os.environ,
         {
+            "LANGFUSE_ENABLED": "true",
             "LANGFUSE_PUBLIC_KEY": "pk_test",
             "LANGFUSE_SECRET_KEY": "sk_test",
             "LANGFUSE_HOST": "http://localhost:3000",
         },
     )
     def test_includes_langfuse_config(self, mock_file, mock_exists, mock_home):
-        """Test that Langfuse config is included when keys present."""
+        """Test that Langfuse config is included when enabled and keys present."""
         mock_home.return_value = Path("/tmp/test_home")
         mock_exists.return_value = False
 
@@ -136,7 +137,37 @@ class TestSetupClaudeSettings:
     @patch("services.agent_worker.config.claude_settings.Path.home")
     @patch("pathlib.Path.exists")
     @patch("builtins.open", new_callable=mock_open)
-    @patch.dict(os.environ, {"LANGFUSE_PUBLIC_KEY": "pk_test"}, clear=True)
+    @patch.dict(
+        os.environ,
+        {
+            "LANGFUSE_ENABLED": "false",
+            "LANGFUSE_PUBLIC_KEY": "pk_test",
+            "LANGFUSE_SECRET_KEY": "sk_test",
+            "LANGFUSE_HOST": "http://localhost:3000",
+        },
+    )
+    def test_no_langfuse_when_disabled(self, mock_file, mock_exists, mock_home):
+        """Test that Langfuse config is not included when LANGFUSE_ENABLED=false."""
+        mock_home.return_value = Path("/tmp/test_home")
+        mock_exists.return_value = False
+
+        setup_claude_settings()
+
+        handle = mock_file()
+        written_data = "".join(call.args[0] for call in handle.write.call_args_list)
+        settings = json.loads(written_data)
+
+        if "env" in settings:
+            assert "TRACE_TO_LANGFUSE" not in settings["env"]
+
+    @patch("services.agent_worker.config.claude_settings.Path.home")
+    @patch("pathlib.Path.exists")
+    @patch("builtins.open", new_callable=mock_open)
+    @patch.dict(
+        os.environ,
+        {"LANGFUSE_ENABLED": "true", "LANGFUSE_PUBLIC_KEY": "pk_test"},
+        clear=True,
+    )
     def test_no_langfuse_without_both_keys(self, mock_file, mock_exists, mock_home):
         """Test that Langfuse config is not included without both keys."""
         mock_home.return_value = Path("/tmp/test_home")

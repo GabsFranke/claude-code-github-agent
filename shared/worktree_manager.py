@@ -67,8 +67,13 @@ async def reuse_or_create_worktree(
     """
     if worktree_path.exists() and session_mode in ("resume", "continue"):
         logger.info(f"Reusing existing worktree at {worktree_path}")
-        await _fetch_and_checkout(worktree_path, ref)
-        return
+        try:
+            await _fetch_and_checkout(worktree_path, ref)
+            return
+        except Exception as e:
+            logger.warning(
+                f"Failed to reuse worktree at {worktree_path}: {e}. " f"Recreating..."
+            )
 
     # Remove stale worktree if it exists (from a previous failed run)
     if worktree_path.exists():
@@ -137,8 +142,26 @@ async def reuse_or_create_worktree(
     logger.info(f"Created worktree at {worktree_path} for ref {ref}")
 
 
+async def _is_valid_git_repo(worktree_path: Path) -> bool:
+    """Return True if *worktree_path* is a valid git repository."""
+    code: int
+    code, _, _ = await execute_git_command(
+        ["git", "-C", str(worktree_path), "rev-parse", "--git-dir"]
+    )
+    return code == 0
+
+
 async def _fetch_and_checkout(worktree_path: Path, ref: str) -> None:
-    """Fetch latest changes and check out the requested ref."""
+    """Fetch latest changes and check out the requested ref.
+
+    Submodule updating is handled by the processor after credentials are
+    configured (via ``_init_submodules()``), ensuring auth is available
+    for private submodule clones.
+    """
+    # Validate git repo integrity before any git operations
+    if not await _is_valid_git_repo(worktree_path):
+        raise RuntimeError(f"Worktree {worktree_path} is not a valid git repository")
+
     # Fetch all remotes
     await execute_git_command(["git", "-C", str(worktree_path), "fetch", "origin"])
 

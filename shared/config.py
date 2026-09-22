@@ -185,38 +185,6 @@ class QueueConfig(BaseConfig):
     )
 
 
-class IndexingConfig(BaseConfig):
-    """Semantic indexing configuration for Google Gemini + SurrealDB."""
-
-    indexing_enabled: bool = Field(
-        default=False, description="Enable semantic indexing worker"
-    )
-    gemini_api_key: str | None = Field(
-        default=None, description="Google Gemini API key for embeddings"
-    )
-    surrealdb_url: str = Field(
-        default="ws://localhost:8000/rpc", description="SurrealDB WebSocket URL"
-    )
-    surrealdb_user: str = Field(default="root", description="SurrealDB username")
-    surrealdb_pass: str = Field(default="root", description="SurrealDB password")
-    surrealdb_ns: str = Field(default="bot", description="SurrealDB namespace")
-    surrealdb_db: str = Field(default="codebase", description="SurrealDB database")
-    embedding_model: str = Field(
-        default="gemini-embedding-001", description="Gemini embedding model name"
-    )
-    embedding_dimension: int = Field(
-        default=1024, description="Embedding vector dimension"
-    )
-    embedding_batch_size: int = Field(
-        default=20, description="Max texts per embedding API call"
-    )
-
-    @property
-    def is_enabled(self) -> bool:
-        """Check if indexing is fully configured and enabled."""
-        return self.indexing_enabled and bool(self.gemini_api_key)
-
-
 class WebhookConfig(BaseConfig):
     """Webhook service configuration."""
 
@@ -226,6 +194,14 @@ class WebhookConfig(BaseConfig):
         default="claude-code-agent[bot]",
         description="Bot GitHub username for preventing infinite loops",
         alias="WEBHOOK_BOT_USERNAME",
+    )
+    allow_unsigned_webhooks: bool = Field(
+        default=False,
+        description=(
+            "Accept webhooks without HMAC signature verification. Local "
+            "development only — never enable on a reachable deployment."
+        ),
+        alias="ALLOW_UNSIGNED_WEBHOOKS",
     )
 
     _github_config: GitHubConfig | None = None
@@ -260,9 +236,6 @@ class WorkerConfig(BaseConfig):
     """Worker service configuration."""
 
     log_level: str = Field(default="INFO", description="Logging level")
-    max_turns: int = Field(
-        default=50, description="Maximum turns for Claude SDK", ge=1, le=200
-    )
     sdk_timeout: int = Field(
         default=1800, description="SDK execution timeout in seconds", ge=60
     )

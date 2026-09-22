@@ -1,6 +1,6 @@
 """Post-processing orchestration for completed SDK sessions.
 
-Handles Redis enqueue for memory/retrospector/indexing jobs and
+Handles Redis enqueue for memory/retrospector jobs and
 flush/dedup of buffered post-processing work.
 """
 
@@ -24,7 +24,12 @@ def get_redis():
         redis_url = os.getenv("REDIS_URL", "redis://redis:6379")
         redis_password = os.getenv("REDIS_PASSWORD")
         _redis = aioredis.Redis.from_url(
-            redis_url, decode_responses=True, password=redis_password
+            redis_url,
+            decode_responses=True,
+            password=redis_password,
+            socket_timeout=60,
+            socket_connect_timeout=10,
+            retry_on_timeout=True,
         )
     return _redis
 
@@ -114,45 +119,6 @@ async def enqueue_retrospector_job(
                 )
 
 
-async def enqueue_indexing_job(
-    repo: str, hook_event: str, ref: str | None = None
-) -> None:
-    """Enqueue a code indexing job for embedding-based semantic search."""
-    for attempt in range(2):
-        try:
-            rc = get_redis()
-            payload = json.dumps(
-                {
-                    "repo": repo,
-                    "ref": ref or "main",
-                    "trigger": f"job_{hook_event.lower()}",
-                }
-            )
-            await rc.rpush("agent:indexing:requests", payload)  # type: ignore[misc]
-            logger.info(
-                "Enqueued indexing job for %s [%s] ref=%s",
-                repo,
-                hook_event,
-                ref,
-            )
-            return
-        except Exception as e:
-            if attempt == 0:
-                logger.warning(
-                    "Redis enqueue failed for indexing job (%s), retrying: %s",
-                    repo,
-                    e,
-                )
-                await asyncio.sleep(1)
-            else:
-                logger.error(
-                    "Failed to enqueue indexing job for %s after retry: %s",
-                    repo,
-                    e,
-                    exc_info=True,
-                )
-
-
 async def flush_pending_post_jobs(pending_jobs: list[dict]) -> None:
     """Flush buffered post-processing jobs after the SDK session ends.
 
@@ -201,10 +167,6 @@ async def flush_pending_post_jobs(pending_jobs: list[dict]) -> None:
                     job["event"],
                     job.get("workflow_name"),
                     job.get("session_meta", {}),
-                )
-            elif job_type == "indexing":
-                await enqueue_indexing_job(
-                    job["repo"], job["event"], ref=job.get("ref")
                 )
         except Exception as e:
             logger.error(

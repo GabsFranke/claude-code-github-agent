@@ -70,6 +70,7 @@ disable=
 
     # Import errors (sys.path manipulation is intentional)
     import-error,
+    no-name-in-module,
     wrong-import-position,
 
     # Design (too strict for our use case)

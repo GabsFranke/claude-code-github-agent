@@ -32,7 +32,10 @@ COPY mcp_servers/ ./mcp_servers/
 COPY repo_setup/ ./repo_setup/
 
 # Copy repo-setup.yaml configuration
-COPY repo-setup.yaml ./repo-setup.yaml
+# Same clean-clone fallback as workflows.yaml above: repo-setup.yaml is
+# gitignored, repo-setup.example.yaml is tracked.
+COPY repo-setup*.yaml ./
+RUN [ -f repo-setup.yaml ] || cp repo-setup.example.yaml repo-setup.yaml
 
 # Hook scripts
 COPY hooks/langfuse_hook.py /app/hooks/langfuse_hook.py

@@ -1,55 +1,76 @@
 .PHONY: help build up down restart logs logs-all logs-webhook logs-sdk ps \
-       up-minimal down-minimal lint lint-fix lint-fast test test-unit \
-       test-integration clean clean-logs prune ngrok start
+	       prod-up prod-down prod-pull prod-start \
+	       lint lint-fix lint-fast test test-unit \
+	       test-integration clean clean-logs prune ngrok start
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-15s\033[0m %s\n", $$1, $$2}'
 
-# --- Docker ---
+# --- Compose file selection ---
+# Core only (default):   make start
+# With Langfuse:          make start LANGFUSE=true
+# This flag applies to ALL targets: build, up, down, logs, ps, etc.
 
-build: ## Build all Docker images
+ifeq ($(LANGFUSE),true)
+COMPOSE = docker compose -f docker-compose.yml -f docker-compose.langfuse.yml
+else
+COMPOSE = docker compose
+endif
+
+# --- Docker (development) ---
+
+build: ## Build all Docker images. Use LANGFUSE=true to include Langfuse images.
 	@mkdir -p logs/langfuse
-	docker compose build
+	$(COMPOSE) build
 
-up: ## Start all services (detached). Optional: make up SANDBOX=10 MEMORY=2 RETRO=2 INDEXING=2
+# Scale only what was asked for, so an unnamed worker keeps the replica
+# count from docker-compose.yml instead of being reset to 1.
+SCALE = $(if $(SANDBOX),--scale sandbox_worker=$(SANDBOX)) \
+	$(if $(MEMORY),--scale memory_worker=$(MEMORY)) \
+	$(if $(RETRO),--scale retrospector_worker=$(RETRO))
+
+up: ## Start services (detached). Optional: SANDBOX=10 MEMORY=2 RETRO=2 LANGFUSE=true
 	@mkdir -p logs/langfuse
-	@if [ -n "$(SANDBOX)$(MEMORY)$(RETRO)$(INDEXING)" ]; then \
-		docker compose up -d \
-			--scale sandbox_worker=$(or $(SANDBOX),1) \
-			--scale memory_worker=$(or $(MEMORY),1) \
-			--scale retrospector_worker=$(or $(RETRO),1) \
-			--scale indexing_worker=$(or $(INDEXING),1); \
-	else \
-		docker compose up -d; \
-	fi
+	$(COMPOSE) up -d $(SCALE)
 
-down: ## Stop all services
-	docker compose down
+down: ## Stop services. Use LANGFUSE=true to also stop Langfuse services.
+	$(COMPOSE) down
 
 restart: down up ## Restart all services
 
 logs: ## Tail logs for bot services only
-	docker compose logs -f webhook worker sandbox_worker memory_worker retrospector_worker repo_sync indexing_worker
+	$(COMPOSE) logs -f webhook worker sandbox_worker memory_worker retrospector_worker repo_sync scheduler session-service
 
 logs-all: ## Tail logs for all services
-	docker compose logs -f
+	$(COMPOSE) logs -f
 
 logs-webhook: ## Tail webhook logs
-	docker compose logs -f webhook
+	$(COMPOSE) logs -f webhook
 
 logs-sdk: ## Tail sandbox worker logs
-	docker compose logs -f sandbox_worker
+	$(COMPOSE) logs -f sandbox_worker
+
+logs-session-service: ## Tail session service logs
+	$(COMPOSE) logs -f session-service
 
 ps: ## List running services
-	docker compose ps
+	$(COMPOSE) ps
 
-# --- Minimal stack (no observability) ---
+# --- Docker (production — pre-built images) ---
 
-up-minimal: ## Start minimal stack (Redis + webhook + worker)
-	docker compose -f docker-compose.minimal.yml up -d
+PROD_COMPOSE = docker compose -f docker-compose.prod.yml
+PROD_COMPOSE_LANGFUSE = docker compose -f docker-compose.prod.yml -f docker-compose.langfuse.yml
 
-down-minimal: ## Stop minimal stack
-	docker compose -f docker-compose.minimal.yml down
+prod-pull: ## Pull latest pre-built images from GHCR
+	$(PROD_COMPOSE) pull
+
+prod-up: ## Start production services (pre-built images). Add LANGFUSE=true for observability.
+	$(PROD_COMPOSE) up -d
+
+prod-down: ## Stop production services
+	$(PROD_COMPOSE) down
+
+prod-start: prod-pull prod-up ## Pull and start production services
 
 # --- Code Quality ---
 
@@ -82,12 +103,12 @@ ngrok: ## Start ngrok tunnel to webhook on port 10000
 
 # --- Dev workflows ---
 
-start: build up ngrok ## Build, start services, and open ngrok tunnel. Optional: make start SANDBOX=10
+start: build up ngrok ## Build, start services, and open ngrok tunnel. Add LANGFUSE=true for observability.
 
 # --- Cleanup ---
 
 clean: down ## Stop services and remove volumes
-	docker compose down -v
+	$(COMPOSE) down -v
 
 clean-logs: ## Clear all log files
 	rm -f logs/*.log logs/langfuse/*.log

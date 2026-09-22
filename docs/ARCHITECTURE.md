@@ -73,7 +73,7 @@ flowchart TB
 
     subgraph Knowledge["3. Context & Memory"]
         Repo[(Fast Repo Cache)]
-        Vector[(Code Index / SurrealDB)]
+        CodeGraph[(Code Index / CodeGraph SQLite)]
         Mem[(Persistent Memory)]
     end
 
@@ -91,7 +91,7 @@ flowchart TB
 1. **Event-Driven Microservices:** To handle high concurrency and isolate failures, the system uses discrete worker components (Webhook, Coordinator, Sandbox) communicating via Redis Queues and Pub/Sub.
 2. **Detached Git Worktrees:** Instead of cloning the repository for every job, a central `Repo Sync Service` maintains warm bare repositories. Sandbox workers create fast, detached worktrees from these caches.
 3. **Model Context Protocol (MCP):** To standardize tool use and prevent tight coupling to the GitHub API, the Claude agent relies on MCP servers to read and write data to GitHub and the local file system.
-4. **SurrealDB for Code Intelligence:** A multi-model database (SurrealDB) is used to store both dense vectors (embeddings via Gemini) and graph edges (tree-sitter AST relationships) to enable semantic and structural code search.
+4. **CodeGraph for Code Intelligence:** A local SQLite-based code graph (CodeGraph) indexes repos via tree-sitter and exposes structural queries (call graph, imports, inheritance) through a CLI and MCP tools — no database cluster or API keys needed.
 
 ## System Design & Implementation Details
 
@@ -114,7 +114,6 @@ flowchart LR
 
     JQ --> SW[Sandbox<br/>Workers]
     CACHE -.->|worktree| SW
-    CACHE -.->|worktree| IDX
     CACHE -.->|worktree| RETRO
 
     SW --> |1. setup| PREP[Repo Setup +<br/>Context Gen]
@@ -129,7 +128,6 @@ flowchart LR
 
     PP --> MEMQ[(Memory<br/>Queue)]
     PP --> RETROQ[(Retrospector<br/>Queue)]
-    PP --> IDXQ[(Indexing<br/>Queue)]
 
     MEMQ --> MW[Memory<br/>Worker]
     MW --> |memory_read/write| MEM_MCP
@@ -138,9 +136,8 @@ flowchart LR
     RETROQ --> RETRO[Retrospector<br/>Worker]
     RETRO --> |PR to bot repo| MCP
 
-    RS --> |sync complete| IDX[Indexing<br/>Worker]
-    IDXQ --> IDX
-    IDX --> |"embeddings<br/>+ graph edges"| SURREAL[(SurrealDB<br/>Multi-Model)]
+    SW --> |3. init| IDX[CodeGraph<br/>Init]
+    IDX --> |"graph edges"| CODEGRAPH[(CodeGraph<br/>SQLite)]
 
     MCP --> GH
 
@@ -161,8 +158,7 @@ flowchart LR
     style RETROQ fill:#ffe0b2
     style PP fill:#f3e5f5
     style IDX fill:#e8eaf6
-    style SURREAL fill:#e8eaf6
-    style IDXQ fill:#e8eaf6
+    style CODEGRAPH fill:#e8eaf6
     style LOCAL_MCP fill:#e0f2f1
 ```
 
@@ -174,12 +170,12 @@ flowchart LR
 4. **Repo Sync** → Maintains cached bare repositories (proactive on push)
 5. **Sandbox Workers** → Create isolated worktrees from cached bare repos
 6. **Pre-Processing** → Run repo setup commands (`repo-setup.yaml`) + generate structural context (file tree + repomap)
-7. **Claude SDK** → Executes with 4 MCP servers (GitHub, GitHub Actions, Memory, Codebase Tools)
+7. **Claude SDK** → Executes with 4 MCP servers (GitHub, GitHub Actions, Memory, CodeGraph)
 8. **Results** → Posted back to GitHub via MCP
-9. **Post-Processing** → Transcript staging, enqueues memory/retrospector/indexing jobs
+9. **Post-Processing** → Transcript staging, enqueues memory/retrospector jobs
 10. **Memory Worker** → Extracts knowledge from session transcripts via `@memory-extractor` subagent
 11. **Retrospector Worker** → Analyzes sessions, opens improvement PRs on the bot's own repo
-12. **Indexing Worker** → Chunks repos, generates embeddings, stores in SurrealDB for semantic search and code intelligence queries
+12. **CodeGraph Indexing** → Sandbox worker runs `codegraph init -i` after worktree creation (graceful fallback if not installed)
 
 ## Workflow System
 
@@ -354,7 +350,7 @@ await redis.publish("agent:sync:events", json.dumps({"repo": repo, "ref": ref, "
 - Generates structural context (file tree + personalized repomap)
 - Builds `ClaudeAgentOptions` via composable `SDKOptionsBuilder`
 - Executes Claude Agent SDK with retry (configurable, default 3 attempts)
-- Flushes buffered post-processing jobs (memory, retrospector, indexing)
+- Flushes buffered post-processing jobs (memory, retrospector)
 - Cleans up workspace, worktree, and credentials
 
 **Key Files**: `services/sandbox_executor/sandbox_worker.py`
@@ -385,7 +381,6 @@ builder = SDKOptionsBuilder(cwd=workspace)
 options = (builder.with_model(model)
     .with_github_mcp(github_token)
     .with_memory_mcp(repo)
-    .with_codebase_tools(workspace)
     .with_auto_discovered_plugins()
     .with_full_toolset()
     .with_structural_context(file_tree)
@@ -405,7 +400,7 @@ git --git-dir={repo_dir} worktree remove --force {workspace}
 | GitHub MCP | HTTP (`api.githubcopilot.com/mcp`) | PR/issue/comment operations |
 | GitHub Actions MCP | SSE (via mcp_proxy) | CI/CD workflow analysis |
 | Memory MCP | stdio | Repository memory read/write |
-| Codebase Tools MCP | SSE (via mcp_proxy) | AST-based code search, semantic/hybrid search, and file summaries |
+| CodeGraph MCP | stdio (via `.mcp.json`) | Code search, file summaries, change detection, call graphs, impact analysis, tracing |
 
 **Sync Coordination**:
 
@@ -427,7 +422,8 @@ git --git-dir={repo_dir} worktree remove --force {workspace}
 - Creates branches and commits via GitHub MCP
 - Opens pull requests via GitHub MCP
 - Posts comments and reviews via GitHub MCP
-- Searches codebase structurally and semantically (text/vector/hybrid) via Codebase Tools MCP
+- Searches codebase structurally and semantically (text/vector/hybrid) via CodeGraph MCP
+- Queries code graphs (callers, callees, impact analysis, tracing) via CodeGraph MCP
 - Accesses repository memory via Memory MCP
 
 **Configuration**: Composable via `SDKOptionsBuilder` in `shared/sdk_factory.py`
@@ -441,7 +437,7 @@ git --git-dir={repo_dir} worktree remove --force {workspace}
 - `mcp__github__*` — All GitHub MCP tools
 - `mcp__github_actions__*` — CI/CD workflow tools
 - `mcp__memory__*` — Repository memory tools
-- `mcp__codebase_tools__*` — AST-based code analysis and semantic/hybrid search
+- `mcp__codegraph__*` — Code intelligence (search, context, trace, callers, callees, impact, node, explore, files, status)
 
 **Local vs Remote Operations**:
 
@@ -551,31 +547,37 @@ Both tools validate paths to prevent directory traversal attacks.
 
 **Architecture Significance**: The retrospector is a self-improvement mechanism — after each agent session, it analyzes what happened and proposes changes to the bot's own instructions, workflows, and configuration.
 
-### 10. Indexing Worker
+### 10. Code Intelligence (CodeGraph)
 
-**Technology**: Python + Gemini Embedding API + SurrealDB
-**Purpose**: Background worker that chunks repos, generates embeddings, and stores in SurrealDB for semantic code search and code intelligence
+**Technology**: CodeGraph (Rust/Node CLI via `npx @colbymchenry/codegraph`) + local SQLite
+**Purpose**: Local code intelligence providing structural queries (definitions, references, call graphs, impact analysis) without a database cluster or external API
 
-**Responsibilities**:
+**How it works**:
 
-- Dual trigger: subscribes to `agent:sync:events` pub/sub (auto-trigger on sync) + processes `agent:indexing:requests` list
-- Chunks source files into semantic units (functions, classes, methods) using tree-sitter
-- Generates embeddings via Google Gemini (`gemini-embedding-001`, 1024 dimensions)
-- Stores vectors in SurrealDB with metadata (filepath, name, kind, language, line numbers, commit hash)
-- Builds code graph edges (calls, imports, inheritance) via tree-sitter AST traversal
-- Extracts API routes (FastAPI/Flask/Django) and MCP tool definitions
-- Supports incremental indexing via git diff — only re-embeds changed files
-- Caches embeddings in Redis to avoid re-embedding unchanged content
-- Deletes orphaned symbols for files removed from the repo
-- Controlled by `INDEXING_ENABLED` env var and `IndexingConfig`
+- CodeGraph indexes repos locally via `codegraph init -i` using tree-sitter AST parsing
+- Index is stored as a SQLite file in the repo's `.codegraph/` directory
+- CodeGraph runs as its own MCP server, providing graph-oriented tools directly to the agent
+- No background workers, no API keys, no external database needed
+- Indexing runs on-demand when the sandbox executor creates a worktree (graceful fallback if CodeGraph CLI is not installed)
+
+**CodeGraph MCP Tools**:
+
+| Tool | Purpose |
+|------|---------|
+| `codegraph_search` | Search symbols by name or pattern |
+| `codegraph_context` | 360-degree view: definition, callers, callees, inheritance |
+| `codegraph_trace` | BFS call graph traversal with depth markers |
+| `codegraph_callers` | Find all callers of a symbol |
+| `codegraph_callees` | Find all callees of a symbol |
+| `codegraph_impact` | Blast radius analysis via BFS with risk assessment |
+| `codegraph_node` | Get detailed information about a single symbol node |
+| `codegraph_explore` | Explore the code graph starting from a symbol |
+| `codegraph_files` | List and query files in the code graph |
+| `codegraph_status` | Check CodeGraph index status and health |
 
 **Key Files**:
 
-- `services/indexing_worker/indexing_worker.py` — Main worker loop and indexing pipeline
-- `shared/chunker.py` — Tree-sitter-based semantic code chunker (10 languages)
-- `shared/ts_languages.py` — Language registry with dynamic loading
-- `shared/code_graph.py` — Symbol index and code graph traversal
-- `shared/route_maps.py` — API route and MCP tool extraction
+- `shared/mcp_json_writer.py` — Generates `.mcp.json` for worktrees, adding `codegraph` as a stdio MCP server entry
 
 **Supported Languages**:
 
@@ -583,17 +585,11 @@ Python, JavaScript, TypeScript, TSX, Go, Rust, Java, C, C++, Ruby — via per-la
 
 **Indexing Flow**:
 
-1. Repo sync completes → event published to `agent:sync:events`
-2. Indexing worker receives event → enqueues indexing job
-3. Creates worktree from bare repo cache
-4. Checks previous commit for incremental diff (or full index if first time)
-5. Chunks changed files via tree-sitter (or regex fallback)
-6. Builds code graph edges (calls, imports, inheritance) via `SymbolIndex`
-7. Extracts API routes and MCP tool definitions via `route_maps`
-8. Checks Redis embedding cache — only embeds new/changed chunks via Gemini API
-9. Upserts vectors, symbols, and graph edges into SurrealDB
-10. Deletes orphaned symbols for files removed from the repo
-11. Updates indexing metadata in Redis
+1. Sandbox worker creates worktree from cached bare repo
+2. `codegraph init -i` runs after worktree creation (graceful fallback if not installed)
+3. Tree-sitter parses source files, builds symbol index and call graph
+4. Results stored in local `.codegraph/` SQLite database
+5. CodeGraph MCP server (added via `.mcp.json`) provides graph tools directly to the agent
 
 ### 11. Codebase Context System
 
@@ -609,24 +605,20 @@ Python, JavaScript, TypeScript, TSX, Go, Rust, Java, C, C++, Ruby — via per-la
 - Personalized ranking based on mentioned files, identifiers, and priority focus areas
 - Configurable per-workflow via `context` profiles in `workflows.yaml`
 
-**Layer 2 — Code Tools MCP**:
+**Layer 2 — Graph Intelligence (CodeGraph MCP)**:
 
-- `mcp_servers/codebase_tools/` — MCP server for AST-based code search and file summaries
-- Provides `search_codebase(pattern, file_type?)` for regex-based code search across the worktree
-- Provides `read_file_summary(file_path)` for structured file analysis
-- Provides `find_definitions(symbol_name)` to locate symbol definitions
-- Provides `find_references(symbol_name)` to find all references to a symbol
-- Available to agents as registered MCP tools during sandbox execution
-
-**Layer 3 — Semantic/Hybrid Search**:
-
-- Integrated into `search_codebase` tool via `search_type="semantic"` or `search_type="hybrid"`
-- Embeds queries via Gemini `gemini-embedding-001`, searches SurrealDB HNSW vector index
-- Supports `file_type` and `kind_filter` for narrowing results
-- Hybrid mode combines text + semantic results with deduplication
-- Requires prior indexing by the Indexing Worker and `GEMINI_API_KEY`
-
-**Code Graph Database**: The `symbol`, `calls`, `imports`, `inherits`, `route`, and `tool_def` tables in SurrealDB power code intelligence queries. `shared/code_graph.py` provides `SymbolIndex` for graph traversal (trace_flow, find_callers, find_downstream_flow), and `shared/route_maps.py` extracts HTTP routes and MCP tool definitions.
+- CodeGraph runs as a standalone MCP server, configured via `.mcp.json` in the worktree
+- Powered by CodeGraph (local SQLite via tree-sitter) — no external database or API keys needed
+- `codegraph_search` — Search symbols by name or pattern
+- `codegraph_context` — 360-degree view: definition, callers, callees, inheritance
+- `codegraph_trace` — BFS call graph traversal with depth markers
+- `codegraph_callers` — Find all callers of a symbol
+- `codegraph_callees` — Find all callees of a symbol
+- `codegraph_impact` — Blast radius analysis via BFS with risk assessment
+- `codegraph_node` — Get detailed information about a single symbol node
+- `codegraph_explore` — Explore the code graph starting from a symbol
+- `codegraph_files` — List and query files in the code graph
+- `codegraph_status` — Check CodeGraph index status and health
 
 **Language Support**:
 
@@ -649,7 +641,6 @@ Each plugin follows the Claude Code plugin structure (`.claude-plugin/plugin.jso
 
 | Plugin | Purpose | Agents | Commands |
 |--------|---------|--------|----------|
-| `pr-review-toolkit` | PR review workflow | code-reviewer, code-architecture-reviewer, code-simplifier, comment-analyzer, pr-test-analyzer, silent-failure-hunter, type-design-analyzer | `review-pr` |
 | `ci-failure-toolkit` | CI failure analysis | deploy-failure-analyzer, test-failure-analyzer, build-failure-analyzer, lint-failure-analyzer | `fix-ci` |
 | `test-toolkit` | Generic task testing | generic-worker | `test` |
 | `pr-fix` | PR review feedback fixes | — | `fix-review` |
@@ -663,11 +654,12 @@ Plugins are auto-discovered from `~/.claude/plugins/` at SDK build time via `SDK
 **Port**: 18000
 **Purpose**: Bridges the app's stdio MCP servers to HTTP/SSE so Docker containers can access them
 
-The MCP proxy spawns each stdio MCP server (codebase_tools, github_actions) as a child process and exposes it as an SSE endpoint at `http://mcp_proxy:18000/mcp/{server_name}/sse`. Workers connect via `socat` port forwarding (`localhost:18000 → mcp_proxy:18000`).
+The MCP proxy spawns each stdio MCP server (github_actions) as a child process and exposes it as an SSE endpoint at `http://mcp_proxy:18000/mcp/{server_name}/sse`. Workers connect via `socat` port forwarding (`localhost:18000 → mcp_proxy:18000`).
 
 It also bridges host services into the Docker network:
 - `localhost:11434` → host Ollama (via `host.docker.internal:11434`)
-- `localhost:8000` → SurrealDB
+
+Note: CodeGraph runs as a separate stdio MCP server (configured via `.mcp.json`), not through the proxy.
 
 **Host MCP servers** (`~/.claude.json`): When `ALLOW_HOST_MCP=true` (default), `_discover_host_mcp_names()` reads `~/.claude.json` for MCP server names and adds their tool patterns (`mcp__{name}__*`) to the agent's allowed tool list. This only grants permissions — it does NOT bridge those servers through the proxy. Host MCP servers must be independently reachable from inside the container (e.g., HTTP servers accessible via `host.docker.internal`). Stdio-based host servers will NOT work unless separately proxied.
 
@@ -715,7 +707,7 @@ It also bridges host services into the Docker network:
 
 | Module | Purpose |
 |--------|---------|
-| `config.py` | Pydantic Settings models: `WebhookConfig`, `WorkerConfig`, `AnthropicConfig`, `LangfuseConfig`, `QueueConfig`, `IndexingConfig`, `GitHubConfig` |
+| `config.py` | Pydantic Settings models: `WebhookConfig`, `WorkerConfig`, `AnthropicConfig`, `LangfuseConfig`, `QueueConfig`, `GitHubConfig` |
 
 ### Session Persistence
 
@@ -728,7 +720,7 @@ It also bridges host services into the Docker network:
 | `thread_history.py` | `ThreadHistoryConfig` + `fetch_and_format_thread_history()` — Fetches GitHub issue/PR/discussion comments and injects them into agent context |
 | `constants.py` | Centralized TTLs, Redis key prefixes, queue names, and channel names used across all services |
 | `worktree_lock.py` | `WorktreeLock` — Redis-based distributed locking for concurrent worktree access with interrupt-and-continue |
-| `mcp_json_writer.py` | MCP server configuration writer for SDK discovery |
+| `mcp_json_writer.py` | Generates `.mcp.json` for worktrees, adding `codegraph` as a stdio MCP server entry alongside other servers so the Claude Code CLI discovers them automatically |
 
 ### SDK Infrastructure
 
@@ -736,7 +728,7 @@ It also bridges host services into the Docker network:
 |--------|---------|
 | `sdk_factory.py` | `SDKOptionsBuilder` — composable builder for `ClaudeAgentOptions` with fluent API, system prompt budget enforcement (12K tokens), and MCP server wiring |
 | `sdk_executor.py` | `execute_sdk()` — centralized SDK execution with retry, timeout, and error categorization |
-| `post_processing.py` | Transcript staging, Redis enqueue for memory/retrospector/indexing jobs, flush with deduplication |
+| `post_processing.py` | Transcript staging, Redis enqueue for memory/retrospector jobs, flush with deduplication |
 | `langfuse_hooks.py` | Langfuse observability hook setup (Stop/SubagentStop events) |
 
 ### Queue and Job Management
@@ -752,15 +744,11 @@ It also bridges host services into the Docker network:
 
 | Module | Purpose |
 |--------|---------|
-| `chunker.py` | Tree-sitter-based semantic code chunker (functions, classes, methods) |
 | `repomap.py` | Aider-style repomap using tree-sitter for structural context |
 | `context_builder.py` | Async structural context generation with commit-based caching |
 | `ts_languages.py` | Language registry (10 languages) with dynamic tree-sitter loading |
-| `file_tree.py` | File tree generation with exclusion rules and SurrealDB collection naming |
-| `code_graph.py` | Queryable symbol index for code intelligence (trace_flow, find_callers, find_downstream_flow) |
+| `file_tree.py` | File tree generation with exclusion rules |
 | `import_resolver.py` | Python/TypeScript import path resolution |
-| `route_maps.py` | API route and MCP tool definition extraction |
-| `surrealdb_client.py` | SurrealDB connection management and schema definition (v3) |
 
 ### Cross-Cutting Concerns
 
@@ -783,7 +771,7 @@ It also bridges host services into the Docker network:
 | Module | Purpose |
 |--------|---------|
 | `mcp_servers/base.py` | Shared stdio JSON-RPC 2.0 server loop for all custom MCP servers |
-| `mcp_json_writer.py` | Generates `.mcp.json` for worktrees so the Claude Code CLI loads MCP servers automatically |
+| `mcp_json_writer.py` | Generates `.mcp.json` for worktrees, adding `codegraph` as a stdio MCP server entry alongside other servers so the Claude Code CLI discovers them automatically |
 
 ## Data Flow
 
@@ -798,9 +786,9 @@ It also bridges host services into the Docker network:
 7. Repo sync service clones/updates bare repository
 8. Sandbox worker waits for sync, creates worktree from bare repo (detached HEAD)
 9. Structural context generated (file tree with PR changed files)
-10. Claude SDK executes with 4 MCP servers (GitHub, GitHub Actions, Memory, Codebase Tools)
+10. Claude SDK executes with 4 MCP servers (GitHub, GitHub Actions, Memory, CodeGraph)
 11. Claude SDK posts review to GitHub via MCP
-12. Post-processing: transcript staged, memory/retrospector/indexing jobs enqueued
+12. Post-processing: transcript staged, memory/retrospector jobs enqueued
 13. Job marked as complete in Redis
 
 ### CI Failure Fix
@@ -840,7 +828,7 @@ It also bridges host services into the Docker network:
 2. GitHub sends `push` webhook
 3. Webhook publishes sync request to `agent:sync:requests`
 4. Repo sync service updates cached bare repository
-5. Sync completion event triggers indexing worker
+5. Future sandbox workers run `codegraph init -i` after worktree creation (graceful fallback if not installed)
 6. Future jobs for this repo start faster (no sync wait)
 
 ### Post-Processing Pipeline (Automatic)
@@ -850,10 +838,10 @@ It also bridges host services into the Docker network:
 3. `flush_pending_post_jobs()` deduplicates and enqueues:
    - Memory job → `agent:memory:requests`
    - Retrospector job → `agent:retrospector:requests`
-   - Indexing job → `agent:indexing:requests`
+   - *(Indexing job removed — CodeGraph indexes on worktree creation via sandbox executor)*
 4. Memory worker extracts facts from transcript via `@memory-extractor` (Haiku)
 5. Retrospector worker analyzes session, opens improvement PR on bot repo (Sonnet)
-6. Indexing worker re-indexes changed files if applicable
+6. CodeGraph indexes repos locally on startup — no separate worker needed
 
 ### Unhandled Event
 
@@ -896,12 +884,12 @@ It also bridges host services into the Docker network:
 - `agent:retrospector:requests` - Retrospector job queue
 - `agent:retrospector:dead_letter` - Failed retrospector jobs
 
-**Indexing**:
+**Indexing** (removed — CodeGraph indexes locally on startup, no separate worker):
 
-- `agent:indexing:requests` - Indexing job queue (repo, ref, trigger)
-- `agent:indexing:dead_letter` - Failed indexing jobs
-- `agent:indexing:meta:{repo}` - Hash: field=ref, value=JSON (indexed_commit, chunk_count, collection_name)
-- `agent:indexing:cache:{model}` - Hash: field=content_hash, value=JSON (embedding vector cache)
+- `agent:indexing:requests` - *(removed)* Was indexing job queue
+- `agent:indexing:dead_letter` - *(removed)* Was failed indexing jobs
+- `agent:indexing:meta:{repo}` - *(removed)* Was hash: field=ref, value=JSON
+- `agent:indexing:cache:{model}` - *(removed)* Was hash: field=content_hash, value=JSON
 
 **Rate Limiting**:
 
@@ -1002,7 +990,6 @@ The `~/.claude/` directory is bind-mounted as a shared volume across all worker 
 
 **Plugin Agents** (in `plugins/*/agents/`):
 
-- `code-reviewer`, `code-architecture-reviewer`, `code-simplifier`, `comment-analyzer`, `pr-test-analyzer`, `silent-failure-hunter`, `type-design-analyzer` — PR review agents in `pr-review-toolkit`
 - `build-failure-analyzer`, `deploy-failure-analyzer`, `lint-failure-analyzer`, `test-failure-analyzer` — CI failure agents in `ci-failure-toolkit`
 - `generic-worker` — Generic task agent in `test-toolkit`
 

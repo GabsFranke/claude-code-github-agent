@@ -4,7 +4,7 @@
 
 **An orchestration engine for autonomous AI coding agents that hooks into 40+ GitHub events — fully configurable via YAML and plugins.**
 
-[![CI](https://github.com/GabsFranke/claude-code-github-agent/actions/workflows/test.yml/badge.svg)](https://github.com/GabsFranke/claude-code-github-agent/actions/workflows/test.yml) [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/) [![Docker](https://img.shields.io/badge/docker-ready-blue.svg)](https://www.docker.com/) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/) [![Docker](https://img.shields.io/badge/docker-ready-blue.svg)](https://www.docker.com/) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 [Getting Started](#quick-start) · [Usage](#usage) · [Customization](#customization) · [Docs](#documentation) · [Contributing](#contributing)
 
@@ -17,7 +17,7 @@
 An orchestration engine for autonomous AI coding agents. It provides a highly scalable, microservices-based system that connects the Claude SDK to **40+ GitHub webhook events**. By providing persistent memory, secure sandboxing, semantic codebase indexing, and an extensible plugin system, it allows you to run complex, autonomous agentic workflows directly on your own infrastructure. Everything is configured through **YAML workflows** and **plugins**:
 
 ```yaml
-# workflows.yaml — add new behaviors without touching code
+# workflows.yaml — create your own from workflows.example.yaml
 my-workflow:
   triggers:
     events:
@@ -39,7 +39,7 @@ Runs on your infrastructure. Scales horizontally. Full observability via Langfus
 ### Event-Driven Engine
 
 - **40+ GitHub events** — PRs, issues, comments, pushes, CI/CD, discussions, labels, releases, and more
-- **YAML-driven workflows** — Define triggers, commands, filters, and prompts in `workflows.yaml`, no code changes needed
+- **YAML-driven workflows** — Define triggers, commands, filters, and prompts in `workflows.yaml` (start from `workflows.example.yaml`), no code changes needed
 - **Slash commands** — `/review`, `/fix-ci`, `/triage`, `/agent <request>` in any issue or PR comment
 - **Horizontal scaling** — Scale sandbox workers independently: `make up SANDBOX=10`
 
@@ -57,14 +57,14 @@ The agent runs Claude SDK with the full Claude Code feature set. Because `~/.cla
 
 ### Code Intelligence
 
-The agent doesn't explore code blindly. It uses a dedicated **Codebase Tools MCP server** backed by SurrealDB and Gemini to understand codebases structurally and semantically:
+The agent doesn't explore code blindly. It uses CodeGraph MCP for code intelligence:
 
-- **3-Layer Context**:
-  1. **Structural**: File tree & Aider-style repomaps (tree-sitter, 10 languages), personalized per session.
-  2. **Semantic**: Hybrid search combining text matching (ripgrep) and Gemini embeddings.
-  3. **Graph AST**: Code is parsed into Abstract Syntax Trees and stored as graph edges (calls, imports, inherits) in SurrealDB.
-- **Advanced Graph Tools**: Agents can trace execution flows (`trace_flow`) or run BFS impact analysis (`get_impact`) to evaluate the blast radius of a change before writing code.
-- **Incremental Indexing**: A background worker incrementally indexes changed files on every push, ensuring context is instantly available when a webhook triggers.
+- **CodeGraph MCP** — 10+ tools: `codegraph_search`, `codegraph_context`, `codegraph_trace`, `codegraph_callers`, `codegraph_callees`, `codegraph_impact`, `codegraph_node`, `codegraph_explore`, `codegraph_files`, `codegraph_status`. These use a local SQLite knowledge graph built by tree-sitter.
+
+- **2-Layer Context**:
+  1. **Structural**: File tree injected into the system prompt for orientation.
+  2. **Graph Intelligence**: CodeGraph indexes repos locally into SQLite — call graphs, imports, inheritance. Zero-setup: `codegraph init -i` builds the index, no database cluster or API keys needed.
+- **Optional**: CodeGraph runs as a separate MCP server. If not installed, graph tools are unavailable but all other functionality works fine.
 
 ## Quick Start
 
@@ -94,18 +94,30 @@ Go to **GitHub Settings → Developer settings → GitHub Apps → New GitHub Ap
 | Issues        | Read & write |
 | Pull requests | Read & write |
 
-**Subscribe to events:** Choose which events GitHub sends to the webhook. For the built-in workflows, enable: Issue comment, Issues, Pull request, Pull request review, Pull request review comment, Pull request review thread, Push, Workflow job. You can subscribe to more or fewer events at any time — see the [full list of supported events](docs/WORKFLOWS.md#supported-events). The agent only acts on what you enable here and configure in [workflows.yaml](workflows.yaml).
+**Subscribe to events:** Choose which events GitHub sends to the webhook. For the built-in workflows, enable: Issue comment, Issues, Pull request, Pull request review, Pull request review comment, Pull request review thread, Push, Workflow job. You can subscribe to more or fewer events at any time — see the [full list of supported events](docs/WORKFLOWS.md#supported-events). The agent only acts on what you enable here and configure in your [workflows.yaml](workflows.example.yaml) (copy from `workflows.example.yaml`).
 
 After creating: note the **App ID**, generate a **private key** (.pem), install the app on your repos, and note the **Installation ID** from the URL.
 
 ### 2. Configure and Run
 
 ```bash
-git clone https://github.com/GabsFranke/claude-code-github-agent.git
+git clone https://github.com/your-org/claude-code-github-agent.git
 cd claude-code-github-agent
 cp .env.example .env               # Edit .env with your credentials
+cp workflows.example.yaml workflows.yaml    # Edit workflows (required)
 cp repo-setup.example.yaml repo-setup.yaml  # Edit Per-repo dependency setup (optional)
 ```
+
+The `cp workflows.example.yaml workflows.yaml` step is required: the scheduler
+mounts that file and refuses to create a missing host path, so it fails to
+start with a clear mount error if you skip it. Set `WORKFLOWS_FILE` in `.env`
+only if your config lives somewhere else.
+
+Then set one value in `.env`:
+
+- `SCHEDULER_INTERNAL_TOKEN=$(openssl rand -hex 32)` — required for
+  agent-initiated one-shot scheduling. Leaving it empty disables that endpoint;
+  cron schedules from `workflows.yaml` are unaffected.
 
 ```bash
 # Build, start services, and open ngrok tunnel
@@ -113,11 +125,11 @@ make start
 
 # Or step by step:
 make build    # Build all Docker images
-make up       # Start all services (detached)
+make up       # Start core services (no Langfuse)
 make ngrok    # Open ngrok tunnel to webhook on port 10000
 
-# Minimal setup (no Langfuse)
-make up-minimal
+# With Langfuse observability:
+make up-langfuse
 ```
 
 Run `make help` to see all available targets. Service logs are written to `./logs/` per service — use `tail -f logs/webhook.log` or `make logs` to follow along.
@@ -126,11 +138,11 @@ Run `make help` to see all available targets. Service logs are written to `./log
 <summary>Using docker compose directly</summary>
 
 ```bash
-# Minimal setup
-docker-compose -f docker-compose.minimal.yml up --build -d
+# Core stack (no Langfuse)
+docker compose up --build -d
 
-# Full setup with Langfuse observability
-docker-compose up --build -d
+# With Langfuse observability
+docker compose -f docker-compose.yml -f docker-compose.langfuse.yml up --build -d
 ```
 
 </details>
@@ -195,7 +207,13 @@ Comment on any issue or PR:
 
 ### Add a Workflow
 
-Edit `workflows.yaml` to define new triggers and behaviors — no code changes needed:
+Copy `workflows.example.yaml` to `workflows.yaml` and customize it — no code changes needed:
+
+```bash
+cp workflows.example.yaml workflows.yaml
+```
+
+Then edit `workflows.yaml` to define your triggers and behaviors:
 
 ```yaml
 workflows:
@@ -206,8 +224,6 @@ workflows:
       commands: [/my-command]
     prompt:
       template: "Analyze {repo} #{issue_number}"
-    context:
-      repomap_budget: 2048
 ```
 
 See [WORKFLOWS.md](docs/WORKFLOWS.md) for the full reference, and [CONFIGURATION.md](docs/CONFIGURATION.md) for environment variables.
@@ -233,6 +249,7 @@ Configure dependency installation and build commands per repo in `repo-setup.yam
 | Document                                 | Description                           |
 | ---------------------------------------- | ------------------------------------- |
 | [Architecture](docs/ARCHITECTURE.md)     | System design, components, data flows |
+| [Security](docs/SECURITY.md)             | Threat model, trust boundary, exposure |
 | [Development](docs/DEVELOPMENT.md)       | Testing, deployment, contributing     |
 | [Workflows](docs/WORKFLOWS.md)           | Creating and managing workflows       |
 | [Configuration](docs/CONFIGURATION.md)   | Environment variables reference       |

@@ -170,16 +170,42 @@ class TestJobQueueGetNextJob:
 
     @pytest.mark.asyncio
     async def test_get_next_job_redis_error(self):
-        """Test get_next_job with Redis connection error."""
+        """Test get_next_job with Redis connection error reconnects gracefully."""
         queue = JobQueue(redis_url="redis://localhost:6379")
 
         mock_redis = AsyncMock()
         mock_redis.blpop = AsyncMock(side_effect=OSError("Connection lost"))
         queue.redis = mock_redis
+        # Mock reconnect to avoid real Redis connection attempt
+        queue._reconnect = AsyncMock()
 
         result = await queue.get_next_job(timeout=5)
 
         assert result is None
+        queue._reconnect.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_get_next_job_timeout_error(self):
+        """Test get_next_job with Redis TimeoutError reconnects gracefully.
+
+        redis.exceptions.TimeoutError is NOT a subclass of OSError, so it
+        must be caught explicitly. This is the error seen when BLPOP's
+        socket_timeout conflicts with the blocking timeout.
+        """
+        queue = JobQueue(redis_url="redis://localhost:6379")
+
+        mock_redis = AsyncMock()
+        mock_redis.blpop = AsyncMock(
+            side_effect=TimeoutError("Timeout reading from redis:6379")
+        )
+        queue.redis = mock_redis
+        # Mock reconnect to avoid real Redis connection attempt
+        queue._reconnect = AsyncMock()
+
+        result = await queue.get_next_job(timeout=5)
+
+        assert result is None
+        queue._reconnect.assert_called_once()
 
 
 class TestJobQueueCompleteJob:
@@ -492,7 +518,7 @@ class TestJobQueueReclaimStaleJobs:
             "issue_number": 123,
             "prompt": "Test prompt",
             "github_token": "ghs_expired_token_12345",
-            "installation_id": 112053500,
+            "installation_id": 12345678,
             "user": "testuser",
         }
         backup_json = json.dumps(original_data)
@@ -521,7 +547,7 @@ class TestJobQueueReclaimStaleJobs:
             if args[0] == f"{queue.job_data_prefix}{stale_job_id}":
                 restored_data = json.loads(args[2])
                 assert "github_token" not in restored_data
-                assert restored_data.get("installation_id") == 112053500
+                assert restored_data.get("installation_id") == 12345678
                 break
         else:
             pytest.fail("Expected setex call for job data restoration")

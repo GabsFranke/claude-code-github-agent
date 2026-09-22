@@ -4,6 +4,8 @@ This module provides a builder pattern for constructing ClaudeAgentOptions
 with sensible defaults and flexible customization for different worker types.
 """
 
+# pylint: disable=too-many-lines
+
 import json
 import logging
 import os
@@ -12,8 +14,10 @@ from typing import Any
 
 from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
 
+from shared.constants import MODEL_TIERS, replica_count
 from shared.langfuse_hooks import setup_langfuse_hooks
 from shared.post_processing import flush_pending_post_jobs as _flush_pending_post_jobs
+from shared.transcript_writer import IncrementalTranscriptHook
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +50,7 @@ def _discover_host_mcp_names(cwd: str | None = None) -> list[str]:
     return sorted(names)
 
 
+# pylint: disable=too-many-public-methods
 class SDKOptionsBuilder:
     """Composable builder for ClaudeAgentOptions.
 
@@ -99,7 +104,7 @@ class SDKOptionsBuilder:
         """Set a specific model.
 
         Args:
-            model: Model identifier (e.g., "claude-sonnet-4-20250514")
+            model: Model identifier (e.g., "claude-sonnet-5")
 
         Returns:
             Self for method chaining
@@ -107,26 +112,44 @@ class SDKOptionsBuilder:
         self._model = model
         return self
 
-    def with_sonnet(self) -> "SDKOptionsBuilder":
-        """Use Sonnet model from environment (default for main agent work).
+    def with_model_tier(self, tier: str) -> "SDKOptionsBuilder":
+        """Use a model tier alias (opus/sonnet/haiku).
+
+        The alias is resolved by the Claude Code CLI through
+        ANTHROPIC_DEFAULT_<TIER>_MODEL. An unrecognised tier is ignored with a
+        warning, leaving resolution to the CLI's own default.
+
+        Args:
+            tier: One of ``MODEL_TIERS``
 
         Returns:
             Self for method chaining
         """
-        self._model = os.getenv(
-            "ANTHROPIC_DEFAULT_SONNET_MODEL", "claude-sonnet-4-20250514"
-        )
+        if tier not in MODEL_TIERS:
+            logger.warning(
+                f"Ignoring unknown model tier {tier!r}; "
+                f"expected one of {', '.join(MODEL_TIERS)}"
+            )
+            return self
+        self._model = tier
+        return self
+
+    def with_sonnet(self) -> "SDKOptionsBuilder":
+        """Use Sonnet model from settings.json / env (default for main agent work).
+
+        Returns:
+            Self for method chaining
+        """
+        self._model = "sonnet"
         return self
 
     def with_haiku(self) -> "SDKOptionsBuilder":
-        """Use Haiku model from environment (default for lightweight tasks).
+        """Use Haiku model from settings.json / env (default for lightweight tasks).
 
         Returns:
             Self for method chaining
         """
-        self._model = os.getenv(
-            "ANTHROPIC_DEFAULT_HAIKU_MODEL", "claude-haiku-4-5-20251001"
-        )
+        self._model = "haiku"
         return self
 
     def with_max_buffer_size(self, size: int) -> "SDKOptionsBuilder":
@@ -188,12 +211,80 @@ class SDKOptionsBuilder:
             Self for method chaining
         """
         plugins_dir = os.path.expanduser("~/.claude/plugins")
+        loaded_paths = set()
+
+        # 1. First, check installed_plugins.json for explicit plugin paths (useful for cached/marketplace plugins)
+        installed_plugins_path = os.path.join(plugins_dir, "installed_plugins.json")
+        if os.path.exists(installed_plugins_path):
+            try:
+                with open(installed_plugins_path, encoding="utf-8") as f:
+                    data = json.load(f)
+                plugins_dict = data.get("plugins", {})
+                for full_name, installations in plugins_dict.items():
+                    if not installations or not isinstance(installations, list):
+                        continue
+                    # Get the most recent installation
+                    inst = installations[-1]
+                    install_path = inst.get("installPath")
+                    if install_path:
+                        # Normalize path to relocate to container home if needed
+                        norm_path = install_path.replace("\\", "/")
+                        idx = norm_path.lower().find(".claude/plugins/")
+                        if idx != -1:
+                            suffix = norm_path[idx + len(".claude/plugins/") :]
+                            real_path = os.path.expanduser(
+                                os.path.join("~/.claude/plugins/", suffix)
+                            )
+                        else:
+                            real_path = os.path.expanduser(install_path)
+
+                        if os.path.isdir(real_path) and real_path not in loaded_paths:
+                            self._plugins.append({"type": "local", "path": real_path})
+                            loaded_paths.add(real_path)
+                            loaded_paths.add(os.path.normpath(real_path))
+                            short_name = full_name.split("@")[0]
+                            logger.info(
+                                f"Loading installed plugin: {short_name} from {real_path}"
+                            )
+            except Exception as e:
+                logger.warning(f"Failed to parse installed_plugins.json: {e}")
+
+        # 2. Fallback / Direct check: load other direct subdirectories under ~/.claude/plugins/
         if os.path.exists(plugins_dir):
             for plugin_name in os.listdir(plugins_dir):
+                if plugin_name.startswith(".") or plugin_name == "cache":
+                    continue
                 plugin_path = os.path.join(plugins_dir, plugin_name)
-                if os.path.isdir(plugin_path) and not plugin_name.startswith("."):
-                    self._plugins.append({"type": "local", "path": plugin_path})
-                    logger.info(f"Loading plugin: {plugin_name} from {plugin_path}")
+                if os.path.isdir(plugin_path):
+                    norm_plugin_path = os.path.normpath(plugin_path)
+                    if (
+                        norm_plugin_path not in loaded_paths
+                        and plugin_path not in loaded_paths
+                    ):
+                        # Avoid loading empty/invalid directories that might just be host caches
+                        # A valid plugin should contain commands, skills, agents, or a package.json
+                        has_content = any(
+                            os.path.exists(os.path.join(plugin_path, item))
+                            for item in (
+                                "commands",
+                                "skills",
+                                "agents",
+                                "package.json",
+                                ".claude-plugin",
+                            )
+                        )
+                        if has_content:
+                            self._plugins.append({"type": "local", "path": plugin_path})
+                            loaded_paths.add(plugin_path)
+                            loaded_paths.add(norm_plugin_path)
+                            logger.info(
+                                f"Loading local plugin: {plugin_name} from {plugin_path}"
+                            )
+                        else:
+                            logger.debug(
+                                f"Skipping empty/invalid plugin directory: {plugin_path}"
+                            )
+
         return self
 
     def with_plugin(self, path: str) -> "SDKOptionsBuilder":
@@ -247,7 +338,7 @@ class SDKOptionsBuilder:
             "mcp__github__*",
             "mcp__github_actions__*",
             "mcp__memory__memory_read",
-            "mcp__codebase_tools__*",
+            "mcp__codegraph__*",
         ]
 
         if os.getenv("ALLOW_HOST_MCP", "false").lower() == "true":
@@ -321,7 +412,7 @@ class SDKOptionsBuilder:
         """Add post-session hooks for transcript path capture and job buffering.
 
         This hook captures the native transcript path from the SDK and buffers
-        post-processing jobs (memory, retrospector, indexing) in
+        post-processing jobs (memory, retrospector) in
         ``_pending_post_jobs``. Jobs are NOT enqueued immediately — the
         SDK may fire Stop/SubagentStop multiple times per session. The
         caller must invoke ``flush_pending_post_jobs()`` after the SDK
@@ -338,14 +429,8 @@ class SDKOptionsBuilder:
         Returns:
             Self for method chaining
         """
-        memory_enabled = os.getenv("MEMORY_WORKER_ENABLED", "true").lower() == "true"
-        retrospector_enabled = (
-            os.getenv("RETROSPECTOR_ENABLED", "true").lower() == "true"
-        )
-        from shared.config import IndexingConfig
-
-        cfg = IndexingConfig()
-        indexing_enabled = cfg.is_enabled and bool(cfg.gemini_api_key)
+        memory_enabled = replica_count("MEMORY_WORKER_REPLICAS") > 0
+        retrospector_enabled = replica_count("RETROSPECTOR_REPLICAS") > 0
 
         # Capture context from builder for hooks to use
         repo_context = self._repo_context
@@ -401,16 +486,6 @@ class SDKOptionsBuilder:
                     }
                 )
 
-            if indexing_enabled:
-                pending.append(
-                    {
-                        "type": "indexing",
-                        "repo": repo,
-                        "event": event,
-                        "ref": ref,
-                    }
-                )
-
             return {"success": True}
 
         if memory_enabled or retrospector_enabled:
@@ -423,6 +498,39 @@ class SDKOptionsBuilder:
                     self._hooks[event] = [
                         HookMatcher(matcher="*", hooks=[capture_and_buffer])
                     ]
+
+        return self
+
+    def with_incremental_transcript(self) -> "SDKOptionsBuilder":
+        """Add incremental transcript writing hooks for durable message persistence.
+
+        Registers PostToolUse, UserPromptSubmit, Stop, and SubagentStop hooks
+        that write each SDK message to a JSONL file immediately using
+        O_APPEND | O_DSYNC crash-safe writes. This is the core durability
+        fix for Bug #1 (in-flight message loss on restart).
+
+        The transcript path is predicted from session metadata at runtime
+        using the SDK convention: ``~/.claude/projects/<sanitized-cwd>/<session_id>.jsonl``.
+        On ``Stop``/``SubagentStop``, the path is confirmed from the hook
+        input data.
+
+        Complements ``with_transcript_staging()`` — the staging hook captures
+        the transcript path for post-processing, while this hook writes
+        the durable transcript incrementally. No double-write occurs because
+        the staging hook only reads the path; it does not write to the
+        transcript file.
+
+        Returns:
+            Self for method chaining
+        """
+        hook = IncrementalTranscriptHook()
+        hooks = hook.build_hooks_dict()
+
+        for event_name, matchers in hooks.items():
+            if event_name in self._hooks:
+                self._hooks[event_name].extend(matchers)
+            else:
+                self._hooks[event_name] = list(matchers)
 
         return self
 
@@ -564,7 +672,7 @@ class SDKOptionsBuilder:
         """Inject pre-built structural context into system prompt.
 
         Structural context (file tree only — deep structure available via
-        codebase_tools MCP) is the lowest priority component and will be
+        CodeGraph MCP) is the lowest priority component and will be
         truncated first if the total system prompt exceeds the budget.
 
         Args:
@@ -724,12 +832,6 @@ class SDKOptionsBuilder:
         Returns:
             Configured ClaudeAgentOptions instance
         """
-        # Default to Sonnet if no model specified
-        if not self._model:
-            self._model = os.getenv(
-                "ANTHROPIC_DEFAULT_SONNET_MODEL", "claude-sonnet-4-20250514"
-            )
-
         # Assemble final system prompt with budget enforcement
         self._system_prompt = self._assemble_system_prompt()
 
@@ -917,16 +1019,16 @@ def _truncate_text(text: str, max_tokens: int, from_top: bool = False) -> str | 
             return None
 
         return "... (older comments truncated)\n" + "\n".join(result_lines)
-    else:
-        # Remove lines from the end, keeping the beginning
-        result_lines = []
-        for line in lines:
-            candidate = "\n".join(result_lines + [line])
-            if _estimate(candidate) > max_tokens:
-                break
-            result_lines.append(line)
 
-        if not result_lines:
-            return None
+    # Remove lines from the end, keeping the beginning
+    result_lines = []
+    for line in lines:
+        candidate = "\n".join(result_lines + [line])
+        if _estimate(candidate) > max_tokens:
+            break
+        result_lines.append(line)
 
-        return "\n".join(result_lines) + "\n... (truncated)"
+    if not result_lines:
+        return None
+
+    return "\n".join(result_lines) + "\n... (truncated)"

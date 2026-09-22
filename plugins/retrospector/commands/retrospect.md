@@ -42,10 +42,9 @@ It includes:
 When analyzing transcripts, you need to know what tools agents have access to so you can identify suboptimal tool usage. Agents in the sandbox have:
 
 **Search and exploration tools:**
-- `read_file_summary` — AST-extracted file overview at ~15% token cost of full `Read`
-- `search_codebase` — Text, semantic, and hybrid code search
-- `find_definitions` — Locate symbol definitions by exact name
-- `find_references` — Find all usages of a symbol across the codebase
+- `codegraph_search` — Find symbols by name or pattern
+- `codegraph_context` — 360-degree view of a symbol's role and relationships
+- `codegraph_callers` / `codegraph_callees` — Trace how symbols are used across the codebase
 
 **File tools:** `Read`, `Grep`, `Glob`, `Write`, `Edit`
 **GitHub tools:** `mcp__github__*` (PRs, issues, comments, reviews)
@@ -67,11 +66,11 @@ When analyzing transcripts, you need to know what tools agents have access to so
 
 When scanning the transcript, flag these common problems:
 
-1. **Sequential file reading** — Agent reads 10+ files one-by-one in consecutive turns. Should use `read_file_summary` to triage, then deep-read selectively. This is the most common cause of turn exhaustion on large PRs.
+1. **Sequential file reading** — Agent reads 10+ files one-by-one in consecutive turns. Should use `codegraph_context` or `codegraph_node` to triage, then deep-read selectively. This is the most common cause of turn exhaustion on large PRs.
 
-2. **Manual pattern searching** — Agent reads files to find where something is defined or how a pattern works. Should use `search_codebase` (text, semantic, or hybrid), `find_definitions`, or `find_references` instead.
+2. **Manual pattern searching** — Agent reads files to find where something is defined or how a pattern works. Should use `codegraph_search`, `codegraph_context`, or `Grep` instead.
 
-3. **Missing symbol tracing** — Agent changes or reviews code without checking where symbols are used downstream. Should use `find_references` to trace blast radius.
+3. **Missing symbol tracing** — Agent changes or reviews code without checking where symbols are used downstream. Should use `codegraph_callers` to trace blast radius.
 
 4. **Skill not loaded** — Agent struggles with codebase navigation but never loads the `codebase-context` skill via the Skill tool. If the instruction file doesn't reference the skill, suggest adding a reference.
 
@@ -112,7 +111,7 @@ and the session type from the sixth argument.
 
 | Workflow       | Command file                                      | Agent files                              |
 | -------------- | ------------------------------------------------- | ---------------------------------------- |
-| `review-pr`    | `plugins/pr-review-toolkit/commands/review-pr.md` | `plugins/pr-review-toolkit/agents/*.md`  |
+| `review-pr`    | `workflows.yaml` prompt template (delegates to oh-my-claudecode) | —                            |
 | `fix-ci`       | `plugins/ci-failure-toolkit/commands/fix-ci.md`   | `plugins/ci-failure-toolkit/agents/*.md` |
 | `triage-issue` | `prompts/triage.md`                               | —                                        |
 | `generic`      | `prompts/generic.md`                              | —                                        |
@@ -123,15 +122,15 @@ The workflow name (second argument) is the subagent name (e.g., "comment-analyze
 
 To find the subagent's instruction file:
 
-1. Check the transcript summary header for "Subagents invoked" - it may show the full type like "pr-review-toolkit:comment-analyzer"
+1. Check the transcript summary header for "Subagents invoked" - it may show the full type like "ci-failure-toolkit:test-failure-analyzer"
 2. If you see a colon format like "plugin-name:agent-name", the file is at `plugins/{plugin-name}/agents/{agent-name}.md`
 3. If no colon (just the agent name), try:
    - First: `Glob plugins/*/agents/{agent-name}.md` to find plugin agents
    - If not found: `subagents/{agent_name}.py` for Python subagents (edit only the `prompt="""..."""` field)
 
-Example: For agent "comment-analyzer" with type "pr-review-toolkit:comment-analyzer":
+Example: For agent "test-failure-analyzer" with type "ci-failure-toolkit:test-failure-analyzer":
 
-- File is at: `plugins/pr-review-toolkit/agents/comment-analyzer.md`
+- File is at: `plugins/ci-failure-toolkit/agents/test-failure-analyzer.md`
 
 Focus ONLY on this subagent's instruction file. Do not read the main workflow files.
 

@@ -24,6 +24,7 @@ import tempfile
 from pathlib import Path
 
 from shared import close_github_auth_service, wait_for_repo_sync
+from shared.constants import replica_count, resolve_model_tier
 from shared.dlq import enqueue_for_retry, is_transient_error
 from shared.git_utils import execute_git_command
 from shared.github_auth import get_github_auth_service
@@ -90,7 +91,7 @@ async def process_retrospector_job(message: dict, redis_client) -> None:
     agent_id = session_meta.get("agent_id")  # e.g., "comment-analyzer"
     agent_type = session_meta.get(
         "agent_type"
-    )  # e.g., "pr-review-toolkit:comment-analyzer"
+    )  # e.g., "ci-failure-toolkit:test-failure-analyzer"
 
     if hook_event == "SubagentStop" and agent_id:
         # Use agent_id as the workflow name for retrospection
@@ -108,7 +109,7 @@ async def process_retrospector_job(message: dict, redis_client) -> None:
         f"(hook_event={hook_event})"
     )
 
-    bot_repo = os.getenv("BOT_REPO", "GabsFranke/claude-code-github-agent")
+    bot_repo = os.getenv("BOT_REPO", "your-org/claude-code-github-agent")
     workspace = None
     repo_dir = None  # Initialize to prevent NameError in finally block
 
@@ -211,7 +212,9 @@ async def process_retrospector_job(message: dict, redis_client) -> None:
         ).strip()
 
         # Build SDK options using the factory builder
-        builder = SDKOptionsBuilder(cwd=workspace).with_sonnet()
+        tier = resolve_model_tier("RETROSPECTOR_MODEL", "sonnet")
+        logger.info(f"Retrospection model tier: {tier}")
+        builder = SDKOptionsBuilder(cwd=workspace).with_model_tier(tier)
 
         # Add GitHub MCP conditionally
         if github_token:
@@ -310,6 +313,17 @@ async def process_retrospector_job(message: dict, redis_client) -> None:
 
 async def main() -> None:
     """Main retrospector worker loop."""
+    if replica_count("RETROSPECTOR_REPLICAS") < 1:
+        # Compose gives this service 0 replicas when it is off, so normally
+        # there is no container to reach this. It catches a direct run.
+        logger.info(
+            "Retrospector worker is disabled (RETROSPECTOR_REPLICAS is 0); "
+            "idling. Set RETROSPECTOR_REPLICAS=1 to process jobs."
+        )
+        setup_graceful_shutdown(shutdown_event, logger)
+        await shutdown_event.wait()
+        return
+
     logger.info("Starting retrospector worker")
     setup_graceful_shutdown(shutdown_event, logger)
 

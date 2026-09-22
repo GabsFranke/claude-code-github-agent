@@ -10,8 +10,15 @@ from langfuse import Langfuse
 # Import shared utilities
 from shared import JobQueue, MultiRateLimiter, get_queue, setup_graceful_shutdown
 from shared.config import get_worker_config, handle_config_error
+from shared.constants import (
+    SESSION_RECOVERY_LOCK_KEY,
+    SESSION_RECOVERY_SWEEP_INTERVAL_SECONDS,
+    STREAMING_SESSION_STALE_SECONDS,
+)
 from shared.health import HealthChecker
 from shared.logging_utils import setup_logging
+from shared.session_store import SessionStore, UnifiedSessionInfo
+from shared.worktree_lock import WorktreeKey, WorktreeLock
 
 # Import modularized components
 from .processors import RequestProcessor
@@ -48,6 +55,119 @@ processor = None
 health_checker = None
 rate_limiters = None
 job_queue = None
+
+
+async def _recover_orphaned_sessions_loop(
+    job_queue: JobQueue, request_processor: RequestProcessor
+) -> None:
+    """Periodically recreate jobs for streaming sessions stuck at
+    status="running" whose job died before it ever started.
+
+    A job that expires from the pending queue before any sandbox worker
+    pops it (e.g. across a worker shutdown/restart gap) gets dead-lettered
+    directly from ``JobQueue.get_next_job()`` without ever reaching the
+    "processing" set — so ``reclaim_stale_jobs()`` never sees it and never
+    re-queues it. The streaming session created for it is left at
+    status="running" forever, and every subsequent webhook event for that
+    repo/issue/workflow just gets pushed into its inbox, which nothing will
+    ever read. This sweep finds those orphans and recreates their jobs
+    without needing a new GitHub event to trigger recovery.
+    """
+    await job_queue.ensure_connected()
+    redis = job_queue.redis
+    store = SessionStore(redis)
+
+    while not shutdown_event.is_set():
+        acquired = await redis.set(
+            SESSION_RECOVERY_LOCK_KEY,
+            "locked",
+            nx=True,
+            ex=SESSION_RECOVERY_SWEEP_INTERVAL_SECONDS,
+        )
+        if acquired:
+            try:
+                stale = await store.list_stale_running_sessions(
+                    STREAMING_SESSION_STALE_SECONDS
+                )
+                for info in stale:
+                    await _recover_session(info, store, job_queue, request_processor)
+            except Exception as e:
+                logger.error(
+                    f"[Recovery] Error scanning for orphaned sessions: {e}",
+                    exc_info=True,
+                )
+
+        for _ in range(SESSION_RECOVERY_SWEEP_INTERVAL_SECONDS):
+            if shutdown_event.is_set():
+                break
+            await asyncio.sleep(1)
+
+
+async def _recover_session(
+    info: UnifiedSessionInfo,
+    store: SessionStore,
+    job_queue: JobQueue,
+    request_processor: RequestProcessor,
+) -> None:
+    """Recreate the job for one stale-looking session, unless it's alive.
+
+    A recorded job_id is authoritative: if the JobQueue still shows it
+    pending/processing, the job is genuinely in flight no matter how long
+    it's taking. WorktreeLock alone can't rule that out — its TTL
+    (DEFAULT_LOCK_TTL) can expire well before a long-running job finishes,
+    which previously made this sweep duplicate still-running jobs every
+    cycle (last_run never advanced on its own, so the same session kept
+    re-qualifying as "stale").
+    """
+    if info.streaming_token:
+        job_id = await store.get_job_id(info.streaming_token)
+        if job_id:
+            job_status = await job_queue.get_job_status(job_id)
+            if job_status in ("pending", "processing"):
+                return
+
+    lock = WorktreeLock(
+        job_queue.redis,
+        WorktreeKey(
+            repo=info.repo,
+            thread_type=info.thread_type,
+            thread_id=info.thread_id,
+            workflow=info.workflow_name,
+        ),
+    )
+    if await lock.get_lock_info():
+        return  # actually being worked on right now
+
+    logger.warning(
+        f"[Recovery] Streaming session for {info.repo}#{info.issue_number} "
+        f"({info.workflow_name}) stuck at 'running' with no worker for "
+        f"over {STREAMING_SESSION_STALE_SECONDS}s - recreating its job"
+    )
+    if info.streaming_token:
+        await store.set_completed(info.streaming_token, is_error=True)
+
+    try:
+        await request_processor.process(
+            repo=info.repo,
+            issue_number=int(info.issue_number) if info.issue_number else None,
+            event_data={
+                "event_type": "recovery",
+                "action": "requeue",
+                "installation_id": info.installation_id,
+                "thread_type": info.thread_type,
+                "is_pr": info.thread_type == "pr",
+            },
+            user_query=info.initial_query,
+            user=info.user or "unknown",
+            ref=info.ref or None,
+            workflow_name=info.workflow_name,
+        )
+    except Exception as e:
+        logger.error(
+            f"[Recovery] Failed to recreate job for "
+            f"{info.repo}#{info.issue_number}: {e}",
+            exc_info=True,
+        )
 
 
 async def main():
@@ -121,6 +241,8 @@ async def main():
     )
     logger.info("Job queue initialized")
 
+    recovery_task: asyncio.Task | None = None
+
     try:
         # Initialize shared GitHub auth service
         from shared import GitHubAuthService
@@ -147,6 +269,13 @@ async def main():
 
         # Initialize queue
         queue = get_queue()
+
+        # Background sweep to recover streaming sessions orphaned by jobs
+        # that expired from the pending queue before any sandbox worker
+        # ever picked them up (see _recover_orphaned_sessions_loop).
+        recovery_task = asyncio.create_task(
+            _recover_orphaned_sessions_loop(job_queue, processor)
+        )
 
         # Subscribe and process messages
         async def callback(message: dict):
@@ -214,6 +343,8 @@ async def main():
     finally:
         # Cleanup
         logger.info("Cleaning up resources...")
+        if recovery_task and not recovery_task.done():
+            recovery_task.cancel()
         if health_checker:
             await health_checker.stop()
         if processor:

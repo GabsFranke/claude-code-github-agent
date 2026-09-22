@@ -11,7 +11,6 @@ Agents come in two categories:
    - `memory-extractor` — Extracts facts from session transcripts to build repository knowledge (runs on Haiku for cost efficiency)
 
 2. **Plugin Agents** (in `plugins/*/agents/`): Loaded dynamically from plugin directories.
-   - **pr-review-toolkit** (7 agents): code-reviewer, code-architecture-reviewer, code-simplifier, comment-analyzer, pr-test-analyzer, silent-failure-hunter, type-design-analyzer
    - **ci-failure-toolkit** (4 agents): build-failure-analyzer, deploy-failure-analyzer, lint-failure-analyzer, test-failure-analyzer
    - **test-toolkit** (1 agent): generic-worker
 
@@ -107,7 +106,7 @@ docker-compose exec sandbox_worker tail -n 50 /root/.claude/state/langfuse_hook.
 
 ```bash
 # Check agent configuration
-docker-compose exec sandbox_worker cat /root/.claude/plugins/pr-review-toolkit/agents/code-reviewer.md
+docker-compose exec sandbox_worker cat /root/.claude/plugins/ci-failure-toolkit/agents/test-failure-analyzer.md
 
 # Look for permission errors in logs
 docker-compose logs sandbox_worker | grep -i "permission\|denied\|error"
@@ -165,7 +164,7 @@ This shows detailed execution including agent invocations.
 ### Successful PR Review Flow
 
 1. **Main agent starts** — Receives review prompt
-2. **Invokes `/pr-review-toolkit:review-pr`** — The plugin's command orchestrates the review
+2. **Invokes the workflow's command** (for `review-pr`, an oh-my-claudecode team review) which orchestrates the review
 3. **Plugin delegates to specialized agents** — You should see in logs:
    ```
    Spawning agent: code-reviewer
@@ -232,7 +231,7 @@ docker-compose exec sandbox_worker tail -n 50 /root/.claude/state/langfuse_hook.
 docker-compose exec sandbox_worker claude --agent architecture-reviewer -p "Review the design patterns in this codebase"
 
 # Test a plugin command
-docker-compose exec sandbox_worker claude -p "/pr-review-toolkit:review-pr owner/repo 42"
+docker-compose exec sandbox_worker claude -p "/fix-ci owner/repo 42"
 
 # Check Claude Code version
 docker-compose exec sandbox_worker claude --version
