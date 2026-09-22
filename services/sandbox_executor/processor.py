@@ -33,7 +33,7 @@ from shared.utils import build_session_url
 from shared.worktree_lock import WorktreeKey, WorktreeLock
 from shared.worktree_manager import get_worktree_path, reuse_or_create_worktree
 
-from .git_setup import configure_git, init_submodules
+from .git_setup import configure_git, credentials_path, init_submodules
 from .utils import configure_builder, find_transcript_path, write_transcript_meta
 
 logger = logging.getLogger(__name__)
@@ -79,7 +79,9 @@ class JobProcessor:
                 return
 
             await self._setup_worktree()
-            await configure_git(self.workspace, self.job_data["github_token"])
+            await configure_git(
+                self.workspace, self.job_data["github_token"], self.job_id
+            )
             await init_submodules(self.workspace, self.repo)
             if self.session_mode not in ("resume", "continue"):
                 await self._run_repo_setup()
@@ -902,11 +904,13 @@ class JobProcessor:
             pass
 
         try:
-            if self.workspace:
-                per_job_creds = os.path.join(self.workspace, ".git-credentials")
-                if os.path.exists(per_job_creds):
-                    os.remove(per_job_creds)
-                    logger.debug("Cleaned up per-job git credentials")
+            # Keyed on job_id, so this no longer depends on self.workspace
+            # being set — a job that died after configure_git but before the
+            # workspace was recorded still gets its token removed.
+            per_job_creds = credentials_path(self.job_id)
+            if os.path.exists(per_job_creds):
+                os.remove(per_job_creds)
+                logger.debug("Cleaned up per-job git credentials")
                 # Unset global credential helper to avoid stale references
                 # when the credentials file no longer exists
                 await execute_git_command(

@@ -121,19 +121,29 @@ then pushes.
 
 **Control.** `.env` is gitignored and never committed; all configuration is
 injected via `env_file`/`environment`. Git credentials are written to a
-**per-job** `.git-credentials` inside the disposable worktree
-(`services/sandbox_executor/git_setup.py`) and die with it. The shared bare
-cache under `/var/cache/repos` never holds a token: `repo_sync` authenticates
-each clone and fetch with a per-command `http.extraheader` and keeps the
-stored remote URL token-free (`services/repo_sync/sync_worker.py`,
-`git_auth_args`), so nothing outlives the command that used it.
-`.gitguardian.yaml` and `.pre-commit-config.yaml` scan commits. Test
-credentials come from `TEST_REDIS_PASSWORD`/`REDIS_PASSWORD`, never literals,
-and the RSA key used in tests is generated per session rather than stored.
+**per-job** `.git-credentials` held *outside* the checkout, under
+`$CLAUDE_TEMP_DIR/job-creds/` (`services/sandbox_executor/git_setup.py`,
+`credentials_path`), and removed in `JobProcessor._cleanup`. The placement is
+the control, not just the lifetime: the file previously sat at the root of
+the worktree, where `0o600` kept other users out but did nothing about `git
+add`. Since the agent's core loop is stage, commit, push, one `git add -A`
+would have committed a live installation token with write access to every
+repo in the installation. `.git-credentials` is also gitignored as defence in
+depth against a stale file from an older build. The shared bare cache under
+`/var/cache/repos` never holds a token: `repo_sync` authenticates each clone
+and fetch with a per-command `http.extraheader` and keeps the stored remote
+URL token-free (`services/repo_sync/sync_worker.py`, `git_auth_args`), so
+nothing outlives the command that used it. `.gitguardian.yaml` and
+`.pre-commit-config.yaml` scan commits. Test credentials come from
+`TEST_REDIS_PASSWORD`/`REDIS_PASSWORD`, never literals, and the RSA key used
+in tests is generated per session rather than stored.
 
-**Tested.** `tests/repo_sync/test_sync_worker.py::TestGitAuthArgs` and the
-clone/fetch cases in `TestProcessSyncRequest`, which assert the token appears
-only as a header and never in a URL.
+**Tested.** `tests/sandbox_executor/test_git_setup.py`, which asserts the
+credential path lies outside the workspace and that `configure_git` leaves no
+`.git-credentials` in the checkout; plus
+`tests/repo_sync/test_sync_worker.py::TestGitAuthArgs` and the clone/fetch
+cases in `TestProcessSyncRequest`, which assert the token appears only as a
+header and never in a URL.
 
 ### T6: Unbounded resource consumption
 
@@ -145,6 +155,29 @@ capped by `sdk_timeout` (default 1800 s), and `MAX_AUTO_CONTINUES`
 `shared/rate_limiter.py` bounds GitHub and Anthropic call rates,
 `shared/retry.py` bounds retries with backoff, and `shared/dlq.py` captures
 poison messages instead of looping on them.
+
+### T7: Lateral movement through internal service APIs
+
+**Threat.** A prompt-injected agent reaches an internal HTTP endpoint on the
+compose network and acts on repositories the triggering commenter cannot
+touch.
+
+**Control.** `POST /schedule/one-shot` is the one internal endpoint exposed to
+agents (via `mcp_servers/scheduler/server.py`). It requires an
+`X-Internal-Token` header compared with `hmac.compare_digest` against
+`SCHEDULER_INTERNAL_TOKEN`, and **fails closed**: an unset secret returns 503
+rather than leaving the endpoint open. Authentication bounds who may schedule;
+the request target is bounded separately, with `workflow_name` validated
+against the loaded workflow set and `repo` against
+`GitHubAuthService.get_installation_repositories()`, so a caller holding the
+token still cannot reach a repo the App was never installed on. A repo list
+that cannot be resolved denies rather than assumes. The scheduler publishes no
+`ports:`, so none of this is reachable off-host in the first place; the token
+is defence against the compose network, not the internet.
+
+**Tested.** `tests/services/test_scheduler_api.py::TestOneShotAuth`, covering
+missing, wrong and unconfigured tokens, unknown workflows, out-of-installation
+repos, and an unresolvable installation.
 
 ## 5. Explicitly out of scope
 

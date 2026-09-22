@@ -154,6 +154,7 @@ async def _recover_session(
                 "event_type": "recovery",
                 "action": "requeue",
                 "installation_id": info.installation_id,
+                "thread_type": info.thread_type,
                 "is_pr": info.thread_type == "pr",
             },
             user_query=info.initial_query,

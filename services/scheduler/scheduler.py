@@ -2,6 +2,7 @@
 
 import datetime
 import logging
+import time
 
 import redis.asyncio as redis
 from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore[import]
@@ -15,17 +16,53 @@ from .config import get_scheduler_config
 
 logger = logging.getLogger(__name__)
 
+# TTL of the per-tick dedup lock in trigger_workflow.
+TRIGGER_DEDUP_TTL_SECONDS = 300
+# Deliberately equal: a tick recovered within the grace window is still
+# inside its dedup lock, so it cannot double-fire.
+MISFIRE_GRACE_SECONDS = TRIGGER_DEDUP_TTL_SECONDS
+# Installation membership changes on a human timescale; this only needs to
+# be fresh enough that a newly added repo becomes schedulable promptly.
+INSTALLATION_REPOS_TTL = 60.0
+
 
 class WorkflowScheduler:
     """Manages scheduling and triggering of time-based workflows."""
 
     def __init__(self):
         self.config = get_scheduler_config()
-        self.scheduler = AsyncIOScheduler()
+        # APScheduler's stock job_defaults ship misfire_grace_time=1, so a
+        # cron whose tick lands while the loop is busy for more than one
+        # second is silently skipped.  That is routine here: trigger_workflow
+        # with repos ["*"] does a paginated GitHub App installation walk plus
+        # a publish per repo, which takes seconds on a large installation —
+        # a daily cron has a real chance of simply not running that day.
+        #
+        # 300s matches the Redis dedup lock TTL in trigger_workflow, so a
+        # late-but-recovered tick is still deduplicated rather than double-firing.
+        #
+        # NOTE: the jobstore is still APScheduler's in-memory default, so
+        # one-shot jobs do not survive a restart. Durable one-shots are
+        # tracked separately; cron jobs are unaffected because load_schedules
+        # re-derives them from workflows.yaml at startup.
+        self.scheduler = AsyncIOScheduler(
+            job_defaults={
+                "misfire_grace_time": MISFIRE_GRACE_SECONDS,
+                "coalesce": True,
+                "max_instances": 1,
+            },
+            # A string, not datetime.UTC: APScheduler 3.x before 3.11
+            # rejected non-pytz tzinfo objects, and this is constructed at
+            # module import in main.py, so a TypeError here is an
+            # import-time crash-loop rather than a degraded feature.
+            timezone="UTC",
+        )
         self.workflow_engine = WorkflowEngine(build_routing=False)
         self.queue = get_queue()
         self.redis_client: redis.Redis | None = None
         self._running = False
+        self._installation_repos_cache: list[str] | None = None
+        self._installation_repos_cached_at = 0.0
 
     async def start(self) -> None:
         """Start the scheduler service."""
@@ -146,7 +183,9 @@ class WorkflowScheduler:
         for repo in repos:
             # 3. Acquire distributed lock in Redis to avoid duplicates across instances
             lock_key = f"scheduler:lock:{workflow_name}:{repo}:{timestamp_str}"
-            acquired = await self.redis_client.set(lock_key, "1", ex=300, nx=True)
+            acquired = await self.redis_client.set(
+                lock_key, "1", ex=TRIGGER_DEDUP_TTL_SECONDS, nx=True
+            )
 
             if not acquired:
                 logger.debug(
@@ -193,6 +232,30 @@ class WorkflowScheduler:
                     f"Failed to enqueue scheduled job for workflow '{workflow_name}' on repository '{repo}': {e}",
                     exc_info=True,
                 )
+
+    async def installation_repositories(self) -> list[str]:
+        """Installation repos for admission checks, cached briefly.
+
+        ``_resolve_repositories(["*"])`` does a paginated GitHub App walk. On
+        the cron path that runs once per tick, but the one-shot endpoint would
+        call it per request, spending shared installation rate limit and adding
+        a remote round trip to each request's latency. Installation membership
+        changes on a human timescale, so a short TTL costs nothing.
+        """
+        now = time.monotonic()
+        if (
+            self._installation_repos_cache is not None
+            and now - self._installation_repos_cached_at < INSTALLATION_REPOS_TTL
+        ):
+            return self._installation_repos_cache
+
+        repos = await self._resolve_repositories(["*"])
+        # Do not cache a failure: _resolve_repositories returns [] on error,
+        # and callers treat [] as "cannot prove scope" and deny.
+        if repos:
+            self._installation_repos_cache = repos
+            self._installation_repos_cached_at = now
+        return repos
 
     async def _resolve_repositories(self, repo_configs: list[str]) -> list[str]:
         """Resolve list of repositories to target based on configuration.

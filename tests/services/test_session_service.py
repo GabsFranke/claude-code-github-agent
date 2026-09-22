@@ -2108,7 +2108,10 @@ def _make_resume_redis():
     """Create a mock Redis client for resume job testing."""
     r = MagicMock()
     r.setex = AsyncMock(return_value=True)
-    r.setnx = AsyncMock(return_value=1)
+    # The resume lock is acquired with an atomic SET NX EX and released with a
+    # compare-and-delete Lua script, not SETNX + EXPIRE + DELETE.
+    r.set = AsyncMock(return_value=True)
+    r.eval = AsyncMock(return_value=1)
     r.rpush = AsyncMock(return_value=1)
     r.publish = AsyncMock(return_value=1)
     r.expire = AsyncMock(return_value=True)
@@ -2250,7 +2253,7 @@ class TestResumeJobs:
         store = _make_resume_mock_store()
         store.get_streaming_session.return_value = _session_with_status("completed")
         r = _make_resume_redis()
-        r.setnx.return_value = 0
+        r.set.return_value = None  # SET NX returns nil when the key exists
 
         from services.session_service.resume import handle_resume
 
@@ -2483,6 +2486,56 @@ class TestResumeJobs:
         assert len(publish_calls) >= 1
 
     @pytest.mark.asyncio
+    async def test_resume_records_job_id_before_job_is_claimable(self):
+        """The resume lane must participate in orphan-duplicate prevention.
+
+        The orphan sweep treats a live job_id as authoritative. set_running
+        clears session_id and the streaming hash has no worktree_path, so a
+        resumed session matches both orphan guards; if the job were pushed to
+        the pending queue while no job_id was recorded, a sweep landing in
+        that window would declare the session dead and enqueue a second job —
+        duplicate GitHub comments and two workers on one worktree.
+        """
+        store = _make_resume_mock_store()
+        store.get_streaming_session.return_value = _session_with_status("completed")
+
+        order: list[str] = []
+        r = _make_resume_redis()
+
+        async def _record_rpush(*args, **kwargs):
+            # handle_resume also rpushes conversation history; only the push
+            # to the pending job queue makes the job claimable by a worker.
+            if args and args[0] == PENDING_JOB_QUEUE:
+                order.append("rpush_pending")
+            return 1
+
+        async def _record_set_job_id(*args, **kwargs):
+            order.append("set_job_id")
+
+        r.rpush = AsyncMock(side_effect=_record_rpush)
+        store.set_job_id = AsyncMock(side_effect=_record_set_job_id)
+
+        from services.session_service.resume import handle_resume
+
+        result = await handle_resume(
+            token="tok-jobid",
+            message="resume me",
+            store=store,
+            redis=r,
+        )
+
+        assert result is not None
+        store.set_job_id.assert_awaited_once()
+        recorded_token, recorded_job_id = store.set_job_id.await_args.args
+        assert recorded_token == "tok-jobid"
+        assert recorded_job_id
+
+        assert order == ["set_job_id", "rpush_pending"], (
+            "job_id must be recorded before the job is pushed to the pending "
+            f"queue; got {order}"
+        )
+
+    @pytest.mark.asyncio
     async def test_resume_lock_released_on_success(self):
         """Resume lock released (deleted) after successful job creation."""
         store = _make_resume_mock_store()
@@ -2498,5 +2551,19 @@ class TestResumeJobs:
             redis=r,
         )
 
-        r.setnx.assert_called()
-        r.delete.assert_called()
+        # Acquire must be a single atomic SET NX EX. SETNX followed by a
+        # separate EXPIRE leaves the key at TTL -1 if the process dies in
+        # between, and since the release never runs on a hard kill the session
+        # becomes permanently un-resumable.
+        from services.session_service.resume import RESUME_LOCK_TTL
+
+        assert r.set.await_count == 1
+        _, set_kwargs = r.set.await_args
+        assert set_kwargs.get("nx") is True
+        assert set_kwargs.get("ex") == RESUME_LOCK_TTL
+
+        # Release must be the compare-and-delete script, not an unconditional
+        # DELETE: if the critical section outran the TTL, the lock we would be
+        # deleting now belongs to another caller.
+        assert r.eval.await_count == 1
+        r.delete.assert_not_called()

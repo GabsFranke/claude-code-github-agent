@@ -6,7 +6,7 @@ import logging
 import os
 import re
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, Optional
 
 import httpx
@@ -19,7 +19,12 @@ from shared.constants import (
     STREAMING_SESSION_STALE_SECONDS,
     session_dedup_key,
 )
-from shared.session_store import SessionStore, resolve_thread_type
+from shared.session_store import (
+    SessionStore,
+    _is_stale_running,
+    _parse_timestamp,
+    resolve_thread_type,
+)
 from shared.utils import build_session_url
 from shared.worktree_lock import WorktreeKey, WorktreeLock
 from workflows import WorkflowEngine
@@ -254,13 +259,20 @@ class RequestProcessor:
             if status in ("pending", "processing"):
                 return None
 
-        try:
-            age = (
-                datetime.now(UTC) - datetime.fromisoformat(info.last_run)
-            ).total_seconds()
-        except ValueError:
+        # Share one decision with SessionStore.list_stale_running_sessions so
+        # the sweep and this pre-flight check cannot disagree about whether a
+        # given session is dead. See _is_stale_running for why an empty
+        # last_run and a corrupt one are treated differently.
+        cutoff = (
+            datetime.now(UTC) - timedelta(seconds=STREAMING_SESSION_STALE_SECONDS)
+        ).timestamp()
+        if not _is_stale_running(info, cutoff):
             return None
-        return age if age > STREAMING_SESSION_STALE_SECONDS else None
+
+        last_run_at = _parse_timestamp(info.last_run)
+        if last_run_at is None:
+            return float(STREAMING_SESSION_STALE_SECONDS + 1)
+        return (datetime.now(UTC) - last_run_at).total_seconds()
 
     async def _execute(
         self,

@@ -1,11 +1,17 @@
 """Unit tests for the Workflow Scheduler service."""
 
+import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from services.scheduler.config import get_scheduler_config
-from services.scheduler.scheduler import WorkflowScheduler
+from services.scheduler.scheduler import (
+    INSTALLATION_REPOS_TTL,
+    MISFIRE_GRACE_SECONDS,
+    TRIGGER_DEDUP_TTL_SECONDS,
+    WorkflowScheduler,
+)
 
 
 class TestSchedulerConfig:
@@ -164,3 +170,109 @@ class TestWorkflowScheduler:
         assert job_payload["event_data"]["event_type"] == "schedule"
         assert job_payload["event_data"]["trigger_type"] == "schedule"
         assert job_payload["event_data"]["installation_id"] == "789012"
+
+
+class TestSchedulerJobDefaults:
+    """APScheduler's stock defaults make scheduling quietly unreliable."""
+
+    @pytest.fixture
+    def mock_scheduler_deps(self):
+        with (
+            patch("services.scheduler.scheduler.redis"),
+            patch("services.scheduler.scheduler.get_queue"),
+            patch("services.scheduler.scheduler.GitHubAuthService"),
+            patch("services.scheduler.scheduler.WorkflowEngine"),
+        ):
+            yield
+
+    def test_misfire_grace_time_is_not_the_one_second_default(
+        self, mock_scheduler_deps
+    ):
+        """A tick landing while the loop is busy must not be silently dropped.
+
+        BaseScheduler ships misfire_grace_time=1, so any cron firing while the
+        loop is busy for over a second is skipped with only a library log line.
+        trigger_workflow with repos ["*"] does a paginated installation walk
+        plus a publish per repo, which routinely exceeds that — meaning a daily
+        cron could simply not run that day.
+        """
+        ws = WorkflowScheduler()
+        defaults = ws.scheduler._job_defaults
+
+        assert defaults["misfire_grace_time"] == MISFIRE_GRACE_SECONDS
+        assert defaults["misfire_grace_time"] > 1
+
+    def test_misfire_grace_matches_the_dedup_lock_ttl(self, mock_scheduler_deps):
+        """A recovered misfire must still be inside its dedup lock.
+
+        If the grace window outlived the lock, a late tick would re-fire a
+        workflow the dedup lock was meant to suppress.
+        """
+        assert MISFIRE_GRACE_SECONDS == TRIGGER_DEDUP_TTL_SECONDS
+
+    def test_coalesce_and_max_instances_are_pinned(self, mock_scheduler_deps):
+        ws = WorkflowScheduler()
+        defaults = ws.scheduler._job_defaults
+
+        assert defaults["coalesce"] is True
+        assert defaults["max_instances"] == 1
+
+    def test_timezone_is_utc(self, mock_scheduler_deps):
+        """Cron expressions must not drift with the container's local zone."""
+        ws = WorkflowScheduler()
+
+        assert ws.scheduler.timezone == datetime.UTC
+
+
+class TestInstallationRepoCache:
+    """The admission check must not spend App API quota per request.
+
+    ``_resolve_repositories(["*"])`` does a paginated GitHub App installation
+    walk. The cron path calls it once per tick, but the one-shot endpoint
+    would call it on every request, adding a remote round trip to each
+    request's latency and drawing down the shared installation rate limit.
+    """
+
+    @pytest.fixture
+    def scheduler(self):
+        with (
+            patch("services.scheduler.scheduler.redis"),
+            patch("services.scheduler.scheduler.get_queue"),
+            patch("services.scheduler.scheduler.GitHubAuthService"),
+            patch("services.scheduler.scheduler.WorkflowEngine"),
+        ):
+            yield WorkflowScheduler()
+
+    @pytest.mark.asyncio
+    async def test_second_call_does_not_hit_github(self, scheduler):
+        resolve = AsyncMock(return_value=["owner/repo"])
+        with patch.object(scheduler, "_resolve_repositories", resolve):
+            first = await scheduler.installation_repositories()
+            second = await scheduler.installation_repositories()
+
+        assert first == second == ["owner/repo"]
+        assert resolve.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_failure_is_not_cached(self, scheduler):
+        """`[]` means "cannot prove scope" and callers deny on it.
+
+        Caching that would keep denying for the whole TTL after a transient
+        GitHub blip had passed.
+        """
+        resolve = AsyncMock(side_effect=[[], ["owner/repo"]])
+        with patch.object(scheduler, "_resolve_repositories", resolve):
+            assert await scheduler.installation_repositories() == []
+            assert await scheduler.installation_repositories() == ["owner/repo"]
+
+        assert resolve.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_cache_expires(self, scheduler):
+        resolve = AsyncMock(return_value=["owner/repo"])
+        with patch.object(scheduler, "_resolve_repositories", resolve):
+            await scheduler.installation_repositories()
+            scheduler._installation_repos_cached_at -= INSTALLATION_REPOS_TTL + 1
+            await scheduler.installation_repositories()
+
+        assert resolve.await_count == 2

@@ -16,6 +16,16 @@ class SchedulerConfig(BaseConfig):
         default="/tmp/scheduler_health",  # nosec B108
         description="Health check file path",
     )
+    scheduler_internal_token: str = Field(
+        default="",
+        description=(
+            "Shared secret required on POST /schedule/one-shot. The endpoint "
+            "is reachable by every container on the compose network, including "
+            "sandbox agents driven by attacker-authored issue and PR text, so "
+            "an empty value disables one-shot scheduling rather than leaving "
+            "it open."
+        ),
+    )
 
     _github_config: GitHubConfig | None = None
     _queue_config: QueueConfig | None = None

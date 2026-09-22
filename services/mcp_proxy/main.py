@@ -55,17 +55,27 @@ def _get_allowed_env_prefixes() -> tuple[str, ...]:
 # Safe base environment for subprocesses
 _SAFE_ENV_VARS = {"PATH", "HOME", "LANG", "TERM", "PWD", "SHELL", "USER"}
 
+# Secrets a specific MCP server genuinely needs, keyed by server name so a
+# secret reaches only the one subprocess that uses it. Exact names, not
+# prefixes: prefixed names can be overridden by request query parameters
+# below, and a caller must not be able to substitute its own value.
+_PER_SERVER_SECRET_ENV_VARS: dict[str, frozenset[str]] = {
+    "scheduler": frozenset({"SCHEDULER_INTERNAL_TOKEN"}),
+}
 
-def _build_subprocess_env() -> dict[str, str]:
-    """Build a minimal environment for MCP server subprocesses.
 
-    Only includes safe system vars and whitelisted prefixes.
-    Sensitive vars like ANTHROPIC_API_KEY, REDIS_PASSWORD, etc. are excluded.
+def _build_subprocess_env(server_name: str) -> dict[str, str]:
+    """Build a minimal environment for an MCP server subprocess.
+
+    Includes safe system vars, whitelisted prefixes, and only the secrets
+    *server_name* is declared to need. Sensitive vars like ANTHROPIC_API_KEY
+    and REDIS_PASSWORD are excluded.
     """
     env: dict[str, str] = {}
     allowed_prefixes = _get_allowed_env_prefixes()
+    server_secrets = _PER_SERVER_SECRET_ENV_VARS.get(server_name, frozenset())
     for key, value in os.environ.items():
-        if key in _SAFE_ENV_VARS:
+        if key in _SAFE_ENV_VARS or key in server_secrets:
             env[key] = value
         elif any(key.startswith(prefix) for prefix in allowed_prefixes):
             env[key] = value
@@ -141,7 +151,7 @@ async def mcp_sse(server_name: str, request: Request):
 
     # Read query parameters to pass as environment variables.
     # Security: only inject params whose uppercased key matches an allowed prefix.
-    env = _build_subprocess_env()
+    env = _build_subprocess_env(server_name)
     allowed_prefixes = _get_allowed_env_prefixes()
     for k, v in request.query_params.items():
         key_upper = k.upper()
@@ -169,7 +179,9 @@ async def mcp_sse(server_name: str, request: Request):
         logger.info(f"Started {server_name} session {session_id} (PID {process.pid})")
     except Exception as e:
         logger.error(f"Failed to start {server_name}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to start server process")
+        raise HTTPException(
+            status_code=500, detail="Failed to start server process"
+        ) from e
 
     # Start a background task to log stderr from the subprocess
     async def log_stderr():
@@ -242,11 +254,11 @@ async def mcp_message(session_id: str, request: Request):
     body = await request.body()
     try:
         if not process.stdin:
-            raise Exception("Process stdin is not available")
+            raise RuntimeError("Process stdin is not available")
 
         process.stdin.write(body + b"\n")
         await process.stdin.drain()
         return Response(status_code=202)
     except Exception as e:
         logger.error(f"Failed to write to session {session_id}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to write to process")
+        raise HTTPException(status_code=500, detail="Failed to write to process") from e

@@ -42,6 +42,13 @@ logger = logging.getLogger(__name__)
 
 RESUME_LOCK_PREFIX = "agent:session:resume:lock:"
 RESUME_LOCK_TTL = 30
+# Compare-and-delete: only the holder that wrote this nonce may release.
+_RELEASE_IF_OWNER = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+    return redis.call('DEL', KEYS[1])
+end
+return 0
+"""
 
 _RESUMABLE_STATUSES = frozenset({"completed", "error"})
 
@@ -64,8 +71,8 @@ async def handle_resume(
         store: ``SessionStore`` instance for session operations.
         redis: Redis client for job queue and lock management.
     """
-    lock_acquired = await _acquire_resume_lock(token, redis)
-    if not lock_acquired:
+    lock_nonce = await _acquire_resume_lock(token, redis)
+    if lock_nonce is None:
         logger.info(
             "[Resume] Lock not acquired for %s... — resume already in progress",
             token[:8],
@@ -152,7 +159,7 @@ async def handle_resume(
             conversation_config=conversation_config,
             token=token,
         )
-        job_id = await _create_job(job_data, redis)
+        job_id = await _create_job(job_data, redis, store, token)
 
         logger.info(
             "[Resume] Created job %s for session %s... (mode=%s, status was %s)",
@@ -164,28 +171,43 @@ async def handle_resume(
         return job_data
 
     finally:
-        await _release_resume_lock(token, redis)
+        await _release_resume_lock(token, redis, lock_nonce)
 
 
-async def _acquire_resume_lock(token: str, redis: Any) -> bool:
+async def _acquire_resume_lock(token: str, redis: Any) -> str | None:
     """Atomically acquire the resume lock for *token*.
 
-    Uses ``SETNX`` to ensure only one caller can create a resume job
-    for this session at a time.  The lock has a short TTL as a safety
-    net in case the holder crashes before releasing it.
+    Returns the ownership nonce on success, ``None`` when another caller
+    already holds the lock.
+
+    ``SET NX EX`` in one command rather than ``SETNX`` then ``EXPIRE``:
+    a process dying between those two calls leaves the key with TTL -1,
+    and since the ``finally`` release never runs on a hard kill the
+    session becomes permanently un-resumable until someone DELs the key
+    by hand.  ``worker.py`` already uses the atomic form.
+
+    The value is a per-acquisition nonce so the release can verify
+    ownership — see ``_release_resume_lock``.
     """
     lock_key = f"{RESUME_LOCK_PREFIX}{token}"
-    acquired = await redis.setnx(lock_key, "1")
-    if acquired:
-        await redis.expire(lock_key, RESUME_LOCK_TTL)
-    return bool(acquired)
+    nonce = str(uuid.uuid4())
+    acquired = await redis.set(lock_key, nonce, nx=True, ex=RESUME_LOCK_TTL)
+    return nonce if acquired else None
 
 
-async def _release_resume_lock(token: str, redis: Any) -> None:
-    """Release the resume lock for *token*."""
+async def _release_resume_lock(token: str, redis: Any, nonce: str) -> None:
+    """Release the resume lock for *token*, but only if we still hold it.
+
+    The critical section can outrun ``RESUME_LOCK_TTL`` under load (many
+    sequential round trips plus an unbounded drain of the inbox).  When it
+    does, the lock expires and another caller legitimately acquires it —
+    an unconditional DELETE here would free *their* lock and let a third
+    caller in, giving concurrent resumes of one session: duplicate SDK
+    runs, duplicate GitHub comments, double-counted runs.
+    """
     lock_key = f"{RESUME_LOCK_PREFIX}{token}"
     try:
-        await redis.delete(lock_key)
+        await redis.eval(_RELEASE_IF_OWNER, 1, lock_key, nonce)
     except Exception:
         logger.warning("[Resume] Failed to release resume lock for %s...", token[:8])
 
@@ -245,17 +267,25 @@ async def _build_job_data(
     }
 
 
-async def _create_job(job_data: dict, redis: Any) -> str:
+async def _create_job(
+    job_data: dict, redis: Any, store: SessionStore, token: str
+) -> str:
     """Create a job directly in Redis.
 
-    Stores job data and status with TTL, then pushes the job ID
-    onto the pending queue so a worker picks it up.
+    Stores job data and status with TTL, records the job id against the
+    streaming session so orphan recovery can see it, then pushes the job
+    ID onto the pending queue so a worker picks it up.
     """
     job_id = str(uuid.uuid4())
     await redis.setex(
         f"{JOB_DATA_PREFIX}{job_id}", JOB_TTL_SECONDS, json.dumps(job_data)
     )
     await redis.setex(f"{JOB_STATUS_PREFIX}{job_id}", JOB_TTL_SECONDS, "pending")
+    # Record the job id *before* the rpush.  The orphan sweep treats a live
+    # job_id as authoritative; if the job were claimable while unrecorded, a
+    # sweep landing in that window would see no worktree_path, no session_id
+    # and no job_id, declare the session dead and enqueue a duplicate.
+    await store.set_job_id(token, job_id)
     await redis.rpush(PENDING_JOB_QUEUE, job_id)
     logger.info(
         "[Resume] Enqueued job %s (mode=%s)", job_id[:8], job_data.get("session_mode")

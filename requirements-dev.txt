@@ -6,6 +6,7 @@ pytest-mock>=3.15.1
 pytest-timeout>=2.4.0  # a hung test fails with a stack dump instead of stalling CI
 requests>=2.32.0  # deployment tests in tests/integration
 cryptography>=46.0.6  # generates the throwaway RSA key in tests
+fakeredis>=2.26.0  # real HSET/HINCRBY/HSETNX semantics for session-store state tests
 black>=26.5.1
 isort>=8.0.1
 flake8>=7.3.0
@@ -19,3 +20,5 @@ pre-commit>=4.6.0
 -r services/agent_worker/requirements.txt
 -r services/sandbox_executor/requirements.txt
 -r services/scheduler/requirements.txt
+-r services/session_service/requirements.txt
+-r services/repo_sync/requirements.txt

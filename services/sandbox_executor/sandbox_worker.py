@@ -28,6 +28,7 @@ from shared.worktree_manager import (
     get_project_dir_for_worktree,
 )
 
+from .git_setup import sweep_orphaned_credentials
 from .processor import JobProcessor
 
 # Configure logging
@@ -197,6 +198,16 @@ async def _orphan_cleanup_loop(redis: Any) -> None:
 
         if acquired:
             try:
+                # Reap credential files from jobs that died non-gracefully.
+                # JobProcessor._cleanup is the normal deleter, but it does not
+                # run on SIGKILL, an OOM kill under mem_limit, or a container
+                # restart mid-job — which would otherwise strand a live
+                # installation token on disk.
+                try:
+                    sweep_orphaned_credentials()
+                except Exception as e:
+                    logger.warning(f"Credential sweep failed: {e}")
+
                 # Check overall session state distribution before cleanup
                 all_sessions = await session_store.list_sessions("*")
                 status_counts: dict[str, int] = {}

@@ -9,6 +9,7 @@ import warnings
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
+import fakeredis.aioredis
 import pytest
 from pydantic import ValidationError
 
@@ -27,6 +28,8 @@ from shared.session_store import (
     SessionStatus,
     SessionStoreConfig,
     UnifiedSessionInfo,
+    _is_stale_running,
+    resolve_thread_type,
 )
 
 # ============================================================================
@@ -405,12 +408,14 @@ class TestSessionStoreSaveSession:
         assert key == session_key("owner/repo", "issue", "42", "review-pr")
         assert mapping["status"] in ("active", "running")
         assert mapping["session_id"] == "sess-123"
-        # Default fields should be in mapping
-        assert "turn_count" in mapping
         assert "run_count" in mapping
+        # turn_count must NOT be in the blanket HSET mapping: it is an
+        # accumulator seeded once via HSETNX, and an unconditional write here
+        # would zero the running total on every save.
+        assert "turn_count" not in mapping
 
     @pytest.mark.asyncio
-    async def test_preserves_created_at_via_hsetnx(self):
+    async def test_preserves_created_at_and_turn_count_via_hsetnx(self):
         redis = _make_redis_v2()
         store = SessionStore(redis_client=redis)
 
@@ -424,9 +429,8 @@ class TestSessionStoreSaveSession:
             ref="main",
         )
 
-        assert redis.hsetnx.call_count == 1
-        _, field, _ = redis.hsetnx.call_args[0]
-        assert field == "created_at"
+        seeded = {call[0][1] for call in redis.hsetnx.call_args_list}
+        assert seeded == {"created_at", "turn_count"}
 
     @pytest.mark.asyncio
     async def test_accumulates_turn_count(self):
@@ -448,6 +452,35 @@ class TestSessionStoreSaveSession:
         _, field, value = redis.hincrby.call_args[0]
         assert field == "turn_count"
         assert value == 3
+
+    @pytest.mark.asyncio
+    async def test_turn_count_survives_repeated_saves(self):
+        """turn_count is a running total across runs, not a per-run value.
+
+        Asserting on call arguments cannot see this: a mock happily records
+        the HINCRBY while missing that the same call first issued an
+        unconditional ``HSET mapping={... "turn_count": "0" ...}`` that wiped
+        the prior total.  Only real hash semantics expose it, so this runs
+        against fakeredis and checks the resulting state.
+        """
+        fake = fakeredis.aioredis.FakeRedis(decode_responses=True)
+        store = SessionStore(redis_client=fake)
+
+        for _ in range(2):
+            await store.save_session(
+                repo="owner/repo",
+                thread_type="issue",
+                thread_id="42",
+                workflow="review-pr",
+                session_id="sess-123",
+                worktree_path="/tmp/wt",
+                ref="main",
+                turn_count=3,
+            )
+
+        info = await store.get_session("owner/repo", "issue", "42", "review-pr")
+        assert info is not None
+        assert info.turn_count == 6
 
     @pytest.mark.asyncio
     async def test_only_sets_summary_when_provided(self):
@@ -1659,3 +1692,290 @@ class TestSessionStoreUpdateFields:
         key, field, amount = redis.hincrby.call_args[0]
         assert field == "run_count"
         assert amount == 1
+
+
+class TestResolveThreadTypeExplicit:
+    """Synthetic (non-webhook) events must be able to state their thread type.
+
+    ``resolve_thread_type`` only honours the ``is_pr`` hint inside the
+    ``issue_comment`` branch, so an orphan-recovery event carrying
+    ``event_type="recovery"`` fell through to ``"issue"``. That re-keyed a
+    recovered PR session onto issue-shaped Redis keys and, worse, onto a
+    *different* worktree lock than real PR events take — letting a genuine
+    PR webhook run in parallel on the same repo.
+    """
+
+    def test_explicit_thread_type_wins_for_synthetic_events(self):
+        assert (
+            resolve_thread_type(
+                {"event_type": "recovery", "action": "requeue", "thread_type": "pr"}
+            )
+            == "pr"
+        )
+
+    def test_explicit_discussion_is_honoured(self):
+        assert (
+            resolve_thread_type({"event_type": "recovery", "thread_type": "discussion"})
+            == "discussion"
+        )
+
+    def test_recovery_without_explicit_type_still_falls_back_to_issue(self):
+        assert resolve_thread_type({"event_type": "recovery"}) == "issue"
+
+    def test_bogus_explicit_type_is_ignored(self):
+        assert (
+            resolve_thread_type(
+                {"event_type": "pull_request", "thread_type": "nonsense"}
+            )
+            == "pr"
+        )
+
+    def test_webhook_payload_derivation_is_unaffected(self):
+        assert (
+            resolve_thread_type(
+                {
+                    "event_type": "issue_comment",
+                    "payload": {"issue": {"pull_request": {"url": "..."}}},
+                }
+            )
+            == "pr"
+        )
+
+
+class TestStreamingLastRunDefault:
+    """``last_run`` is read back as staleness input, so it must not be "now".
+
+    Defaulting it to the current instant on every read made the comparison in
+    ``list_stale_running_sessions`` permanently false, so the orphan sweep was
+    a no-op for exactly the pre-deploy sessions it was written to reclaim.
+    """
+
+    def test_missing_last_run_falls_back_to_created_at(self):
+        created = "2020-01-01T00:00:00+00:00"
+        out = SessionStore._normalize_streaming_data(
+            {"token": "t", "created_at": created}
+        )
+        assert out["last_run"] == created
+
+    def test_missing_last_run_and_created_at_stays_empty(self):
+        out = SessionStore._normalize_streaming_data({"token": "t"})
+        assert out["last_run"] == ""
+
+    def test_existing_last_run_is_preserved(self):
+        stamp = "2021-06-01T12:00:00+00:00"
+        out = SessionStore._normalize_streaming_data(
+            {"token": "t", "last_run": stamp, "created_at": "2020-01-01T00:00:00+00:00"}
+        )
+        assert out["last_run"] == stamp
+
+
+class TestStaleSweepFindsPreDeploySessions:
+    """The orphan sweep must reclaim sessions written before ``last_run`` existed.
+
+    These run against fakeredis rather than a mock: the defect lives in how a
+    real hash round-trips through ``_normalize_streaming_data`` into the
+    staleness comparison, which call-argument assertions cannot see.
+    """
+
+    @staticmethod
+    async def _seed_legacy_running_session(fake, token: str) -> None:
+        """Write a streaming hash in the pre-deploy shape.
+
+        The old schema had no ``worktree_path``, ``created_at`` or
+        ``last_run`` — which is precisely why it must still be detectable.
+        """
+        await fake.hset(
+            streaming_session_key(token),
+            mapping={
+                "token": token,
+                "repo": "owner/repo",
+                "issue_number": "42",
+                "workflow": "review-pr",
+                "thread_type": "pr",
+                "ref": "main",
+                "status": "running",
+                "session_id": "",
+                "installation_id": "1",
+                "run_count": "1",
+            },
+        )
+
+    @pytest.mark.asyncio
+    async def test_legacy_running_session_is_reported_stale(self):
+        fake = fakeredis.aioredis.FakeRedis(decode_responses=True)
+        store = SessionStore(redis_client=fake)
+        await self._seed_legacy_running_session(fake, "tok-legacy")
+
+        stale = await store.list_stale_running_sessions(stale_after_seconds=300)
+
+        assert [s.streaming_token for s in stale] == ["tok-legacy"]
+
+    @pytest.mark.asyncio
+    async def test_freshly_created_session_is_not_stale(self):
+        fake = fakeredis.aioredis.FakeRedis(decode_responses=True)
+        store = SessionStore(redis_client=fake)
+        await store.create_session(
+            token="tok-fresh",
+            repo="owner/repo",
+            issue_number=42,
+            workflow="review-pr",
+        )
+
+        stale = await store.list_stale_running_sessions(stale_after_seconds=300)
+
+        assert stale == []
+
+    @pytest.mark.asyncio
+    async def test_claimed_session_is_not_stale(self):
+        """A session with a worktree or SDK session id is being worked on."""
+        fake = fakeredis.aioredis.FakeRedis(decode_responses=True)
+        store = SessionStore(redis_client=fake)
+        await self._seed_legacy_running_session(fake, "tok-claimed")
+        await fake.hset(streaming_session_key("tok-claimed"), "session_id", "sdk-1")
+
+        stale = await store.list_stale_running_sessions(stale_after_seconds=300)
+
+        assert stale == []
+
+
+class TestStaleDecisionDistinguishesAbsentFromCorrupt:
+    """An absent ``last_run`` and a corrupt one must not be treated alike.
+
+    Absent means the hash predates the field, so the session has not been
+    touched since before the deploy and is genuinely dead. Corrupt means a
+    stored value we cannot read, and being eager there is dangerous: a
+    brand-new session has empty ``worktree_path`` and ``session_id``, so the
+    age check is the only guard left and killing it duplicates the job
+    seconds after creation.
+    """
+
+    @staticmethod
+    def _info(**overrides) -> UnifiedSessionInfo:
+        data = {
+            "session_id": "",
+            "repo": "owner/repo",
+            "thread_type": "pr",
+            "thread_id": "42",
+            "workflow_name": "review-pr",
+            "ref": "main",
+            "worktree_path": "",
+            "created_at": _now_iso_like(),
+            "last_run": _now_iso_like(),
+            "status": "running",
+            "installation_id": "1",
+            "run_count": 1,
+        }
+        data.update(overrides)
+        return UnifiedSessionInfo.model_validate(data)
+
+    @staticmethod
+    def _cutoff() -> float:
+        return (datetime.now(UTC) - timedelta(seconds=300)).timestamp()
+
+    def test_old_last_run_is_stale(self):
+        info = self._info(last_run="2020-01-01T00:00:00+00:00")
+
+        assert _is_stale_running(info, self._cutoff()) is True
+
+    def test_recent_last_run_is_not_stale(self):
+        assert _is_stale_running(self._info(), self._cutoff()) is False
+
+    def test_absent_last_run_is_stale(self):
+        """The pre-deploy backlog the orphan sweep exists to reclaim."""
+        info = self._info(last_run="")
+
+        assert _is_stale_running(info, self._cutoff()) is True
+
+    def test_corrupt_last_run_with_old_created_at_is_stale(self):
+        """The case the created_at fallback actually hinges on.
+
+        ``_normalize_streaming_data`` inherits ``last_run`` from a stored
+        ``created_at``, so this is the path where the fallback value gets
+        parsed rather than thrown away.
+        """
+        info = self._info(
+            last_run="not-a-timestamp", created_at="2020-01-01T00:00:00+00:00"
+        )
+
+        assert _is_stale_running(info, self._cutoff()) is True
+
+    def test_corrupt_last_run_with_recent_created_at_is_not_stale(self):
+        """A freshly created session must survive a corrupt timestamp."""
+        info = self._info(last_run="not-a-timestamp")
+
+        assert _is_stale_running(info, self._cutoff()) is False
+
+    def test_naive_last_run_is_read_as_utc(self):
+        """A naive timestamp must not be read as container-local time.
+
+        Otherwise the same hash looks hours stale or hours fresh depending on
+        the host's timezone.
+        """
+        naive_old = (
+            (datetime.now(UTC) - timedelta(seconds=600))
+            .replace(tzinfo=None)
+            .isoformat()
+        )
+        naive_new = datetime.now(UTC).replace(tzinfo=None).isoformat()
+
+        assert _is_stale_running(self._info(last_run=naive_old), self._cutoff())
+        assert not _is_stale_running(self._info(last_run=naive_new), self._cutoff())
+
+
+class TestStaleSweepMiddleCase:
+    """End-to-end: a hash with only an old ``created_at`` must be reclaimed."""
+
+    @pytest.mark.asyncio
+    async def test_old_created_at_no_last_run_is_swept(self):
+        fake = fakeredis.aioredis.FakeRedis(decode_responses=True)
+        store = SessionStore(redis_client=fake)
+        await fake.hset(
+            streaming_session_key("tok-mid"),
+            mapping={
+                "token": "tok-mid",
+                "repo": "owner/repo",
+                "issue_number": "42",
+                "workflow": "review-pr",
+                "thread_type": "pr",
+                "ref": "main",
+                "status": "running",
+                "session_id": "",
+                "installation_id": "1",
+                "run_count": "1",
+                "created_at": "2020-01-01T00:00:00+00:00",
+            },
+        )
+
+        stale = await store.list_stale_running_sessions(stale_after_seconds=300)
+
+        assert [s.streaming_token for s in stale] == ["tok-mid"]
+
+    @pytest.mark.asyncio
+    async def test_recent_created_at_no_last_run_is_not_swept(self):
+        fake = fakeredis.aioredis.FakeRedis(decode_responses=True)
+        store = SessionStore(redis_client=fake)
+        await fake.hset(
+            streaming_session_key("tok-new"),
+            mapping={
+                "token": "tok-new",
+                "repo": "owner/repo",
+                "issue_number": "42",
+                "workflow": "review-pr",
+                "thread_type": "pr",
+                "ref": "main",
+                "status": "running",
+                "session_id": "",
+                "installation_id": "1",
+                "run_count": "1",
+                "created_at": datetime.now(UTC).isoformat(),
+            },
+        )
+
+        stale = await store.list_stale_running_sessions(stale_after_seconds=300)
+
+        assert stale == []
+
+
+def _now_iso_like() -> str:
+    """Current UTC time in the ISO form the store writes."""
+    return datetime.now(UTC).isoformat()

@@ -1,6 +1,7 @@
 # Environment
 .env
 .env.local
+.env.internal
 *.pem
 
 # Python
@@ -69,6 +70,9 @@ coverage.xml
 # Secrets
 *.key
 private-key.pem
+# Defence in depth: the agent's credential file now lives outside the
+# checkout, but a stale one from an older build must never be stageable.
+.git-credentials
 
 # ngrok
 ngrok.yml

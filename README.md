@@ -108,6 +108,17 @@ cp workflows.example.yaml workflows.yaml    # Edit workflows (required)
 cp repo-setup.example.yaml repo-setup.yaml  # Edit Per-repo dependency setup (optional)
 ```
 
+The `cp workflows.example.yaml workflows.yaml` step is required: the scheduler
+mounts that file and refuses to create a missing host path, so it fails to
+start with a clear mount error if you skip it. Set `WORKFLOWS_FILE` in `.env`
+only if your config lives somewhere else.
+
+Then set one value in `.env`:
+
+- `SCHEDULER_INTERNAL_TOKEN=$(openssl rand -hex 32)` — required for
+  agent-initiated one-shot scheduling. Leaving it empty disables that endpoint;
+  cron schedules from `workflows.yaml` are unaffected.
+
 ```bash
 # Build, start services, and open ngrok tunnel
 make start

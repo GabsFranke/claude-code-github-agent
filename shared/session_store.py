@@ -245,6 +245,58 @@ class ConversationConfig(BaseModel):
     )
 
 
+def _parse_timestamp(raw: str) -> datetime | None:
+    """Parse an ISO-8601 timestamp, returning ``None`` if it is unusable.
+
+    Catches ``TypeError`` as well as ``ValueError``: the staleness readers now
+    fall back to a stored ``created_at`` whose provenance is an older schema,
+    so the input domain is wider than values this code wrote itself. A naive
+    timestamp is pinned to UTC rather than left for ``.timestamp()`` to
+    interpret as container-local time, which would make the same hash look
+    hours stale or fresh depending on the host's zone.
+    """
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except (ValueError, TypeError):
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed
+
+
+def _is_stale_running(info: "UnifiedSessionInfo", cutoff: float) -> bool:
+    """Return whether a running, unclaimed session should be treated as dead.
+
+    Three cases, and the distinction between the last two matters:
+
+    * ``last_run`` parses — compare it to *cutoff*, the ordinary path.
+    * ``last_run`` is empty — the hash predates the field entirely, because
+      ``_normalize_streaming_data`` only leaves it empty when no stored
+      ``created_at`` was there to inherit from either. Such a session has not
+      been touched since before the deploy, so it is stale. Skipping this case
+      is what made the sweep a no-op for the backlog it exists to reclaim.
+    * ``last_run`` is present but unparseable — a corrupt value, not an old
+      schema. Being eager here is dangerous: a brand-new session has empty
+      ``worktree_path`` and ``session_id``, so the age check is the only
+      remaining guard, and declaring it dead would kill and duplicate it
+      seconds after creation. Require ``created_at`` to corroborate.
+
+    Note ``info.created_at`` is synthesised to "now" when absent, which is why
+    it can only be trusted in the corrupt case, where a stored value existed.
+    """
+    last_run_at = _parse_timestamp(info.last_run)
+    if last_run_at is not None:
+        return last_run_at.timestamp() < cutoff
+
+    if not info.last_run:
+        return True
+
+    created_at = _parse_timestamp(info.created_at)
+    return created_at is not None and created_at.timestamp() < cutoff
+
+
 def resolve_thread_type(event_data: dict) -> Literal["pr", "issue", "discussion"]:
     """Determine thread type from webhook payload.
 
@@ -254,6 +306,15 @@ def resolve_thread_type(event_data: dict) -> Literal["pr", "issue", "discussion"
     Returns:
         One of "pr", "issue", or "discussion".
     """
+    # Synthetic (non-webhook) events such as orphan recovery carry the
+    # already-resolved type rather than a webhook payload to re-derive it
+    # from.  Honour it first: the is_pr fallback below is only reachable
+    # for issue_comment, so a recovered PR session would otherwise be
+    # re-keyed as an issue and take a different worktree lock.
+    explicit = event_data.get("thread_type")
+    if explicit in ("pr", "issue", "discussion"):
+        return cast(Literal["pr", "issue", "discussion"], explicit)
+
     # Check for explicit PR indicators
     event_type = event_data.get("event_type", "")
     if event_type.startswith("pull_request"):
@@ -391,7 +452,6 @@ class SessionStore:  # pylint: disable=too-many-public-methods
             "worktree_path": str(worktree_path),
             "last_run": str(now),
             "status": "active",
-            "turn_count": "0",
             "installation_id": str(installation_id),
             "initial_query": str(initial_query),
             "conversation_config": str(conversation_config),
@@ -405,6 +465,10 @@ class SessionStore:  # pylint: disable=too-many-public-methods
 
         # Preserve created_at across re-saves
         await redis.hsetnx(key, "created_at", now)
+        # Seed the accumulator once.  It must not be in the mapping above:
+        # an unconditional HSET there would zero the running total on every
+        # save, leaving only the current run's turns.
+        await redis.hsetnx(key, "turn_count", "0")
 
         # Accumulate turn_count atomically
         if turn_count > 0:
@@ -665,8 +729,19 @@ class SessionStore:  # pylint: disable=too-many-public-methods
             data["workflow_name"] = data["workflow"]
         # Supply defaults for fields missing from old schema
         data.setdefault("worktree_path", "")
+        # Unlike its neighbours, last_run is read back as staleness input, so
+        # synthesising the current instant for it would make every session
+        # written before the field existed look freshly touched and the orphan
+        # sweep would never reclaim the pre-deploy backlog it exists for.
+        #
+        # Read the *stored* created_at first: the old schema had neither field,
+        # so defaulting created_at before deriving last_run from it would
+        # reintroduce exactly that bug one step removed. With no stored
+        # timestamp at all, leave last_run empty and let the staleness checks
+        # treat an unparseable value on a running session as stale.
+        stored_created_at = data.get("created_at", "")
+        data.setdefault("last_run", stored_created_at)
         data.setdefault("created_at", _now_iso())
-        data.setdefault("last_run", _now_iso())
         return data
 
     async def create_session(
@@ -852,11 +927,7 @@ class SessionStore:  # pylint: disable=too-many-public-methods
                     continue
                 if info.worktree_path or info.session_id:
                     continue
-                try:
-                    last_run_ts = datetime.fromisoformat(info.last_run).timestamp()
-                except ValueError:
-                    continue
-                if last_run_ts < cutoff:
+                if _is_stale_running(info, cutoff):
                     stale.append(info)
             if cursor == 0:
                 break
@@ -880,11 +951,14 @@ class SessionStore:  # pylint: disable=too-many-public-methods
         key = streaming_session_key(token)
         status = "error" if is_error else "completed"
         if session_id:
-            await self.redis.hset(
-                key, mapping={"status": status, "session_id": session_id}
+            await cast(
+                Awaitable[int],
+                self.redis.hset(
+                    key, mapping={"status": status, "session_id": session_id}
+                ),
             )
         else:
-            await self.redis.hset(key, "status", status)
+            await cast(Awaitable[int], self.redis.hset(key, "status", status))
         logger.info(f"[SessionStore] Streaming session {token[:8]}... -> {status}")
 
     async def set_running(
@@ -897,13 +971,16 @@ class SessionStore:  # pylint: disable=too-many-public-methods
         SPA can still load conversation history while the new run begins.
         """
         key = streaming_session_key(token)
-        await self.redis.hset(
-            key,
-            mapping={
-                "status": "running",
-                "session_id": "",
-                "last_run": _now_iso(),
-            },
+        await cast(
+            Awaitable[int],
+            self.redis.hset(
+                key,
+                mapping={
+                    "status": "running",
+                    "session_id": "",
+                    "last_run": _now_iso(),
+                },
+            ),
         )
         await self.redis.expire(key, ttl_seconds)
         logger.info(f"[SessionStore] Streaming session {token[:8]}... -> running")
@@ -954,15 +1031,20 @@ class SessionStore:  # pylint: disable=too-many-public-methods
     async def increment_subscribers(self, token: str) -> int:
         """Atomically increment subscriber count. Returns new count."""
         key = subscribers_key(token)
-        count = await self.redis.eval(
-            _INCR_SUBSCRIBERS_LUA, 1, key, str(DEFAULT_SESSION_TTL_SECONDS)
+        count = await cast(
+            Awaitable[int],
+            self.redis.eval(
+                _INCR_SUBSCRIBERS_LUA, 1, key, str(DEFAULT_SESSION_TTL_SECONDS)
+            ),
         )
         return int(count)
 
     async def decrement_subscribers(self, token: str) -> int:
         """Atomically decrement subscriber count (floor 0). Returns new count."""
         key = subscribers_key(token)
-        count = await self.redis.eval(_DECR_SUBSCRIBERS_LUA, 1, key)
+        count = await cast(
+            Awaitable[int], self.redis.eval(_DECR_SUBSCRIBERS_LUA, 1, key)
+        )
         return int(count)
 
     async def has_subscribers(self, token: str) -> bool:
@@ -999,7 +1081,7 @@ class SessionStore:  # pylint: disable=too-many-public-methods
         """Push a user message into the session inbox."""
         ibx = inbox_key(token)
         message_data = json.dumps({"type": "user_message", "content": content})
-        await self.redis.rpush(ibx, message_data)
+        await cast(Awaitable[int], self.redis.rpush(ibx, message_data))
         await self.redis.expire(ibx, DEFAULT_SESSION_TTL_SECONDS)
 
     async def pop_inbox_messages(self, token: str) -> list[str]:
@@ -1016,7 +1098,7 @@ class SessionStore:  # pylint: disable=too-many-public-methods
         return items
         """
         try:
-            raw_items = await self.redis.eval(lua_drain, 1, ibx)
+            raw_items = await cast(Awaitable[list], self.redis.eval(lua_drain, 1, ibx))
         except Exception as e:
             logger.error(f"[SessionStore] Failed to drain inbox for {token}: {e}")
             raise
@@ -1039,19 +1121,19 @@ class SessionStore:  # pylint: disable=too-many-public-methods
     async def update_session_id(self, token: str, session_id: str) -> None:
         """Update the SDK session_id in the streaming session metadata."""
         key = streaming_session_key(token)
-        await self.redis.hset(key, "session_id", session_id)
+        await cast(Awaitable[int], self.redis.hset(key, "session_id", session_id))
         logger.debug(f"[SessionStore] Updated session_id for {token[:8]}...")
 
     async def update_transcript_path(self, token: str, path: str) -> None:
         """Update the transcript_path in the streaming session metadata."""
         key = streaming_session_key(token)
-        await self.redis.hset(key, "transcript_path", path)
+        await cast(Awaitable[int], self.redis.hset(key, "transcript_path", path))
         logger.debug(f"[SessionStore] Updated transcript_path for {token[:8]}...")
 
     async def increment_run_count(self, token: str) -> int:
         """Increment the run count. Returns new count."""
         key = streaming_session_key(token)
-        count = await self.redis.hincrby(key, "run_count", 1)
+        count = await cast(Awaitable[int], self.redis.hincrby(key, "run_count", 1))
         return int(count)
 
     # ------------------------------------------------------------------

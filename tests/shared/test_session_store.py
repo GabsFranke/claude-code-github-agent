@@ -79,9 +79,12 @@ class TestSessionStoreSaveSession:
         assert mapping["status"] == "active"
         assert mapping["session_id"] == "sess-123"
         assert mapping["ref"] == "main"
-        assert redis.hsetnx.call_count == 1
-        _, field, _ = redis.hsetnx.call_args[0]
-        assert field == "created_at"
+        # created_at and turn_count are both seeded via HSETNX. turn_count
+        # must not be in the HSET mapping above: an unconditional write there
+        # would zero the accumulator on every save.
+        seeded = {call[0][1] for call in redis.hsetnx.call_args_list}
+        assert seeded == {"created_at", "turn_count"}
+        assert "turn_count" not in mapping
         assert redis.hincrby.call_count == 0
         assert redis.expire.call_count == 1
         _, ttl = redis.expire.call_args[0]
@@ -102,9 +105,8 @@ class TestSessionStoreSaveSession:
             ref="main",
         )
 
-        assert redis.hsetnx.call_count == 1
-        _, field, _ = redis.hsetnx.call_args[0]
-        assert field == "created_at"
+        seeded = {call[0][1] for call in redis.hsetnx.call_args_list}
+        assert "created_at" in seeded
 
     @pytest.mark.asyncio
     async def test_accumulates_turn_count(self):

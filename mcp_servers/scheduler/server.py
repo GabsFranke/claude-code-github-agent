@@ -92,12 +92,22 @@ async def _call_scheduler_api(payload: dict[str, Any]) -> dict[str, Any]:
     urls.append("http://scheduler:8082/schedule/one-shot")
     urls.append("http://localhost:8082/schedule/one-shot")
 
+    # The scheduler requires a shared secret on this endpoint; without it the
+    # call is rejected rather than silently scheduling on an open endpoint.
+    internal_token = os.getenv("SCHEDULER_INTERNAL_TOKEN", "")
+    if not internal_token:
+        raise Exception(
+            "SCHEDULER_INTERNAL_TOKEN is not set for this MCP server, so the "
+            "scheduler will reject the request. Ask the operator to configure it."
+        )
+    headers = {"X-Internal-Token": internal_token}
+
     last_error = None
     async with httpx.AsyncClient(timeout=10.0) as client:
         for url in urls:
             try:
                 logger.info(f"Attempting to call scheduler service at: {url}")
-                response = await client.post(url, json=payload)
+                response = await client.post(url, json=payload, headers=headers)
                 if response.status_code == 200:
                     result: dict[str, Any] = response.json()
                     return result

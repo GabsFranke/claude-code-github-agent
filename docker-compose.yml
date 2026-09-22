@@ -141,7 +141,14 @@ services:
       context: .
       dockerfile: services/mcp_proxy/Dockerfile
     command: sh -c '(socat TCP-LISTEN:11434,fork TCP:host.docker.internal:11434 >/dev/null 2>&1 &) && uvicorn services.mcp_proxy.main:app --host 0.0.0.0 --port 18000 2>&1 | tee /var/log/bot/mcp_proxy.log'
-    env_file: .env
+    env_file:
+      - .env
+      # Internal service secrets. Deliberately NOT in .env: sandbox_worker
+      # loads .env wholesale, and the agent running there has Bash, so any
+      # secret in .env is readable by the prompt-injected agent these secrets
+      # defend against. Only the services that must hold them read this file.
+      - path: .env.internal
+        required: false
     restart: unless-stopped
     ports:
       - "127.0.0.1:18000:18000"
@@ -330,10 +337,27 @@ services:
     build:
       context: .
       dockerfile: services/scheduler/Dockerfile
+    # See the note on mcp_proxy: internal secrets stay out of .env so the
+    # sandbox agent's environment never contains them.
+    env_file:
+      - path: .env.internal
+        required: false
     restart: unless-stopped
     volumes:
       - ./logs:/var/log/bot
-      - ./workflows.yaml:/app/workflows.yaml:ro
+      # workflows.yaml is gitignored and absent from a clean clone. With the
+      # short syntax the Docker daemon would create an empty DIRECTORY at
+      # ./workflows.yaml on the host, shadowing the Dockerfile's example-file
+      # fallback, crash-looping the scheduler on IsADirectoryError, and
+      # leaving a stray directory that breaks later builds of the other
+      # services. create_host_path: false makes the mount fail loudly instead.
+      # Set WORKFLOWS_FILE to mount a config from elsewhere.
+      - type: bind
+        source: ${WORKFLOWS_FILE:-./workflows.yaml}
+        target: /app/workflows.yaml
+        read_only: true
+        bind:
+          create_host_path: false
     environment:
       - PYTHONPATH=/app
       - GITHUB_APP_ID=${GITHUB_APP_ID}
@@ -351,6 +375,10 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+      # /health now reports 503 until the scheduler has connected to Redis and
+      # set _running, so boot needs a grace window or a slow Redis marks the
+      # container unhealthy during normal startup.
+      start_period: 15s
 
 volumes:
   repo-cache:
