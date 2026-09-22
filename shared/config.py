@@ -236,9 +236,6 @@ class WorkerConfig(BaseConfig):
     """Worker service configuration."""
 
     log_level: str = Field(default="INFO", description="Logging level")
-    max_turns: int = Field(
-        default=50, description="Maximum turns for Claude SDK", ge=1, le=200
-    )
     sdk_timeout: int = Field(
         default=1800, description="SDK execution timeout in seconds", ge=60
     )

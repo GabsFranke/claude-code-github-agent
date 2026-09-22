@@ -140,10 +140,7 @@ only as a header and never in a URL.
 **Threat.** A malicious or runaway job exhausts the host.
 
 **Control.** `sandbox_worker` runs under `mem_limit: 4g`. Each SDK run is
-capped by `sdk_timeout` (default 1800 s) and by `max_turns` (default 50),
-which is passed to the CLI as `--max-turns` via
-`SDKOptionsBuilder.with_max_turns`. The session total across continuations
-is enforced separately in `request_processor.py`, and `MAX_AUTO_CONTINUES`
+capped by `sdk_timeout` (default 1800 s), and `MAX_AUTO_CONTINUES`
 (default 10) bounds auto-continue chains.
 `shared/rate_limiter.py` bounds GitHub and Anthropic call rates,
 `shared/retry.py` bounds retries with backoff, and `shared/dlq.py` captures

@@ -28,7 +28,7 @@ from shared.constants import (
 from shared.context_builder import generate_structural_context
 from shared.sdk_executor import execute_sdk
 from shared.sdk_factory import SDKOptionsBuilder
-from shared.session_store import ConversationConfig, SessionStore
+from shared.session_store import SessionStore
 from shared.utils import build_session_url
 from shared.worktree_lock import WorktreeKey, WorktreeLock
 from shared.worktree_manager import get_worktree_path, reuse_or_create_worktree
@@ -438,14 +438,6 @@ class JobProcessor:
         claude_md = self.job_data.get("claude_md")
         memory_index = self.job_data.get("memory_index")
 
-        # Per-run turn cap. The session-level total is enforced upstream in
-        # request_processor; this bounds a single SDK run so a looping model
-        # is stopped by the CLI rather than only by the wall-clock timeout.
-        max_turns = int(
-            (self.job_data.get("conversation_config") or {}).get("max_turns")
-            or ConversationConfig().max_turns
-        )
-
         # Model tier from workflows.yaml (opus/sonnet/haiku). Unset means the
         # CLI resolves the model itself; see tests/shared/test_model_resolution.py.
         model_tier = self.job_data.get("model")
@@ -517,7 +509,7 @@ class JobProcessor:
             interrupted = False
             self.user_interrupt_event.clear()
 
-            builder = SDKOptionsBuilder(cwd=self.workspace).with_max_turns(max_turns)
+            builder = SDKOptionsBuilder(cwd=self.workspace)
             if model_tier:
                 builder = builder.with_model(model_tier)
             builder = configure_builder(

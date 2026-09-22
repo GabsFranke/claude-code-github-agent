@@ -132,13 +132,11 @@ def _make_streaming_workflow_engine():
     conv_cfg = MagicMock()
     conv_cfg.persist = True
     conv_cfg.ttl_hours = 720
-    conv_cfg.max_turns = 50
     conv_cfg.auto_continue = True
     conv_cfg.summary_fallback = False
     conv_cfg.model_dump.return_value = {
         "persist": True,
         "ttl_hours": 720,
-        "max_turns": 50,
         "auto_continue": True,
         "summary_fallback": False,
     }

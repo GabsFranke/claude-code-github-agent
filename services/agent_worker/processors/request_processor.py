@@ -383,19 +383,6 @@ class RequestProcessor:
                         session_mode = "resume"
                         session_id = existing_session.session_id
 
-                    # Check turn limit
-                    if (
-                        session_mode != "new"
-                        and existing_session.turn_count >= conversation_config.max_turns
-                    ):
-                        logger.info(
-                            f"Session reached turn limit "
-                            f"({existing_session.turn_count}/{conversation_config.max_turns}), "
-                            f"starting fresh"
-                        )
-                        session_mode = "new"
-                        session_id = None
-
                     # Provide summary as fallback
                     if (
                         session_mode in ("resume", "continue")
@@ -729,7 +716,6 @@ class RequestProcessor:
                 "conversation_config": {
                     "persist": conversation_config.persist,
                     "ttl_hours": conversation_config.ttl_hours,
-                    "max_turns": conversation_config.max_turns,
                     "auto_continue": conversation_config.auto_continue,
                     "summary_fallback": conversation_config.summary_fallback,
                 },

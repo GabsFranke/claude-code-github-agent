@@ -52,7 +52,6 @@ ANTHROPIC_VERTEX_REGION=us-central1
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MAX_TURNS` | `50` | Maximum Claude SDK turns per session (1–200) |
 | `SDK_EXECUTION_TIMEOUT` | `1800` | SDK execution timeout in seconds. The `WorkerConfig` model also exposes this as `sdk_timeout` (env var `SDK_TIMEOUT`), but `sdk_executor.py` reads `SDK_EXECUTION_TIMEOUT` directly |
 | `SDK_MAX_RETRIES` | `3` | Retry attempts on transient SDK errors |
 | `SDK_RETRY_BASE_DELAY` | `5.0` | Base delay (seconds) for exponential backoff |

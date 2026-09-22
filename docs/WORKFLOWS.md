@@ -53,7 +53,6 @@ conversation:
   persist: true           # save session state after each run
   ttl_hours: 720          # how long before the session expires (default: 720 = 30 days)
   auto_continue: true     # automatically resume on next trigger (default: false)
-  max_turns: 50           # turn limit before forcing a new session (optional)
   summary_fallback: true  # inject a summary if the full session can't be resumed (default: true)
 ```
 

@@ -143,14 +143,12 @@ class TestWorkerConfig:
         """Test worker config with defaults."""
         config = WorkerConfig()
         assert config.log_level == "INFO"
-        assert config.max_turns == 50
         assert config.sdk_timeout == 1800
 
     @patch.dict(os.environ, {}, clear=True)
     def test_worker_config_custom_values(self):
         """Test worker config with custom values."""
-        config = WorkerConfig(max_turns=100, sdk_timeout=3600)
-        assert config.max_turns == 100
+        config = WorkerConfig(sdk_timeout=3600)
         assert config.sdk_timeout == 3600
 
     @patch.dict(os.environ, {}, clear=True)

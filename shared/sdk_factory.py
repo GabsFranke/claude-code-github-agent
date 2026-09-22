@@ -97,9 +97,6 @@ class SDKOptionsBuilder:
         self._max_buffer_size: int = int(
             os.getenv("SDK_MAX_BUFFER_SIZE", "4194304")
         )  # 4MB default (was 1MB)
-        self._max_turns: int | None = (
-            None  # Per-run cap passed to the CLI as --max-turns
-        )
 
     # Model selection methods
 
@@ -165,22 +162,6 @@ class SDKOptionsBuilder:
             Self for method chaining
         """
         self._max_buffer_size = size
-        return self
-
-    def with_max_turns(self, max_turns: int) -> "SDKOptionsBuilder":
-        """Cap the number of agentic turns in a single run.
-
-        The SDK forwards this as ``--max-turns``. Without it a run is bounded
-        only by the wall-clock timeout, which is a poor guard against a model
-        looping on a cheap tool call.
-
-        Args:
-            max_turns: Maximum turns for this run
-
-        Returns:
-            Self for method chaining
-        """
-        self._max_turns = max_turns
         return self
 
     # MCP server methods (à la carte)
@@ -885,7 +866,6 @@ class SDKOptionsBuilder:
             fork_session=self._fork_session,
             include_partial_messages=self._include_partial_messages,
             max_buffer_size=self._max_buffer_size,
-            max_turns=self._max_turns,
         )
 
     def _assemble_system_prompt(self) -> str | None:

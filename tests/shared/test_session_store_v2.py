@@ -264,7 +264,6 @@ class TestSessionStoreConfig:
         cfg = SessionStoreConfig()
         assert hasattr(cfg, "persist")
         assert hasattr(cfg, "ttl_hours")
-        assert hasattr(cfg, "max_turns")
         assert hasattr(cfg, "auto_continue")
         assert hasattr(cfg, "summary_fallback")
 
@@ -272,7 +271,6 @@ class TestSessionStoreConfig:
         cfg = SessionStoreConfig()
         assert cfg.persist is False
         assert cfg.ttl_hours > 0
-        assert cfg.max_turns == 50
         assert cfg.auto_continue is False
         assert cfg.summary_fallback is True
 
@@ -280,13 +278,11 @@ class TestSessionStoreConfig:
         cfg = SessionStoreConfig(
             persist=True,
             ttl_hours=24,
-            max_turns=100,
             auto_continue=True,
             summary_fallback=False,
         )
         assert cfg.persist is True
         assert cfg.ttl_hours == 24
-        assert cfg.max_turns == 100
         assert cfg.auto_continue is True
         assert cfg.summary_fallback is False
 

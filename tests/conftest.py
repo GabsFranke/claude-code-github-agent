@@ -228,7 +228,7 @@ def sample_unified_session_data() -> dict[str, Any]:
         "streaming_token": "strm_tok_abc123def456",
         "installation_id": "12345678",
         "initial_query": "/agent review this PR",
-        "conversation_config": '{"persist":true,"ttl_hours":72,"max_turns":50}',
+        "conversation_config": '{"persist":true,"ttl_hours":72}',
         "transcript_path": "/tmp/.claude/projects/owner/test-repo/session.jsonl",
         "run_count": 1,
         "session_proxy_url": "http://localhost:8000",

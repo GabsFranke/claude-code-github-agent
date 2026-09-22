@@ -221,9 +221,6 @@ class SessionStoreConfig(BaseModel):
         default=DEFAULT_SESSION_TTL_HOURS,
         description="Session TTL in hours (default from constants)",
     )
-    max_turns: int = Field(
-        default=50, description="Max total turns across continuations"
-    )
     auto_continue: bool = Field(
         default=False, description="Auto-resume on replies without explicit -c flag"
     )
@@ -239,9 +236,6 @@ class ConversationConfig(BaseModel):
     ttl_hours: int = Field(
         default=DEFAULT_SESSION_TTL_HOURS,
         description="Session TTL in hours (default from constants)",
-    )
-    max_turns: int = Field(
-        default=50, description="Max total turns across continuations"
     )
     auto_continue: bool = Field(
         default=False, description="Auto-resume on replies without explicit -c flag"

@@ -36,7 +36,7 @@ Subcommands and arguments:
 |               |                           | [--user] [--workflow-name] [--prompt]       |
 |               |                           | [--github-token] [--session-mode]            |
 |               |                           | [--thread-type] [--thread-id] [--streaming] |
-|               |                           | [--persist] [--ttl-hours] [--max-turns]     |
+|               |                           | [--persist] [--ttl-hours]                   |
 |               |                           | [--auto-continue] [--summary-fallback]      |
 |               |                           | [--model {opus,sonnet,haiku}]               |
 +---------------+---------------------------+----------------------------------------------+
@@ -203,7 +203,6 @@ def build_sandbox_message(args: argparse.Namespace) -> dict:
         "conversation_config": {
             "persist": args.persist,
             "ttl_hours": args.ttl_hours,
-            "max_turns": args.max_turns,
             "auto_continue": args.auto_continue,
             "summary_fallback": args.summary_fallback,
         },
@@ -387,7 +386,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--persist", action="store_true", default=True, help="Persist conversation"
     )
     p.add_argument("--ttl-hours", type=int, default=720, help="Conversation TTL hours")
-    p.add_argument("--max-turns", type=int, default=50, help="Max turns")
     p.add_argument(
         "--auto-continue", action="store_true", default=True, help="Auto-continue"
     )
