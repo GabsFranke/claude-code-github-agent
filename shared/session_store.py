@@ -951,14 +951,11 @@ class SessionStore:  # pylint: disable=too-many-public-methods
         key = streaming_session_key(token)
         status = "error" if is_error else "completed"
         if session_id:
-            await cast(
-                Awaitable[int],
-                self.redis.hset(
-                    key, mapping={"status": status, "session_id": session_id}
-                ),
+            await self.redis.hset(
+                key, mapping={"status": status, "session_id": session_id}
             )
         else:
-            await cast(Awaitable[int], self.redis.hset(key, "status", status))
+            await self.redis.hset(key, "status", status)
         logger.info(f"[SessionStore] Streaming session {token[:8]}... -> {status}")
 
     async def set_running(
@@ -971,16 +968,13 @@ class SessionStore:  # pylint: disable=too-many-public-methods
         SPA can still load conversation history while the new run begins.
         """
         key = streaming_session_key(token)
-        await cast(
-            Awaitable[int],
-            self.redis.hset(
-                key,
-                mapping={
-                    "status": "running",
-                    "session_id": "",
-                    "last_run": _now_iso(),
-                },
-            ),
+        await self.redis.hset(
+            key,
+            mapping={
+                "status": "running",
+                "session_id": "",
+                "last_run": _now_iso(),
+            },
         )
         await self.redis.expire(key, ttl_seconds)
         logger.info(f"[SessionStore] Streaming session {token[:8]}... -> running")
@@ -1081,7 +1075,7 @@ class SessionStore:  # pylint: disable=too-many-public-methods
         """Push a user message into the session inbox."""
         ibx = inbox_key(token)
         message_data = json.dumps({"type": "user_message", "content": content})
-        await cast(Awaitable[int], self.redis.rpush(ibx, message_data))
+        await self.redis.rpush(ibx, message_data)
         await self.redis.expire(ibx, DEFAULT_SESSION_TTL_SECONDS)
 
     async def pop_inbox_messages(self, token: str) -> list[str]:
@@ -1121,19 +1115,19 @@ class SessionStore:  # pylint: disable=too-many-public-methods
     async def update_session_id(self, token: str, session_id: str) -> None:
         """Update the SDK session_id in the streaming session metadata."""
         key = streaming_session_key(token)
-        await cast(Awaitable[int], self.redis.hset(key, "session_id", session_id))
+        await self.redis.hset(key, "session_id", session_id)
         logger.debug(f"[SessionStore] Updated session_id for {token[:8]}...")
 
     async def update_transcript_path(self, token: str, path: str) -> None:
         """Update the transcript_path in the streaming session metadata."""
         key = streaming_session_key(token)
-        await cast(Awaitable[int], self.redis.hset(key, "transcript_path", path))
+        await self.redis.hset(key, "transcript_path", path)
         logger.debug(f"[SessionStore] Updated transcript_path for {token[:8]}...")
 
     async def increment_run_count(self, token: str) -> int:
         """Increment the run count. Returns new count."""
         key = streaming_session_key(token)
-        count = await cast(Awaitable[int], self.redis.hincrby(key, "run_count", 1))
+        count = await self.redis.hincrby(key, "run_count", 1)
         return int(count)
 
     # ------------------------------------------------------------------
