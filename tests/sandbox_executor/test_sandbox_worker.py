@@ -53,6 +53,13 @@ class TestProcessJob:
             "services.sandbox_executor.processor.RepoSetupEngine",
         )
 
+        # conftest sets GITHUB_INSTALLATION_ID, so _setup_worktree would
+        # otherwise build a real GitHubAuthService and call api.github.com.
+        mock_auth = MagicMock()
+        mock_auth.get_token = AsyncMock(return_value="test_token")
+        mock_auth.__aenter__ = AsyncMock(return_value=mock_auth)
+        mock_auth.__aexit__ = AsyncMock(return_value=False)
+
         patches_flat = [
             # --- core behaviour ---
             patch.dict(os.environ, _SAFE_ENV_OVERRIDES),
@@ -77,35 +84,33 @@ class TestProcessJob:
                 **execute_sdk_config,
             ),
             mkdtemp_patch,
-            patch("services.sandbox_executor.processor.os.rmdir"),
-            patch("services.sandbox_executor.processor.os.chdir", create=True),
-            patch(
-                "services.sandbox_executor.processor.os.getcwd",
-                return_value="/original",
-                create=True,
-            ),
-            patch("services.sandbox_executor.processor.os.makedirs", create=True),
             patch(
                 "services.sandbox_executor.processor.configure_git",
                 new_callable=AsyncMock,
             ),
             # --- filesystem / cleanup ---
-            # git_setup os patches
-            patch("services.sandbox_executor.git_setup.os.open"),
-            patch("services.sandbox_executor.git_setup.os.write"),
-            patch("services.sandbox_executor.git_setup.os.close"),
-            # processor os patches
-            patch("services.sandbox_executor.processor.os.open"),
-            patch("services.sandbox_executor.processor.os.write"),
-            patch("services.sandbox_executor.processor.os.close"),
+            # "processor.os" resolves to the global os module, so every patch
+            # here replaces the attribute process-wide for the duration of the
+            # test. Only patch what processor.py actually calls. os.close in
+            # particular must stay real: on POSIX, subprocess.Popen closes the
+            # parent end of its error pipe with os.close, and a mocked close
+            # leaves the parent blocked forever in os.read() waiting for an EOF
+            # that can never arrive. That deadlocked the whole CI test run.
+            patch("services.sandbox_executor.processor.os.rmdir"),
             patch("services.sandbox_executor.processor.os.remove"),
             patch(
                 "services.sandbox_executor.processor.os.path.exists",
                 return_value=False,
             ),
+            # _prepare_context shells out to `codegraph init`; a unit test must
+            # not spawn a real process.
+            patch("services.sandbox_executor.processor.subprocess.run"),
+            # --- no real GitHub traffic ---
+            patch("shared.github_auth.GitHubAuthService", return_value=mock_auth),
             patch(
-                "services.sandbox_executor.git_setup.os.path.exists",
-                return_value=False,
+                "shared.thread_history.fetch_and_format_thread_history",
+                new_callable=AsyncMock,
+                return_value="",
             ),
             engine_patch,
             patch("shared.mcp_json_writer.write_mcp_json"),
