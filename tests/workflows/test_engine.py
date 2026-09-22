@@ -1,7 +1,5 @@
 """Unit tests for workflow engine."""
 
-from pathlib import Path
-
 import pytest
 import yaml
 
@@ -465,29 +463,18 @@ class TestWorkflowEngine:
 
 
 class TestWorkflowEngineIntegration:
-    """Integration tests for WorkflowEngine with real workflows.yaml."""
+    """Integration tests for WorkflowEngine against the shipped config."""
 
-    def test_load_real_workflows_yaml(self):
-        """Test loading the actual workflows.yaml file."""
-        # Assumes workflows.yaml exists in project root
-        workflow_path = Path(__file__).parent.parent.parent / "workflows.yaml"
-
-        if not workflow_path.exists():
-            pytest.skip("workflows.yaml not found in project root")
-
-        engine = WorkflowEngine(workflow_path)
+    def test_load_real_workflows_yaml(self, repo_workflow_config):
+        """Test loading the workflow config the repository ships."""
+        engine = WorkflowEngine(repo_workflow_config)
 
         assert len(engine.workflows) > 0
         assert "review-pr" in engine.workflows or "generic" in engine.workflows
 
-    def test_real_workflow_routing(self):
-        """Test routing with real workflows.yaml."""
-        workflow_path = Path(__file__).parent.parent.parent / "workflows.yaml"
-
-        if not workflow_path.exists():
-            pytest.skip("workflows.yaml not found in project root")
-
-        engine = WorkflowEngine(workflow_path)
+    def test_real_workflow_routing(self, repo_workflow_config):
+        """Test routing with the workflow config the repository ships."""
+        engine = WorkflowEngine(repo_workflow_config)
 
         # Test common patterns
         pr_workflow = engine.get_workflow_for_event("pull_request", "opened")

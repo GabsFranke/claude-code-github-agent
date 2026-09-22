@@ -9,15 +9,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 @pytest.fixture
 def repo_workflow_config() -> Path:
-    """Path to the repository's workflow config.
+    """Path to the workflow config these tests may assert against.
 
-    ``workflows.yaml`` is gitignored operator config, so a fresh checkout
-    (CI included) only has the tracked ``workflows.example.yaml``. The
-    Dockerfiles fall back the same way. Tests that assert on the repo's own
-    config therefore read whichever of the two is present, so they exercise
-    the real file locally and the example in CI instead of erroring out.
+    Always the tracked ``workflows.example.yaml``, never ``workflows.yaml``.
+    The latter is gitignored operator config that changes whenever cost,
+    routing or trigger-chaining tradeoffs change, so an assertion on a value
+    read from it is not a test of anything: it breaks on an edit the operator
+    is entitled to make, and it is absent altogether on a fresh checkout.
+    The example is reviewed like source, so assertions against it stay
+    meaningful and give the same answer on every machine.
     """
-    configured = PROJECT_ROOT / "workflows.yaml"
-    if configured.exists():
-        return configured
     return PROJECT_ROOT / "workflows.example.yaml"

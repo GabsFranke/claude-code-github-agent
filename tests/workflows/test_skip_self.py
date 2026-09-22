@@ -107,16 +107,9 @@ class TestSkipSelfFeature:
         assert engine.workflows["skip-false-explicit"].skip_self is False
         assert engine.workflows["skip-default"].skip_self is True
 
-    def test_skip_self_with_real_workflows(self):
-        """Test skip_self with actual workflows.yaml from project."""
-        from pathlib import Path
-
-        workflow_path = Path(__file__).parent.parent.parent / "workflows.yaml"
-
-        if not workflow_path.exists():
-            pytest.skip("workflows.yaml not found in project root")
-
-        engine = WorkflowEngine(workflow_path)
+    def test_skip_self_with_real_workflows(self, repo_workflow_config):
+        """Test skip_self against the workflow config the repository ships."""
+        engine = WorkflowEngine(repo_workflow_config)
 
         # Test that real workflows have skip_self configured
         if "review-pr" in engine.workflows:
@@ -213,16 +206,9 @@ class TestSkipSelfFeature:
 class TestSkipSelfIntegration:
     """Integration tests for skip_self with webhook logic."""
 
-    def test_skip_self_scenario_bot_creates_pr(self):
+    def test_skip_self_scenario_bot_creates_pr(self, repo_workflow_config):
         """Test scenario: bot creates PR, should skip review."""
-        from pathlib import Path
-
-        workflow_path = Path(__file__).parent.parent.parent / "workflows.yaml"
-
-        if not workflow_path.exists():
-            pytest.skip("workflows.yaml not found")
-
-        engine = WorkflowEngine(workflow_path)
+        engine = WorkflowEngine(repo_workflow_config)
 
         # Simulate bot creating PR (bot is the actor)
         workflow_names = engine.get_workflow_for_event("pull_request", "opened")
@@ -234,16 +220,9 @@ class TestSkipSelfIntegration:
             # Bot's own PRs should be skipped by default
             assert should_skip is True
 
-    def test_skip_self_scenario_human_creates_pr(self):
+    def test_skip_self_scenario_human_creates_pr(self, repo_workflow_config):
         """Test scenario: human creates PR, should process."""
-        from pathlib import Path
-
-        workflow_path = Path(__file__).parent.parent.parent / "workflows.yaml"
-
-        if not workflow_path.exists():
-            pytest.skip("workflows.yaml not found")
-
-        engine = WorkflowEngine(workflow_path)
+        engine = WorkflowEngine(repo_workflow_config)
 
         # Simulate human creating PR (human is the actor)
         workflow_names = engine.get_workflow_for_event("pull_request", "opened")
@@ -255,16 +234,9 @@ class TestSkipSelfIntegration:
             # Human PRs should not be skipped
             assert should_skip is False
 
-    def test_skip_self_scenario_bot_uses_agent_command(self):
+    def test_skip_self_scenario_bot_uses_agent_command(self, repo_workflow_config):
         """Test scenario: bot uses /agent command, should skip."""
-        from pathlib import Path
-
-        workflow_path = Path(__file__).parent.parent.parent / "workflows.yaml"
-
-        if not workflow_path.exists():
-            pytest.skip("workflows.yaml not found")
-
-        engine = WorkflowEngine(workflow_path)
+        engine = WorkflowEngine(repo_workflow_config)
 
         # Simulate bot using /agent command (bot is the actor)
         workflow_names = engine.get_workflow_for_command("/agent")
@@ -283,16 +255,9 @@ class TestSkipSelfIntegration:
             assert isinstance(should_skip_bot, bool)
             assert should_skip_human is False  # Human commands always work
 
-    def test_skip_self_scenario_ci_failure_on_bot_pr(self):
+    def test_skip_self_scenario_ci_failure_on_bot_pr(self, repo_workflow_config):
         """Test scenario: CI fails on bot's PR."""
-        from pathlib import Path
-
-        workflow_path = Path(__file__).parent.parent.parent / "workflows.yaml"
-
-        if not workflow_path.exists():
-            pytest.skip("workflows.yaml not found")
-
-        engine = WorkflowEngine(workflow_path)
+        engine = WorkflowEngine(repo_workflow_config)
 
         # Simulate workflow_job.completed event triggered by bot
         workflow_names = engine.get_workflow_for_event("workflow_job", "completed")
@@ -304,16 +269,9 @@ class TestSkipSelfIntegration:
             # OMC fix-ci workflow has skip_self: false to allow trigger-chaining from triage
             assert should_skip is False
 
-    def test_skip_self_with_command_override(self):
+    def test_skip_self_with_command_override(self, repo_workflow_config):
         """Test that commands can override skip_self behavior."""
-        from pathlib import Path
-
-        workflow_path = Path(__file__).parent.parent.parent / "workflows.yaml"
-
-        if not workflow_path.exists():
-            pytest.skip("workflows.yaml not found")
-
-        engine = WorkflowEngine(workflow_path)
+        engine = WorkflowEngine(repo_workflow_config)
 
         # Commands like /fix-ci should work even on bot PRs
         # The webhook logic handles this by checking if it's a command
