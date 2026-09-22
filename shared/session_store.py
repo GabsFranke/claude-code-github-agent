@@ -568,8 +568,9 @@ class SessionStore:  # pylint: disable=too-many-public-methods
                         decoded = decode_redis_hash(data)
                         sessions.append(UnifiedSessionInfo.model_validate(decoded))
                     except Exception as e:
+                        key_str = key.decode() if isinstance(key, bytes) else key
                         logger.warning(
-                            f"[SessionStore] Skipping corrupt session at {key}: {e}"
+                            f"[SessionStore] Skipping corrupt session at {key_str}: {e}"
                         )
             if cursor == 0:
                 break
@@ -836,9 +837,10 @@ class SessionStore:  # pylint: disable=too-many-public-methods
                 # streaming_session_key("*") also matches lookup keys
                 # (session:stream:lookup:...); session hash keys have
                 # exactly one segment after "session:stream:".
-                if key.count(":") != 2:
+                key_str = key.decode() if isinstance(key, bytes) else key
+                if key_str.count(":") != 2:
                     continue
-                token = key.rsplit(":", 1)[-1]
+                token = key_str.rsplit(":", 1)[-1]
                 data = await cast(Awaitable[dict], self.redis.hgetall(key))
                 if not data:
                     continue
@@ -849,7 +851,7 @@ class SessionStore:  # pylint: disable=too-many-public-methods
                     info = UnifiedSessionInfo.model_validate(decoded)
                 except Exception as e:
                     logger.warning(
-                        f"[SessionStore] Skipping corrupt streaming session at {key}: {e}"
+                        f"[SessionStore] Skipping corrupt streaming session at {key_str}: {e}"
                     )
                     continue
                 if info.status != SessionStatus.running:
@@ -884,14 +886,11 @@ class SessionStore:  # pylint: disable=too-many-public-methods
         key = streaming_session_key(token)
         status = "error" if is_error else "completed"
         if session_id:
-            await cast(
-                Awaitable[int],
-                self.redis.hset(
-                    key, mapping={"status": status, "session_id": session_id}
-                ),
+            await self.redis.hset(
+                key, mapping={"status": status, "session_id": session_id}
             )
         else:
-            await cast(Awaitable[int], self.redis.hset(key, "status", status))
+            await self.redis.hset(key, "status", status)
         logger.info(f"[SessionStore] Streaming session {token[:8]}... -> {status}")
 
     async def set_running(
@@ -904,16 +903,13 @@ class SessionStore:  # pylint: disable=too-many-public-methods
         SPA can still load conversation history while the new run begins.
         """
         key = streaming_session_key(token)
-        await cast(
-            Awaitable[int],
-            self.redis.hset(
-                key,
-                mapping={
-                    "status": "running",
-                    "session_id": "",
-                    "last_run": _now_iso(),
-                },
-            ),
+        await self.redis.hset(
+            key,
+            mapping={
+                "status": "running",
+                "session_id": "",
+                "last_run": _now_iso(),
+            },
         )
         await self.redis.expire(key, ttl_seconds)
         logger.info(f"[SessionStore] Streaming session {token[:8]}... -> running")
@@ -964,20 +960,15 @@ class SessionStore:  # pylint: disable=too-many-public-methods
     async def increment_subscribers(self, token: str) -> int:
         """Atomically increment subscriber count. Returns new count."""
         key = subscribers_key(token)
-        count = await cast(
-            Awaitable[Any],
-            self.redis.eval(
-                _INCR_SUBSCRIBERS_LUA, 1, key, str(DEFAULT_SESSION_TTL_SECONDS)
-            ),
+        count = await self.redis.eval(
+            _INCR_SUBSCRIBERS_LUA, 1, key, str(DEFAULT_SESSION_TTL_SECONDS)
         )
         return int(count)
 
     async def decrement_subscribers(self, token: str) -> int:
         """Atomically decrement subscriber count (floor 0). Returns new count."""
         key = subscribers_key(token)
-        count = await cast(
-            Awaitable[Any], self.redis.eval(_DECR_SUBSCRIBERS_LUA, 1, key)
-        )
+        count = await self.redis.eval(_DECR_SUBSCRIBERS_LUA, 1, key)
         return int(count)
 
     async def has_subscribers(self, token: str) -> bool:
@@ -1014,7 +1005,7 @@ class SessionStore:  # pylint: disable=too-many-public-methods
         """Push a user message into the session inbox."""
         ibx = inbox_key(token)
         message_data = json.dumps({"type": "user_message", "content": content})
-        await cast(Awaitable[int], self.redis.rpush(ibx, message_data))
+        await self.redis.rpush(ibx, message_data)
         await self.redis.expire(ibx, DEFAULT_SESSION_TTL_SECONDS)
 
     async def pop_inbox_messages(self, token: str) -> list[str]:
@@ -1031,7 +1022,7 @@ class SessionStore:  # pylint: disable=too-many-public-methods
         return items
         """
         try:
-            raw_items = await cast(Awaitable[Any], self.redis.eval(lua_drain, 1, ibx))
+            raw_items = await self.redis.eval(lua_drain, 1, ibx)
         except Exception as e:
             logger.error(f"[SessionStore] Failed to drain inbox for {token}: {e}")
             raise
@@ -1054,19 +1045,19 @@ class SessionStore:  # pylint: disable=too-many-public-methods
     async def update_session_id(self, token: str, session_id: str) -> None:
         """Update the SDK session_id in the streaming session metadata."""
         key = streaming_session_key(token)
-        await cast(Awaitable[int], self.redis.hset(key, "session_id", session_id))
+        await self.redis.hset(key, "session_id", session_id)
         logger.debug(f"[SessionStore] Updated session_id for {token[:8]}...")
 
     async def update_transcript_path(self, token: str, path: str) -> None:
         """Update the transcript_path in the streaming session metadata."""
         key = streaming_session_key(token)
-        await cast(Awaitable[int], self.redis.hset(key, "transcript_path", path))
+        await self.redis.hset(key, "transcript_path", path)
         logger.debug(f"[SessionStore] Updated transcript_path for {token[:8]}...")
 
     async def increment_run_count(self, token: str) -> int:
         """Increment the run count. Returns new count."""
         key = streaming_session_key(token)
-        count = await cast(Awaitable[int], self.redis.hincrby(key, "run_count", 1))
+        count = await self.redis.hincrby(key, "run_count", 1)
         return int(count)
 
     # ------------------------------------------------------------------
