@@ -45,28 +45,59 @@ class TestExecuteSDK:
                 )
 
     @pytest.mark.asyncio
-    async def test_execute_sdk_timeout_raises_error(self, mock_options):
-        """Test that timeout raises SDKTimeoutError."""
-        with patch("shared.sdk_executor.ClaudeSDKClient") as mock_client_class:
+    async def test_execute_sdk_imposes_no_deadline(self, mock_options):
+        """A slow run is never cut short by a deadline of our own.
+
+        Agent work legitimately takes hours, so the bot must not decide on its
+        own schedule that time is up and kill a session still in progress.
+        SDK_EXECUTION_TIMEOUT is set deliberately low here: under the old
+        behaviour this run was killed, now the value is ignored entirely.
+        """
+        mock_text_block = MagicMock()
+        mock_text_block.text = "finished eventually"
+
+        mock_assistant_msg = MagicMock()
+        mock_assistant_msg.content = [mock_text_block]
+
+        mock_result_msg = MagicMock()
+        mock_result_msg.num_turns = 1
+        mock_result_msg.duration_ms = 1200
+        mock_result_msg.is_error = False
+
+        with (
+            patch("shared.sdk_executor.ClaudeSDKClient") as mock_client_class,
+            patch.dict("os.environ", {"SDK_EXECUTION_TIMEOUT": "1"}),
+        ):
             mock_client = MagicMock()
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
             mock_client.__aexit__ = AsyncMock(return_value=None)
             mock_client.query = AsyncMock()
 
-            # Create an async generator that hangs
-            async def hang_forever():
-                await asyncio.sleep(100)  # This will cause timeout
-                yield None
+            async def slow_messages():
+                # Outlives the configured value by a comfortable margin.
+                await asyncio.sleep(1.2)
+                yield mock_assistant_msg
+                yield mock_result_msg
 
-            mock_client.receive_messages.return_value = hang_forever()
+            mock_client.receive_messages.return_value = slow_messages()
             mock_client_class.return_value = mock_client
 
-            with pytest.raises(SDKTimeoutError, match="timed out"):
-                await execute_sdk(
-                    prompt="test",
-                    options=mock_options,
-                    timeout=1,  # 1 second timeout
-                )
+            result = await execute_sdk(prompt="test", options=mock_options)
+
+        assert result["response"] == "finished eventually"
+
+    @pytest.mark.asyncio
+    async def test_execute_sdk_rejects_timeout_argument(self, mock_options):
+        """The timeout knob is gone, not merely defaulted to something large.
+
+        Leaving it in place would let a caller reintroduce a forced stop.
+        """
+        with pytest.raises(TypeError):
+            await execute_sdk(
+                prompt="test",
+                options=mock_options,
+                timeout=1,
+            )
 
     @pytest.mark.asyncio
     async def test_execute_sdk_empty_response_raises_error(self, mock_options):
@@ -239,13 +270,13 @@ class TestExecuteSDKRetry:
 
     @pytest.mark.asyncio
     async def test_timeout_never_retried(self, mock_options):
-        """Test that SDKTimeoutError is not retried even with max_retries > 1.
+        """A timeout the SDK raised on its own is surfaced, not retried.
 
-        Retrying a timeout would just re-run the full session up to the same
-        wall — wasting up to (max_retries × timeout_seconds) before failing.
+        We no longer impose a deadline, but the SDK or its transport can still
+        give up. Retrying would replay the entire session from the start.
         """
         with patch("shared.sdk_executor._execute_sdk_once") as mock_execute:
-            mock_execute.side_effect = SDKTimeoutError("timed out after 1800s")
+            mock_execute.side_effect = SDKTimeoutError("SDK reported a timeout")
 
             with pytest.raises(SDKTimeoutError):
                 await execute_sdk(

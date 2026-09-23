@@ -1,12 +1,27 @@
 """Unit tests for JobQueue module."""
 
+import asyncio
 import json
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from shared.exceptions import QueueError
 from shared.job_queue import JobQueue
+
+
+def _pipeline_mock(expire_results):
+    """Build a Redis mock whose pipeline returns ``expire_results``.
+
+    ``pipeline()`` and the queued ``expire()`` calls are synchronous in
+    redis-py asyncio; only ``execute()`` is awaited.
+    """
+    pipe = MagicMock()
+    pipe.expire = MagicMock()
+    pipe.execute = AsyncMock(return_value=expire_results)
+    mock_redis = AsyncMock()
+    mock_redis.pipeline = MagicMock(return_value=pipe)
+    return mock_redis, pipe
 
 
 class TestJobQueueInitialization:
@@ -623,3 +638,140 @@ class TestJobQueueReclaimStaleJobs:
                 break
         else:
             pytest.fail("Expected setex call for job data restoration")
+
+
+class TestJobLease:
+    """Test the heartbeat that keeps a running job from being reclaimed.
+
+    Regression: reclaim_stale_jobs treats a missing job data key as a dead
+    worker, but nothing refreshed that key, so every job outliving
+    JOB_TTL_SECONDS was handed to a second worker mid-run.
+    """
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_refreshes_all_lease_keys(self):
+        """Heartbeat extends data, backup, status and timestamp TTLs."""
+        queue = JobQueue(redis_url="redis://localhost:6379", job_ttl=3600)
+        job_id = "550e8400-e29b-41d4-a716-446655440000"
+
+        mock_redis, pipe = _pipeline_mock([1, 1, 1, 1])
+        queue.redis = mock_redis
+
+        assert await queue.heartbeat_job(job_id) is True
+
+        expired = {c[0][0]: c[0][1] for c in pipe.expire.call_args_list}
+        assert expired == {
+            f"{queue.job_data_prefix}{job_id}": 3600,
+            f"{queue.job_data_prefix}{job_id}:backup": 7200,
+            f"{queue.job_status_prefix}{job_id}": 3600,
+            f"{queue.job_status_prefix}{job_id}:ts": 3600,
+        }
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_reports_lost_lease(self):
+        """EXPIRE returning 0 on the data key means the job was reclaimed."""
+        queue = JobQueue(redis_url="redis://localhost:6379")
+        mock_redis, _ = _pipeline_mock([0, 0, 0, 0])
+        queue.redis = mock_redis
+
+        assert (
+            await queue.heartbeat_job("550e8400-e29b-41d4-a716-446655440000") is False
+        )
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_survives_redis_error(self):
+        """A transient Redis error is retried, not read as a lost lease."""
+        queue = JobQueue(redis_url="redis://localhost:6379")
+
+        pipe = MagicMock()
+        pipe.expire = MagicMock()
+        pipe.execute = AsyncMock(side_effect=OSError("connection reset"))
+        mock_redis = AsyncMock()
+        mock_redis.pipeline = MagicMock(return_value=pipe)
+        queue.redis = mock_redis
+        queue._reconnect = AsyncMock()
+
+        assert await queue.heartbeat_job("550e8400-e29b-41d4-a716-446655440000") is True
+        queue._reconnect.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_lease_beats_while_job_runs(self):
+        """The lease keeps beating for a job that outlives its TTL."""
+        queue = JobQueue(redis_url="redis://localhost:6379")
+        job_id = "550e8400-e29b-41d4-a716-446655440000"
+
+        beats = 0
+
+        async def count_beat(_job_id):
+            nonlocal beats
+            beats += 1
+            return True
+
+        queue.heartbeat_job = count_beat
+
+        async with queue.job_lease(job_id, interval=0.01):
+            await asyncio.sleep(0.05)
+
+        assert beats >= 2
+
+    @pytest.mark.asyncio
+    async def test_lease_stops_beating_after_block(self):
+        """The heartbeat task is cancelled when the job finishes."""
+        queue = JobQueue(redis_url="redis://localhost:6379")
+        job_id = "550e8400-e29b-41d4-a716-446655440000"
+
+        beats = 0
+
+        async def count_beat(_job_id):
+            nonlocal beats
+            beats += 1
+            return True
+
+        queue.heartbeat_job = count_beat
+
+        async with queue.job_lease(job_id, interval=0.01):
+            await asyncio.sleep(0.05)
+
+        settled = beats
+        await asyncio.sleep(0.05)
+        assert beats == settled
+
+    @pytest.mark.asyncio
+    async def test_lease_released_on_exception(self):
+        """An exception inside the block still cancels the heartbeat."""
+        queue = JobQueue(redis_url="redis://localhost:6379")
+        job_id = "550e8400-e29b-41d4-a716-446655440000"
+
+        beats = 0
+
+        async def count_beat(_job_id):
+            nonlocal beats
+            beats += 1
+            return True
+
+        queue.heartbeat_job = count_beat
+
+        with pytest.raises(RuntimeError):
+            async with queue.job_lease(job_id, interval=0.01):
+                await asyncio.sleep(0.03)
+                raise RuntimeError("job blew up")
+
+        settled = beats
+        await asyncio.sleep(0.05)
+        assert beats == settled
+
+    @pytest.mark.asyncio
+    async def test_reclaim_skips_job_with_live_lease(self):
+        """A heartbeating job is never reclaimed."""
+        queue = JobQueue(redis_url="redis://localhost:6379")
+        job_id = "550e8400-e29b-41d4-a716-446655440000"
+
+        mock_redis = AsyncMock()
+        mock_redis.smembers = AsyncMock(return_value={job_id})
+        # Data key still present because the owner keeps refreshing it.
+        mock_redis.exists = AsyncMock(return_value=1)
+        mock_redis.rpush = AsyncMock()
+        queue.redis = mock_redis
+
+        assert await queue.reclaim_stale_jobs() == 0
+        mock_redis.rpush.assert_not_called()

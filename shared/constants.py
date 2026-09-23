@@ -7,6 +7,7 @@ Environment variable overrides:
     STREAMING_SESSION_TTL_HOURS  — default streaming session TTL (default: 720)
     HISTORY_MAX                  — max messages in Redis history list (default: 2000)
     JOB_TTL_SECONDS              — job data TTL in Redis (default: 3600)
+    JOB_HEARTBEAT_INTERVAL_SECONDS — job lease refresh interval (default: 60)
     MAX_AUTO_CONTINUES           — max auto-continue iterations (default: 10)
     WEBHOOK_DEDUP_TTL_SECONDS    — webhook delivery dedup window (default: 86400)
     MEMORY_WORKER_REPLICAS       — memory_worker instances to run (default: 0)
@@ -97,7 +98,18 @@ REVIVED_SESSION_TTL_HOURS = DEFAULT_SESSION_TTL_HOURS
 FALLBACK_CONVERSATION_TTL_HOURS = DEFAULT_SESSION_TTL_HOURS
 
 # Job data TTL in Redis (1 hour).
+#
+# This doubles as the job lease: a running worker refreshes the TTL every
+# JOB_HEARTBEAT_INTERVAL_SECONDS, so an expired key means the owner died
+# rather than "the job has been running a while". Without the refresh, any
+# job outliving the TTL is declared stale and handed to a second worker
+# while the first is still executing it.
 JOB_TTL_SECONDS = int(os.getenv("JOB_TTL_SECONDS", "3600"))
+
+# How often a worker refreshes the lease on the job it is executing.
+# Must stay well below JOB_TTL_SECONDS so a single missed beat (a slow
+# Redis round-trip, a reconnect) does not expire a healthy job.
+JOB_HEARTBEAT_INTERVAL_SECONDS = int(os.getenv("JOB_HEARTBEAT_INTERVAL_SECONDS", "60"))
 
 # Short-lived Redis history TTL (1 hour) — fallback before transcript is written.
 HISTORY_TTL_SECONDS = 3600

@@ -4,12 +4,15 @@ import asyncio
 import json
 import logging
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager, suppress
 from typing import Any
 
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from .constants import (
     JOB_DATA_PREFIX,
+    JOB_HEARTBEAT_INTERVAL_SECONDS,
     JOB_STATUS_PREFIX,
     JOB_TTL_SECONDS,
     PENDING_JOB_QUEUE,
@@ -273,6 +276,69 @@ class JobQueue:
             logger.error(f"Redis error getting next job: {e}", exc_info=True)
             await self._reconnect()
             return None
+
+    async def heartbeat_job(self, job_id: str) -> bool:
+        """Refresh the lease on a job this worker is currently executing.
+
+        ``reclaim_stale_jobs`` treats a missing job data key as proof that the
+        owning worker died. That is only true if a live worker keeps the key
+        alive, so every worker must call this periodically for the duration of
+        the job — see ``job_lease``.
+
+        Args:
+            job_id: Job identifier
+
+        Returns:
+            True if the lease is still held, False if the job data key is gone
+            (another worker has already reclaimed the job). Transient Redis
+            errors return True so a blip is retried rather than misread as a
+            lost lease.
+        """
+        await self._connect()
+
+        try:
+            pipe = self.redis.pipeline()
+            pipe.expire(f"{self.job_data_prefix}{job_id}", self.job_ttl)
+            pipe.expire(f"{self.job_data_prefix}{job_id}:backup", self.job_ttl * 2)
+            pipe.expire(f"{self.job_status_prefix}{job_id}", self.job_ttl)
+            pipe.expire(f"{self.job_status_prefix}{job_id}:ts", self.job_ttl)
+            results = await pipe.execute()
+        except (OSError, RedisTimeoutError) as e:
+            logger.warning(f"Heartbeat failed for job {job_id}, will retry: {e}")
+            await self._reconnect()
+            return True
+
+        # EXPIRE returns 0 when the key does not exist.
+        return bool(results[0])
+
+    async def _heartbeat_loop(self, job_id: str, interval: int) -> None:
+        """Refresh a job lease until cancelled."""
+        while True:
+            await asyncio.sleep(interval)
+            if not await self.heartbeat_job(job_id):
+                logger.error(
+                    f"Lost lease on job {job_id} — its data key expired and "
+                    f"another worker may have reclaimed it. This worker is "
+                    f"still executing the job."
+                )
+
+    @asynccontextmanager
+    async def job_lease(
+        self, job_id: str, interval: int = JOB_HEARTBEAT_INTERVAL_SECONDS
+    ) -> AsyncIterator[None]:
+        """Hold the lease on ``job_id`` for the duration of the block.
+
+        Args:
+            job_id: Job identifier
+            interval: Seconds between lease refreshes
+        """
+        task = asyncio.create_task(self._heartbeat_loop(job_id, interval))
+        try:
+            yield
+        finally:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
 
     async def complete_job(
         self, job_id: str, result: dict[str, Any], status: str = "success"

@@ -92,7 +92,6 @@ else:
 async def execute_sdk(
     prompt: str,
     options: ClaudeAgentOptions,
-    timeout: int | None = None,
     collect_text: bool = True,
     max_retries: int = 1,
     retry_base_delay: float = 5.0,
@@ -101,13 +100,18 @@ async def execute_sdk(
     """Execute Claude Agent SDK with given options.
 
     This is the single point of SDK execution for all workers (sandbox,
-    retrospector, memory). Provides consistent error handling, timeout
-    management, and observability.
+    retrospector, memory). Provides consistent error handling and
+    observability.
+
+    A run is never given a deadline of our own. Agent work legitimately takes
+    hours, there is no runtime we could call "too long" without guessing, and
+    killing a session mid-flight loses everything it had done. A timeout
+    raised by the SDK or the transport beneath it is a genuine failure and is
+    surfaced as one; we simply do not manufacture one.
 
     Args:
         prompt: User prompt to send to the agent
         options: Pre-built ClaudeAgentOptions instance
-        timeout: Optional timeout in seconds (default: from env or 1800)
         collect_text: Whether to collect text blocks into response (default: True)
         max_retries: Maximum number of retry attempts (default: 1 = no retry)
         retry_base_delay: Base delay in seconds for exponential backoff (default: 5.0)
@@ -125,7 +129,7 @@ async def execute_sdk(
             - messages: list (all messages received)
 
     Raises:
-        SDKTimeoutError: If execution exceeds timeout
+        SDKTimeoutError: If the SDK or its transport times out on its own
         SDKError: If SDK execution fails or returns empty response
     """
     last_error: Exception | None = None
@@ -135,16 +139,15 @@ async def execute_sdk(
             return await _execute_sdk_once(
                 prompt=prompt,
                 options=options,
-                timeout=timeout,
                 collect_text=collect_text,
                 streaming_bridge=streaming_bridge,
             )
         except SDKTimeoutError:
-            # Timeouts are not transient — retrying would just run the full
-            # session again and hit the same wall. Raise immediately.
+            # The SDK gave up on its own. Retrying would replay the whole
+            # session from the start, so surface it instead.
             logger.error(
-                f"SDK execution timed out (attempt {attempt + 1}/{max_retries}). "
-                "Not retrying — timeout is not a transient error."
+                f"SDK reported a timeout (attempt {attempt + 1}/{max_retries}). "
+                "Not retrying — replaying the session would repeat all work."
             )
             raise
         except Exception as e:
@@ -391,7 +394,6 @@ async def _stream_session(
 async def _execute_sdk_once(
     prompt: str,
     options,
-    timeout: int | None = None,
     collect_text: bool = True,
     streaming_bridge: SessionStreamBridge | None = None,
 ) -> dict:
@@ -400,7 +402,6 @@ async def _execute_sdk_once(
     Args:
         prompt: User prompt to send to the agent
         options: Pre-built ClaudeAgentOptions instance
-        timeout: Optional timeout in seconds (default: from env or 1800)
         collect_text: Whether to collect text blocks into response (default: True)
         streaming_bridge: Optional bridge to publish messages to Redis in real-time.
 
@@ -408,10 +409,9 @@ async def _execute_sdk_once(
         dict with response, num_turns, duration_ms, is_error, messages
 
     Raises:
-        SDKTimeoutError: If execution exceeds timeout
+        SDKTimeoutError: If the SDK or its transport times out on its own
         SDKError: If SDK execution fails or returns empty response
     """
-    sdk_timeout = timeout or int(os.getenv("SDK_EXECUTION_TIMEOUT", "1800"))
     response_parts: list[str] = []
     all_messages: list[Any] = []
     result_info: dict[str, Any] = {
@@ -439,19 +439,22 @@ async def _execute_sdk_once(
             logger.error(f"Cannot access working directory: {e}")
 
     try:
-        async with asyncio.timeout(sdk_timeout):
-            result_info = await _stream_session(
-                prompt=prompt,
-                options=options,
-                streaming_bridge=streaming_bridge,
-                collect_text=collect_text,
-                sdk_debug=sdk_debug,
-                response_parts=response_parts,
-                all_messages=all_messages,
-            )
+        # No asyncio.timeout wrapper: the run is allowed to take as long as it
+        # takes. See the note in execute_sdk's docstring.
+        result_info = await _stream_session(
+            prompt=prompt,
+            options=options,
+            streaming_bridge=streaming_bridge,
+            collect_text=collect_text,
+            sdk_debug=sdk_debug,
+            response_parts=response_parts,
+            all_messages=all_messages,
+        )
 
     except TimeoutError as e:
-        raise SDKTimeoutError(f"SDK execution timed out after {sdk_timeout}s") from e
+        # Not ours. Raised by the SDK or the transport under it, so it is a
+        # real failure rather than a deadline we chose to enforce.
+        raise SDKTimeoutError(f"SDK reported a timeout: {e}") from e
     except Exception as e:
         # MessageParseError from the SDK indicates incomplete streaming data
         # from the API — the connection was interrupted before the full

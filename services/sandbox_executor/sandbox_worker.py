@@ -303,8 +303,12 @@ async def main():
                     f"Processing job {job_id} for {job_data['repo']}#{job_data['issue_number']}"
                 )
 
-                # Process job
-                await process_job(job_queue, job_id, job_data)
+                # Hold the lease for the whole run. Without it the job data
+                # key expires after JOB_TTL_SECONDS and the next worker to
+                # sweep reclaims a job that is still executing here — both
+                # workers then drive the same shared worktree.
+                async with job_queue.job_lease(job_id):
+                    await process_job(job_queue, job_id, job_data)
 
             except (OSError, RedisTimeoutError) as e:
                 # Redis connection errors — force reconnection so the next

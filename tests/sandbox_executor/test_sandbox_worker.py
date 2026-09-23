@@ -2,9 +2,21 @@
 
 import asyncio
 import os
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+
+@asynccontextmanager
+async def _noop_lease(*args, **kwargs):
+    """Stand-in for JobQueue.job_lease on AsyncMock queues.
+
+    AsyncMock returns a coroutine for every attribute call, which is not an
+    async context manager, so the lease has to be replaced explicitly.
+    """
+    yield
+
 
 # Default BOT_USER_EMAIL contains [bot] which fails the safe-character regex
 # in process_job. Provide clean env vars so the validation passes.
@@ -248,6 +260,7 @@ class TestMainLoop:
 
         mock_queue.get_next_job = get_next_job_side_effect
         mock_queue.close = AsyncMock()
+        mock_queue.job_lease = _noop_lease
 
         with (
             patch(
@@ -270,6 +283,142 @@ class TestMainLoop:
             await main()
             mock_process.assert_called_once()
             mock_queue.close.assert_called_once()
+
+        shutdown_event.clear()
+
+    @pytest.mark.asyncio
+    async def test_job_runs_inside_lease(self):
+        """The lease is held for the whole job, not just around the pull.
+
+        Regression: JOB_TTL_SECONDS used to expire mid-run, so another
+        worker's reclaim sweep picked up a job that was still executing and
+        both drove the same shared worktree.
+        """
+        from services.sandbox_executor.sandbox_worker import main, shutdown_event
+
+        events = []
+        mock_queue = AsyncMock()
+        call_count = 0
+
+        async def get_next_job_side_effect(timeout=5):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return (
+                    "job1",
+                    {
+                        "prompt": "Test",
+                        "github_token": "token",
+                        "repo": "repo",
+                        "issue_number": 1,
+                        "user": "user",
+                    },
+                )
+            shutdown_event.set()
+            return None
+
+        @asynccontextmanager
+        async def tracking_lease(job_id):
+            events.append(f"lease_enter:{job_id}")
+            try:
+                yield
+            finally:
+                events.append(f"lease_exit:{job_id}")
+
+        async def tracking_process_job(queue, job_id, job_data):
+            events.append(f"process:{job_id}")
+
+        mock_queue.get_next_job = get_next_job_side_effect
+        mock_queue.close = AsyncMock()
+        mock_queue.job_lease = tracking_lease
+
+        with (
+            patch(
+                "services.sandbox_executor.sandbox_worker.JobQueue",
+                return_value=mock_queue,
+            ),
+            patch(
+                "services.sandbox_executor.sandbox_worker._orphan_cleanup_loop",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "services.sandbox_executor.sandbox_worker._process_cleanup_requests",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "services.sandbox_executor.sandbox_worker.process_job",
+                side_effect=tracking_process_job,
+            ),
+        ):
+            await main()
+
+        assert events == [
+            "lease_enter:job1",
+            "process:job1",
+            "lease_exit:job1",
+        ]
+
+        shutdown_event.clear()
+
+    @pytest.mark.asyncio
+    async def test_lease_released_when_job_raises(self):
+        """A failing job must still release its lease."""
+        from services.sandbox_executor.sandbox_worker import main, shutdown_event
+
+        events = []
+        mock_queue = AsyncMock()
+        call_count = 0
+
+        async def get_next_job_side_effect(timeout=5):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return (
+                    "job1",
+                    {
+                        "prompt": "Test",
+                        "github_token": "token",
+                        "repo": "repo",
+                        "issue_number": 1,
+                        "user": "user",
+                    },
+                )
+            shutdown_event.set()
+            return None
+
+        @asynccontextmanager
+        async def tracking_lease(job_id):
+            events.append("enter")
+            try:
+                yield
+            finally:
+                events.append("exit")
+
+        mock_queue.get_next_job = get_next_job_side_effect
+        mock_queue.close = AsyncMock()
+        mock_queue.job_lease = tracking_lease
+
+        with (
+            patch(
+                "services.sandbox_executor.sandbox_worker.JobQueue",
+                return_value=mock_queue,
+            ),
+            patch(
+                "services.sandbox_executor.sandbox_worker._orphan_cleanup_loop",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "services.sandbox_executor.sandbox_worker._process_cleanup_requests",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "services.sandbox_executor.sandbox_worker.process_job",
+                side_effect=RuntimeError("job blew up"),
+            ),
+        ):
+            await main()
+
+        assert events == ["enter", "exit"]
 
         shutdown_event.clear()
 
